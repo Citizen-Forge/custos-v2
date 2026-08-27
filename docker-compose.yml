@@ -26,9 +26,9 @@ services:
       LOCAL_MODEL_NAME: ${LOCAL_MODEL_NAME:-qwen2.5:7b-instruct}
       HARNESS_WORKSPACE: /workspace
     volumes:
-      - ./src:/app/src
-      - ./tests:/app/tests
-      - ./scripts:/app/scripts
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+      - ./scripts:/app/scripts:ro
       - ./workspace:/workspace
     command: ["python", "-m", "harness.worker"]
 
@@ -41,12 +41,36 @@ services:
       DATABASE_URL: postgresql://custos:custos@postgres:5432/custos_harness
       HARNESS_WORKSPACE: /workspace
     volumes:
-      - ./src:/app/src
-      - ./public:/app/public
+      - ./src:/app/src:ro
+      - ./public:/app/public:ro
       - ./workspace:/workspace
     ports:
       - "8000:8000"
     command: ["uvicorn", "harness.api:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  # PLAN.md Phase 7: the only service that ever mounts the Docker socket.
+  # Deliberately separate from harness/api -- if a worker container that
+  # runs arbitrary agent shell_exec calls also held this, an agent could
+  # just `docker run` its way out regardless of every other control.
+  # Invoked ad-hoc (docker compose run), like meta-agent/product-owner --
+  # not a long-running service, and it has no workspace mount at all,
+  # since it never touches agent ticket work.
+  sandbox-runner:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://custos:custos@postgres:5432/custos_harness
+      SANDBOX_SCRATCH_CONTAINER_PATH: /sandbox-scratch
+      SANDBOX_SCRATCH_HOST_PATH: ${PWD}/sandbox-scratch
+    volumes:
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+      - ./sandbox-scratch:/sandbox-scratch
+      - /var/run/docker.sock:/var/run/docker.sock
+    profiles:
+      - sandbox
 
 volumes:
   pgdata:

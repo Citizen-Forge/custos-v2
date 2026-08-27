@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import beads, outcomes, prompts, seats
+from . import beads, outcomes, prompts, seats, tool_proposals
 
 
 class RespondBody(BaseModel):
@@ -56,6 +56,12 @@ def _prompt_conn():
 def _seats_conn():
     conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
     seats.init_table(conn)
+    return conn
+
+
+def _tool_proposals_conn():
+    conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+    tool_proposals.init_table(conn)
     return conn
 
 
@@ -134,6 +140,41 @@ def list_seats():
         for s in roster:
             s["outcomes"] = outcomes.summary(s["seat_id"])
         return roster
+    finally:
+        conn.close()
+
+
+@app.get("/tool-proposals")
+def list_tool_proposals(status: str = "reviewed"):
+    """Default to `reviewed`: what a human should look at (sandboxed +
+    a reviewer verdict attached, still short of active either way) --
+    PLAN.md Phase 7's promotion gate."""
+    conn = _tool_proposals_conn()
+    try:
+        return tool_proposals.list_by_status(conn, status)
+    finally:
+        conn.close()
+
+
+@app.post("/tool-proposals/{proposal_id}/approve")
+def approve_tool_proposal(proposal_id: int):
+    """The one and only way a tool proposal ever becomes active --
+    deliberately no auto-approval path exists anywhere in this codebase,
+    unlike seat creation."""
+    conn = _tool_proposals_conn()
+    try:
+        tool_proposals.approve(conn, proposal_id)
+        return tool_proposals.get(conn, proposal_id)
+    finally:
+        conn.close()
+
+
+@app.post("/tool-proposals/{proposal_id}/reject")
+def reject_tool_proposal(proposal_id: int, body: DismissBody = DismissBody()):
+    conn = _tool_proposals_conn()
+    try:
+        tool_proposals.reject(conn, proposal_id, body.reason)
+        return tool_proposals.get(conn, proposal_id)
     finally:
         conn.close()
 

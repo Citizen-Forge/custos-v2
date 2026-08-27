@@ -42,18 +42,16 @@ that actually does the work.
   mechanism, and it was explicitly tasked with bootstrapping the initial
   engineer/QA/etc. roster itself, not handed a pre-built one. See Phase
   4's "Emergent seat system" for what's built.
-- **Not yet decided: an "overwatch" agent that can modify the harness's
-  own code** (write new tools, extend its own capabilities), raised
-  2026-08-27. Directionally consistent with the architecture already
-  being built — the meta-agent creating new seats *is* a small-scale
-  version of "the system grows itself" — but categorically riskier: a new
-  seat is just a name + a prompt (low blast radius, bad performance is
-  visible in outcomes.py), while a new *tool* is generated code that runs
-  with the same trust level as `shell_exec`/`write_file`, inside the same
-  sandbox everything else's permission gating protects. That needs its
-  own gating design (stricter than prompt pending/approve, most likely)
-  before any of it gets built — noted here so it doesn't get scope-crept
-  into ordinary seat/prompt work by accident. See "Open questions."
+- **Overwatch — an agent that can modify the harness's own code**
+  (write new tools, extend its own capabilities), raised 2026-08-27,
+  containment design resolved the same day: containment and review are
+  complementary, not alternatives — a hardened, sandboxed container is
+  what holds even if a review step is fooled; a separate reviewer agent
+  is what catches a bad change before it's ever granted that sandbox's
+  privileges. Categorically riskier than seat creation (generated code at
+  `shell_exec`-level trust, not just a name + a prompt), so nothing a
+  tool proposal produces ever auto-activates, unlike a new seat's first
+  prompt. See Phase 7 for the full design and what's actually built.
 
 ## The harness decision
 
@@ -449,6 +447,133 @@ a freshly wiped Postgres volume after a full test run.
   — today those are env vars (`.env.example`), no admin UI to edit them
   live like v1 had.
 
+### Phase 7 — Overwatch: self-modifying code — containment substrate built, judgment not started
+
+Design conversation, resolved: containment and review are complementary,
+not alternatives. A hardened sandbox is what holds even if the review
+step is fooled; review is what catches a bad change before it's ever
+granted that sandbox's privileges. A VM is a harder boundary than a
+container but real operational overhead for a threat model that's "an
+LLM's generated code does something unexpected," not a targeted
+host-escape attempt — containers first, VM held in reserve if containers
+prove insufficient in practice.
+
+**A concrete, *already-existing* gap this surfaced, not a future
+overwatch-only concern:** `docker-compose.yml`'s `harness`/`api` services
+bind-mount `./src:/app/src` read-write for live dev, and `shell_exec`'s
+static-safe fast path allows bare `cat`/`head`/`tail`/`grep`/`find` with
+no path restriction at all. `cat /app/src/harness/worker.py` matches
+verb=`cat`, no shell operators — statically safe, never reaches the
+classifier. Combined with the read-write mount, any ticket on *any*
+existing seat can already read the harness's own real source today, and
+a classifier-approved write (nothing stops `python3 -c "..." >
+/app/src/harness/worker.py`) can already modify it. Not hypothetical —
+verified by re-reading `tools.py`/`permissions.py`'s actual logic, not
+assumed. Fixed in this phase (see below) rather than deferred alongside
+the harder overwatch design.
+
+**Three zones:**
+
+1. **Control plane** (trusted, human/system-only writes) — `src/harness/*`,
+   `docker-compose.yml`, `.env`, schema definitions, `public/*`. No
+   agent, including overwatch, ever writes here directly.
+2. **Sandbox** (untrusted, where candidate code actually runs) — a
+   maximally-restricted, ephemeral, single-use container: `--network
+   none` (no exfiltration, no downloading a second payload),
+   `--read-only` root filesystem, `--cap-drop=ALL`,
+   `--security-opt=no-new-privileges`, non-root user, hard memory/pids/
+   CPU limits, a wall-clock timeout, and critically — **no Docker socket,
+   no secrets, no bind mount of real harness source.** The candidate
+   code's own declared capability needs (network? filesystem writes
+   beyond scratch?) don't grant anything; they're just what the reviewer
+   checks the code against.
+3. **Promotion gate** — nothing sandboxed code produced runs with any
+   real privilege until: a fast deterministic pre-filter passes, a
+   *separate* reviewer agent evaluates it, and a human explicitly
+   approves. Unlike `create_specialist_seat` (active immediately — a new
+   name+prompt is low blast radius), a new *tool* never auto-activates:
+   it's generated code that would run at `shell_exec`-level trust once
+   promoted, categorically higher stakes, so this stays in the strict
+   "autonomy off by default" bucket.
+
+**Who holds the Docker socket, and why that's the one privilege boundary
+that matters most:** spawning the sandbox needs `/var/run/docker.sock` —
+effectively root-on-host. That access must live *only* in trusted,
+non-agent-editable orchestration code, in a dedicated service separate
+from anything that runs agent-invoked `shell_exec`. If a worker
+container that executes arbitrary agent shell commands also held the
+Docker socket, an agent could just `docker run` its way out regardless
+of every other control described here. The sandbox-runner is therefore
+its own service, callable only by trusted harness code (never directly
+by a tool an agent can invoke), and ordinary seat workers never get
+Docker socket access, now or later.
+
+**Static pre-filter, honestly scoped:** an AST scan for a fast, cheap
+reject of obviously-mismatched code (e.g., a tool declaring "no network"
+that imports `socket`) is worth having as a fail-fast before spending a
+reviewer-agent call — but it's not a security boundary. Pattern-matching
+against dangerous code is well-known to be bypassable (`getattr`
+indirection, string-built imports, etc.), and existing tools like
+`shell_exec` legitimately need OS access, so a blanket denylist doesn't
+even make sense for "any new tool." The sandbox's OS-level restrictions
+are the actual boundary; the scanner is triage, not defense.
+
+**Built and live-verified (2026-08-27), no LLM needed to prove any of
+this — containment is a Docker/OS property, not a model judgment call:**
+
+- **The existing gap, fixed**: `docker-compose.yml`'s `harness`/`api`
+  source mounts changed to `:ro`. Verified with the *exact* code path
+  `shell_exec` uses (`subprocess.run(..., shell=True, cwd=WORKSPACE_ROOT)`)
+  attempting to overwrite `worker.py` from inside the container — now
+  fails with "Read-only file system," confirmed the real host file was
+  never touched. Full test suite (48 tests at the time) still passed —
+  Python's bytecode-cache-write skips silently on a read-only source
+  tree, not a hard failure, so this cost nothing.
+- **`src/harness/sandbox.py`**: spawns a maximally-restricted sibling
+  container via `docker run` over the host's Docker socket
+  (Docker-out-of-Docker, not a nested daemon). Every hardening property
+  verified live, first manually then via `tests/test_sandbox.py`'s 5
+  tests: no environment variables visible by default (a deliberate test
+  that *forwarded* a fake `DATABASE_URL` confirmed env vars only leak if
+  this code is changed to explicitly pass them — it never does), writes
+  to the read-only mount blocked, network calls blocked
+  (`--network none`), a fork-bomb attempt capped at the configured
+  `--pids-limit` instead of exhausting real resources, and a timeout
+  both returns `timed_out=True` *and* confirmed-live that the sibling
+  container doesn't keep running after its client process is killed
+  (explicit `docker kill` by name in the timeout handler — killing the
+  `docker run` CLI alone does not stop a container on the daemon side).
+- **Docker-out-of-Docker path gotcha, hit and solved**: a `docker run -v
+  HOST:CONTAINER` issued from inside `sandbox-runner` is resolved by the
+  *host* daemon against the *host* filesystem, not sandbox-runner's own
+  container filesystem — a path only mounted into sandbox-runner isn't
+  enough. Solved with `SANDBOX_SCRATCH_HOST_PATH=${PWD}/sandbox-scratch`
+  (docker-compose's own `${PWD}` interpolation), the one absolute host
+  path `sandbox.py` is allowed to know, used only for wiring the mount.
+- **A dedicated `sandbox-runner` docker-compose service** (`profiles:
+  [sandbox]`, not started by default) is the *only* place
+  `/var/run/docker.sock` is ever mounted — never `harness`/`api`, exactly
+  the boundary described above. Invoked ad-hoc
+  (`docker compose --profile sandbox run --rm sandbox-runner ...`), same
+  pattern as `run_meta_agent.py`/`run_product_owner.py`.
+- **`src/harness/tool_proposals.py`**: propose → sandboxed → reviewed →
+  approved/rejected, mirrors `prompts.py`'s shape but — unlike seat
+  creation — *nothing* auto-activates at any stage; `approve` is the only
+  path to `active`, always a distinct human-triggered call. `GET
+  /tool-proposals?status=`, `POST /tool-proposals/{id}/approve`, `POST
+  /tool-proposals/{id}/reject`, and a dashboard section (Approve/Reject
+  buttons, source + sandbox output behind a `<details>`) — proven live
+  over real HTTP: proposed → sandboxed → reviewed → approved, watched the
+  status transition through the real API each step.
+
+**Not built yet, deliberately:** the overwatch agent's own judgment (what
+tool is needed, whether to propose one) and the reviewer agent's actual
+judgment (right now `record_review` just records whatever verdict it's
+given — no model forms that verdict yet) — same reasoning as the
+product-owner and meta-agent: judgment needs a real model to be
+meaningful, and this session builds substrate ahead of judgment, not the
+other way round.
+
 ## Open questions (not blocking Phase 1, but will block later phases)
 
 - **Hardware specs** — VRAM/GPU on the Unraid box, once you're back. Drives
@@ -469,18 +594,20 @@ a freshly wiped Postgres volume after a full test run.
 - ~~How does work get assigned to specific named agents rather than one
   generalist~~ — resolved 2026-08-27, product-owner assigns emergently
   (see "Decisions locked in" and Phase 4's "Emergent seat system").
-- **"Overwatch" agent that can modify the harness's own code** — raised
-  2026-08-27, not designed. What gating does a tool-writing (not just
-  seat/prompt-writing) agent need before this is safe to build? Needs its
-  own conversation, not a decision made in passing while building seats.
+- ~~"Overwatch" agent that can modify the harness's own code — what
+  gating does it need~~ — designed and the containment substrate built
+  2026-08-27 (Phase 7: sandbox + proposal/review-gate). Still open: the
+  overwatch agent's and the reviewer agent's actual judgment, which needs
+  a real model.
 
 ## Immediate next step
 
-Phases 1–6 have working substrate, live-tested against real Postgres +
-real Beads with scripted models standing in for the still-unreachable
-Ollama. What's left either needs a real model to validate (permission
-classifier behavior, product-owner/meta-agent judgment quality, the
-"before/after did a prompt change help" signal) or further design input
-(the overwatch/self-modifying-code question above). Next concrete step
-once hardware is reachable again: run the manual kill/resume demo and a
-real triage session end-to-end with an actual local model, not a script.
+Phases 1–7 have working substrate, live-tested against real Postgres +
+real Beads (+ real Docker, for Phase 7's sandbox) with scripted models
+standing in for the still-unreachable Ollama. What's left either needs a
+real model to validate (permission classifier behavior, product-owner/
+meta-agent/overwatch/reviewer judgment quality, the "before/after did a
+prompt change help" signal) or further design input (none currently
+open). Next concrete step once hardware is reachable again: run the
+manual kill/resume demo and a real triage session end-to-end with an
+actual local model, not a script.

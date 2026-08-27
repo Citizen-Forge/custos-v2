@@ -8,12 +8,13 @@ first, this README is just "how to run what exists so far."
 
 ## Status
 
-Phases 1–6 have working substrate, live-tested against real Postgres +
-real Beads (scripted fake models standing in for the still-unreachable
-Ollama). Work is now assigned to specific named agent **seats** by a
-product-owner agent, not claimed generically by one worker — see
-PLAN.md's Phase 4 "Emergent seat system" and the "Seats" section below.
-See PLAN.md for the detailed status of each phase.
+Phases 1–7 have working substrate, live-tested against real Postgres +
+real Beads (+ real Docker, for the Phase 7 sandbox) with scripted fake
+models standing in for the still-unreachable Ollama. Work is now assigned
+to specific named agent **seats** by a product-owner agent, not claimed
+generically by one worker — see PLAN.md's Phase 4 "Emergent seat system"
+and the "Seats" section below. See PLAN.md for the detailed status of
+each phase.
 
 Work items live in [Beads](https://github.com/gastownhall/beads) (`bd`),
 not a bespoke queue table — see PLAN.md's "Decisions locked in" for why.
@@ -97,6 +98,31 @@ docker compose run --rm harness python scripts/run_meta_agent.py
 curl localhost:8000/prompts/pending
 curl -X POST localhost:8000/prompts/worker/<version>/approve
 ```
+
+## Sandbox (Phase 7 — overwatch's containment boundary)
+
+```bash
+# needs the Docker socket -- deliberately never mounted in harness/api,
+# see PLAN.md Phase 7 for why. A separate profile so it isn't started by
+# `docker compose up` by accident.
+docker compose --profile sandbox run --rm sandbox-runner pytest tests/test_sandbox.py -v
+```
+
+Proves the actual containment properties live against real Docker: no
+secrets visible by default, the mount is read-only, `--network none`
+blocks network access, `--pids-limit` caps a fork-bomb attempt, and a
+timed-out sandbox container is actually killed, not left running. The
+regular test suite (`docker compose run --rm harness pytest`) skips these
+automatically — no Docker socket there, which is itself the boundary
+this phase is about, not an oversight.
+
+`src/harness/tool_proposals.py` + `GET/POST /tool-proposals` + the
+dashboard's Tool Proposals section carry a candidate tool from
+`propose` → `sandboxed` → `reviewed` → `approved`/`rejected`. Nothing
+auto-activates at any stage, unlike a new seat's first prompt — `approve`
+is always a distinct, human-triggered call. The overwatch agent that
+would actually propose tools, and the reviewer agent that would actually
+review them, aren't built yet — this is the substrate they'll need.
 
 ## Proving the durability guarantee manually (with a real model)
 

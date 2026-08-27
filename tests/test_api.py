@@ -11,6 +11,7 @@ import psycopg
 from fastapi.testclient import TestClient
 
 from harness import beads, prompts
+from harness import tool_proposals as tp
 from harness.api import app
 
 client = TestClient(app)
@@ -132,6 +133,34 @@ def test_seats_endpoint_includes_outcomes():
     entry = next(s for s in roster if s["seat_id"] == seat_id)
     assert entry["specialty"] == "test specialty"
     assert "closed" in entry["outcomes"]
+
+
+def test_tool_proposals_endpoint_filters_by_status_and_approve_works():
+    conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+    tp.init_table(conn)
+    tool_name = f"api-test-tool-{uuid.uuid4().hex[:8]}"
+    proposal_id = tp.propose(conn, tool_name, "code", "no network", proposed_by="overwatch")
+    tp.record_review(conn, proposal_id, "allow", "looks fine")
+
+    reviewed = client.get("/tool-proposals", params={"status": "reviewed"}).json()
+    assert any(p["id"] == proposal_id for p in reviewed)
+
+    response = client.post(f"/tool-proposals/{proposal_id}/approve")
+    assert response.status_code == 200
+    assert response.json()["status"] == "approved"
+    assert tp.get(conn, proposal_id)["approved_at"] is not None
+
+
+def test_tool_proposals_reject_endpoint():
+    conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+    tp.init_table(conn)
+    tool_name = f"api-test-tool-{uuid.uuid4().hex[:8]}"
+    proposal_id = tp.propose(conn, tool_name, "os.system('rm -rf /')", "claims none", proposed_by="overwatch")
+
+    response = client.post(f"/tool-proposals/{proposal_id}/reject", json={"reason": "dangerous"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "rejected"
 
 
 def test_outcomes_endpoint():
