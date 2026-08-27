@@ -271,12 +271,45 @@ across a prompt change to see if it actually helped — since there's no
 real usage yet to compare, and any such comparison is only meaningful
 once real tickets are actually being worked by a real model.
 
-### Phase 6 — UI/product surface
-- Rebuild roadmap/board/steering concepts on the new backend.
-- New surfaces the old UI didn't need: queue depth + estimated wait per
-  ticket (important once inference is genuinely slow — the UI has to set
-  expectations instead of looking stuck), agent seats/personalities/history,
-  DevOps-equivalent tab for model/provider config and concurrency limits.
+### Phase 6 — UI/product surface — API layer done, live-tested
+**`src/harness/api.py`**: a minimal FastAPI surface over everything built
+so far — `GET /tickets?status=ready|in_progress|human` (the same
+human-flag filtering logic worker.py's orphan-resume relies on, now
+reusable), `GET /tickets/{id}`, `GET /prompts/pending`, `POST
+/prompts/{role}/{version}/approve`, `GET /outcomes/{actor}`. Read-mostly
+by design — the one write endpoint (approve) is deliberately narrow,
+matching v1's "autonomy off by default" posture. No auth yet, same as
+where the rest of this project already stood (flagged, not hidden — see
+the module docstring). Proven two ways: `tests/test_api.py` via FastAPI's
+in-process TestClient, and live over real HTTP (`docker compose up api`,
+curled on `localhost:8000`) — both against real Postgres/Beads.
+
+**Real bug found and fixed while building this**: every `pytest` run all
+session had been creating real tickets in the persistent `workspace/`
+directory — the same one the actual worker/api services use — because
+Beads auto-discovers its `.beads` directory from `HARNESS_WORKSPACE`,
+which was the same for tests and "production" alike. Fixed with
+`tests/conftest.py` pointing `HARNESS_WORKSPACE` at a fresh temp
+directory per test session. First attempt used `os.environ.setdefault`,
+which silently did nothing because docker-compose already sets
+`HARNESS_WORKSPACE` as a container env var before Python starts —
+caught by actually checking `workspace/` after the "fix," not just
+trusting the tests still passed.
+
+**Still open (genuinely a UI, not backend, task):**
+- Rebuild roadmap/board/steering concepts as an actual frontend. v1's
+  precedent (`public/admin.html` — vanilla HTML/JS, no build step) is the
+  natural default to follow rather than introducing a new frontend
+  framework decision.
+- Queue depth + estimated wait per ticket in the UI — matters once
+  inference is genuinely slow, so the UI sets expectations instead of
+  looking stuck. The API doesn't expose an ETA yet (nothing to estimate
+  from without real inference timing data).
+- Agent seats/personalities/history surface — blocked on Phase 4's
+  still-open cross-ticket seat identity.
+- DevOps-equivalent tab for model/provider config and concurrency limits
+  — today those are env vars (`.env.example`), no admin UI to edit them
+  live like v1 had.
 
 ## Open questions (not blocking Phase 1, but will block later phases)
 

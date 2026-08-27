@@ -8,14 +8,17 @@ first, this README is just "how to run what exists so far."
 
 ## Status
 
-Phase 1 in progress: durable harness core (LangGraph + Postgres
-checkpointer + a minimal work queue), no routing/personality/meta-agent
-yet.
+Phases 1–5 built and live-tested against real Postgres + real Beads
+(scripted fake models standing in for the still-unreachable Ollama).
+Phase 6 has a working API layer; the actual frontend isn't started. See
+PLAN.md for the detailed status of each phase.
 
 Work items live in [Beads](https://github.com/gastownhall/beads) (`bd`),
 not a bespoke queue table — see PLAN.md's "Decisions locked in" for why.
 `bd`'s own `.beads/` data directory lives in the mounted `workspace/`
-folder alongside whatever files an agent's tool calls touch.
+folder alongside whatever files an agent's tool calls touch. Test runs
+use their own isolated temp workspace (`tests/conftest.py`), not this
+one — found and fixed a real bug where they didn't, early on.
 
 ## Running it (Docker only — no local Python install, see
 [[feedback_docker-for-runtimes]])
@@ -38,6 +41,31 @@ point at a different OpenAI-compatible endpoint. No local model is
 reachable in this environment yet, so end-to-end LLM behavior is still
 unverified against a real model — `tests/test_worker_resume.py` proves the
 durability mechanism itself using a scripted fake model instead.
+
+## API
+
+```bash
+docker compose up -d api   # http://localhost:8000, brings up postgres too
+curl localhost:8000/tickets?status=ready
+curl localhost:8000/prompts/pending
+curl -X POST localhost:8000/prompts/worker/1/approve
+```
+
+Read-mostly by design (PLAN.md Phase 6) — no auth yet, not exposed beyond
+the docker-compose network today.
+
+## Meta-agent
+
+`scripts/run_meta_agent.py` reviews a role's recent outcomes (sourced from
+Beads' own audit trail) and proposes a system-prompt revision — queued as
+*pending*, never applied automatically:
+
+```bash
+docker compose run --rm harness python scripts/run_meta_agent.py
+# then review + apply via the API:
+curl localhost:8000/prompts/pending
+curl -X POST localhost:8000/prompts/worker/<version>/approve
+```
 
 ## Proving the durability guarantee manually (with a real model)
 

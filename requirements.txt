@@ -2,4 +2,7 @@ langgraph>=0.6
 langgraph-checkpoint-postgres
 langchain-openai
 psycopg[binary]
+fastapi
+uvicorn[standard]
+httpx
 pytest

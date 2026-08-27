@@ -32,5 +32,20 @@ services:
       - ./workspace:/workspace
     command: ["python", "-m", "harness.worker"]
 
+  api:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://custos:custos@postgres:5432/custos_harness
+      HARNESS_WORKSPACE: /workspace
+    volumes:
+      - ./src:/app/src
+      - ./workspace:/workspace
+    ports:
+      - "8000:8000"
+    command: ["uvicorn", "harness.api:app", "--host", "0.0.0.0", "--port", "8000"]
+
 volumes:
   pgdata:
