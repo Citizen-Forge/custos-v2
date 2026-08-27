@@ -47,16 +47,24 @@ Arguments: {tool_args}
 """
 
 
-def build_classifier(provider_cfg: ProviderConfig):
-    """Returns a `(tool_name, tool_args) -> Verdict` callable bound to a model,
-    for use as `graph.build_graph_from_model`'s `classify` argument."""
-    model = build_chat_model(provider_cfg)
+def build_classifier_from_model(model):
+    """Returns a `(tool_name, tool_args) -> Verdict` callable bound to any
+    object with an `.invoke(prompt) -> response.content` interface -- a
+    plain ChatOpenAI, a `routing.RoutedModel`, or a test fake. For use as
+    `graph.build_graph_from_model`'s `classify` argument."""
 
     def classify(tool_name: str, tool_args: dict) -> Verdict:
         response = model.invoke(PROMPT.format(tool_name=tool_name, tool_args=tool_args))
         return parse_verdict(response.content)
 
     return classify
+
+
+def build_classifier(provider_cfg: ProviderConfig):
+    """Convenience wrapper for the common single-provider case (no
+    routing/fallback) -- see build_classifier_from_model for the general
+    form."""
+    return build_classifier_from_model(build_chat_model(provider_cfg))
 
 
 def parse_verdict(raw: str) -> Verdict:

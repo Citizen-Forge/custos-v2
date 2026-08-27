@@ -1,7 +1,8 @@
 """
-Phase 1 queue worker -- polls Beads (not a bespoke queue table) for work,
-advances the matching LangGraph thread one `invoke` cycle, and closes the
-Beads issue on success.
+Phase 1/2 queue worker -- polls Beads (not a bespoke queue table) for
+work, advances the matching LangGraph thread one `invoke` cycle through a
+routed model (routing.py: fallback chain + per-provider concurrency cap),
+and closes the Beads issue on success.
 
 Two Beads queries drive polling, because `bd ready` only ever returns
 `status=open` issues (see beads.py's module docstring) -- an issue left
@@ -12,12 +13,22 @@ Two Beads queries drive polling, because `bd ready` only ever returns
    only writer). Multiple concurrent workers reclaiming the same
    `in_progress` issue is a real race this doesn't guard against yet --
    needed before Phase 2 concurrency trusts this with more than one
-   worker, same caveat as queue_store.py's stale-lease logic had before
-   this rewrite replaced it.
+   worker process (note: this is about multiple *worker processes*, a
+   separate concern from routing.py's per-provider concurrency cap, which
+   already works today).
 2. `beads.ready()` otherwise -- new work, claimed before starting.
 
 The Beads issue id doubles as the LangGraph `thread_id`, so "resume this
 ticket" and "resume this graph thread" are the same operation.
+
+A `RoutedModel` failure (routing.AllProvidersCoolingDown, or every
+provider in a chain erroring out) is just another exception here -- it
+falls into the same `except Exception` as any other failure, leaving the
+ticket `in_progress` for the next poll to retry. That's deliberate: no
+special retry/backoff logic is needed at the worker level, because
+routing.py's cooldown *is* the backoff, and the worker's poll loop *is*
+the retry -- reusing the exact mechanism that already makes crash-resume
+safe.
 """
 
 import logging
@@ -27,9 +38,11 @@ import time
 from langgraph.checkpoint.postgres import PostgresSaver
 
 from . import beads
-from .classifier import build_classifier
-from .graph import build_graph
+from .classifier import build_classifier_from_model
+from .graph import build_graph_from_model
 from .providers import ProviderConfig
+from .routing import ConcurrencyGate, RoutedModel, RoutingTable
+from .tools import ALL_TOOLS
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker")
@@ -37,26 +50,41 @@ log = logging.getLogger("worker")
 POLL_INTERVAL_SECONDS = int(os.environ.get("WORKER_POLL_INTERVAL", "5"))
 
 
-def _provider_from_env() -> ProviderConfig:
-    return ProviderConfig(
-        name="local",
-        base_url=os.environ.get("LOCAL_MODEL_BASE_URL", "http://host.docker.internal:11434/v1"),
-        model=os.environ.get("LOCAL_MODEL_NAME", "qwen2.5:7b-instruct"),
-        api_key=os.environ.get("LOCAL_MODEL_API_KEY"),
-    )
+def _chain_from_env(env_prefix: str, default_base_url: str, default_model: str) -> list[ProviderConfig]:
+    chain = [
+        ProviderConfig(
+            name=f"{env_prefix.lower()}-primary",
+            base_url=os.environ.get(f"{env_prefix}_MODEL_BASE_URL", default_base_url),
+            model=os.environ.get(f"{env_prefix}_MODEL_NAME", default_model),
+            api_key=os.environ.get(f"{env_prefix}_MODEL_API_KEY"),
+        )
+    ]
+    fallback_base_url = os.environ.get(f"{env_prefix}_FALLBACK_BASE_URL")
+    if fallback_base_url:
+        chain.append(
+            ProviderConfig(
+                name=f"{env_prefix.lower()}-fallback",
+                base_url=fallback_base_url,
+                model=os.environ.get(f"{env_prefix}_FALLBACK_MODEL_NAME", "gemini-2.0-flash"),
+                api_key=os.environ.get(f"{env_prefix}_FALLBACK_API_KEY"),
+                concurrency_limit=int(os.environ.get(f"{env_prefix}_FALLBACK_CONCURRENCY", "4")),
+            )
+        )
+    return chain
 
 
-def _classifier_provider_from_env() -> ProviderConfig:
-    # v1 used a distinct, smaller/faster model for classification
-    # (qwen2.5:3b-instruct) than for general work. Phase 2's routing is
-    # where that split gets a real config surface; for now this defaults
-    # to the same endpoint as the main model but is already a separate
-    # env var so pointing it elsewhere doesn't require code changes.
-    return ProviderConfig(
-        name="classifier",
-        base_url=os.environ.get("CLASSIFIER_MODEL_BASE_URL", os.environ.get("LOCAL_MODEL_BASE_URL", "http://host.docker.internal:11434/v1")),
-        model=os.environ.get("CLASSIFIER_MODEL_NAME", os.environ.get("LOCAL_MODEL_NAME", "qwen2.5:7b-instruct")),
-        api_key=os.environ.get("CLASSIFIER_MODEL_API_KEY", os.environ.get("LOCAL_MODEL_API_KEY")),
+def _routing_table_from_env() -> RoutingTable:
+    # CLASSIFIER_* defaults to whatever LOCAL_* resolves to, so an
+    # unconfigured classifier chain quietly uses the same model as the
+    # worker rather than failing -- override CLASSIFIER_MODEL_* to point
+    # it at a smaller/faster model (v1 used qwen2.5:3b-instruct for this).
+    local_base_url = os.environ.get("LOCAL_MODEL_BASE_URL", "http://host.docker.internal:11434/v1")
+    local_model = os.environ.get("LOCAL_MODEL_NAME", "qwen2.5:7b-instruct")
+    return RoutingTable(
+        {
+            "worker": _chain_from_env("LOCAL", local_base_url, local_model),
+            "classifier": _chain_from_env("CLASSIFIER", local_base_url, local_model),
+        }
     )
 
 
@@ -72,19 +100,18 @@ def _next_ticket() -> dict | None:
     return beads.claim(candidates[0]["id"])
 
 
-def run(conn_string: str, provider_cfg: ProviderConfig, classifier_provider_cfg: ProviderConfig) -> None:
+def run(conn_string: str, routing: RoutingTable, gate: ConcurrencyGate | None = None) -> None:
     beads.ensure_initialized()
-    classifier = build_classifier(classifier_provider_cfg)
+    gate = gate or ConcurrencyGate()
+
+    worker_model = RoutedModel("worker", routing, gate, tools=ALL_TOOLS)
+    classify = build_classifier_from_model(RoutedModel("classifier", routing, gate))
 
     with PostgresSaver.from_conn_string(conn_string) as checkpointer:
         checkpointer.setup()
-        graph = build_graph(provider_cfg, checkpointer, classifier=classifier)
+        graph = build_graph_from_model(worker_model, checkpointer, classify=classify)
 
-        log.info(
-            "worker started against %s, polling every %ss",
-            provider_cfg.model,
-            POLL_INTERVAL_SECONDS,
-        )
+        log.info("worker started, polling every %ss", POLL_INTERVAL_SECONDS)
         while True:
             issue = _next_ticket()
             if issue is None:
@@ -118,4 +145,4 @@ def run(conn_string: str, provider_cfg: ProviderConfig, classifier_provider_cfg:
 
 if __name__ == "__main__":
     conn_string = os.environ["DATABASE_URL"]
-    run(conn_string, _provider_from_env(), _classifier_provider_from_env())
+    run(conn_string, _routing_table_from_env())

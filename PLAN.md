@@ -117,15 +117,41 @@ else gets built on top of it.
   in this environment to prove it end-to-end with real inference; that's
   still open, see below).
 
-### Phase 2 — Multi-provider routing + fallback
-- Priority/fallback chains on top of the Phase 1 provider abstraction
-  (local model → free-tier frontier → paid frontier), reusing v1's
-  cooldown-on-rate-limit logic.
-- Role-to-model pinning (product-owner → frontier, workers → local),
-  reusing v1's `custos:<provider>/<model>` alias pattern.
-- Concurrency caps enforced *per backend*, not globally — local endpoints
-  default to 1 concurrent call, frontier calls aren't artificially limited
-  by the same constraint.
+### Phase 2 — Multi-provider routing + fallback — done, live-tested
+`src/harness/routing.py`: an ordered fallback chain per open-ended `role`
+string (not hardcoded to worker/classifier — Phase 4's per-seat pinning
+reuses the same mechanism, since "pinning" a role to one model is just a
+chain of length 1). `RoutedModel` resolves a provider fresh on *every*
+call rather than binding once, so cooldown/failover state observed
+between calls actually changes behavior. Concurrency caps are enforced
+*per provider name*, not per role — two roles sharing a local backend
+genuinely share its hardware limit — via one `threading.Semaphore` per
+provider in `ConcurrencyGate`.
+
+Deliberately does not "fail open" when a whole chain is cooling down —
+`RoutedModel.invoke` raises `AllProvidersCoolingDown`, which the worker's
+existing `except Exception` handling already treats like any other
+failure: leave the ticket `in_progress`, retry on the next poll.
+Retrying immediately against a provider that's cooling down *because*
+it's rate-limited would defeat the point of the cooldown — this reuses
+the exact mechanism that already makes crash-resume safe (PLAN.md's
+Phase 1) as the retry/backoff strategy too, rather than building a
+second one.
+
+Wired into `worker.py`: `LOCAL_MODEL_*` env vars are the worker role's
+primary provider, `LOCAL_FALLBACK_*` (optional) appends a second chain
+entry — e.g. a free-tier frontier model via its OpenAI-compatible
+endpoint, matching the "free-tier frontier as fallback" requirement.
+`CLASSIFIER_*` follows the same pattern for the permission-gate role and
+defaults to the worker role's settings if unset. See `.env.example`.
+
+Proven live in `tests/test_routing.py` with fake providers/models, not
+just constructed: fallback actually happens on failure, a cooled-down
+provider is actually skipped and actually retried once its cooldown
+expires, an all-cooling-down chain actually raises, and — the one that
+matters most for local-model hardware — the concurrency gate actually
+serializes two calls to `concurrency_limit=1` rather than letting them
+run concurrently (proven by timing, not just by the semaphore existing).
 
 ### Phase 3 — Context & cross-session memory
 - Small context windows mean blind truncation is out. Evaluate **adopting
