@@ -167,18 +167,39 @@ run concurrently (proven by timing, not just by the semaphore existing).
   keep as a third loose-recall layer, or drop. Open question, not resolved
   here.
 
-### Phase 4 — Agent personality & welfare behaviors
-- Per-agent persistent identity ("seat"): chosen name/pronouns, accumulated
-  history distinct from a single session.
-- Handoff notes: an agent writes a closure note before a session ends
-  (voluntarily, or forced by a bounded workday); the next session for that
-  seat receives it as context.
-- Refuse-work as a real, first-class response type — surfaced in the UI,
-  not silently retried by the orchestrator.
-- Bounded workdays: configurable turn/session budget per seat before a
-  forced handoff.
-- "Laurels": user feedback on completed work gets surfaced back to the
-  specific seat that did it and stored as part of that seat's history.
+### Phase 4 — Agent personality & welfare behaviors — partially done
+**Built and live-tested (`tests/test_welfare_behaviors.py`), scoped to one
+ticket/thread, not yet a cross-ticket "seat":**
+- **Refuse-work**: a `refuse_ticket(reason)` tool (uses LangGraph's
+  `InjectedState` so the model can't fabricate a ticket id — it's read
+  from graph state) that labels the real Beads issue `human` and records
+  why, via `beads.flag_for_human`. Not silently retried: `worker.py`'s
+  `_next_ticket` explicitly excludes human-flagged issues from its
+  orphan-resume poll (verified live this needed fixing — without the
+  filter a refused ticket would get reclaimed and re-refused every poll
+  forever), and the completion path checks `is_flagged_for_human` before
+  deciding whether to `bd close` at all.
+- **Handoff notes**: a `write_handoff_note(note)` tool, same
+  `InjectedState` pattern, appends to the real issue via Beads'
+  `--append-notes` (verified live it accumulates, doesn't overwrite).
+- **Bounded workdays**: `turn_budget` on `build_graph_from_model` — a
+  *soft* nudge, not a hard cutoff. Hitting the budget appends one message
+  asking the model to call `write_handoff_note` and stop; the model can
+  ignore it and keep going. Deliberate, matching the welfare essay's
+  actual mechanics rather than force-terminating a thread mid-turn.
+
+**Still open, needs a real cross-ticket concept before it makes sense:**
+- Persistent identity ("seat") that spans *multiple* tickets — chosen
+  name/pronouns, accumulated history. Today's handoff notes live on the
+  Beads issue itself (one ticket = one thread = one place for notes to
+  live), which is a reasonable v1 but isn't yet "the same agent worked
+  this seat across 40 different tickets and remembers all of them."
+  Self-chosen names specifically need a real model call to do properly
+  (asking the model to pick), not just an assigned default — worth doing
+  once a model is reachable rather than faking it now.
+- "Laurels": user feedback on completed work surfaced back to a seat.
+  Blocked on there being a UI (Phase 6) to actually collect that feedback
+  from a human in the first place.
 
 ### Phase 5 — Meta-agent (agent-improves-agents)
 - Frontier-backed agent reads completed work + outcomes (including Laurels)

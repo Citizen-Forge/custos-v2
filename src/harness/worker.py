@@ -89,7 +89,11 @@ def _routing_table_from_env() -> RoutingTable:
 
 
 def _next_ticket() -> dict | None:
-    orphaned = beads.in_progress()
+    # Human-flagged issues (Phase 4's refuse_ticket tool) are excluded
+    # here on purpose: they're `in_progress` but intentionally parked, not
+    # orphaned by a crash. Without this filter a refused ticket would get
+    # reclaimed and re-run (and presumably re-refused) every poll forever.
+    orphaned = [i for i in beads.in_progress() if not beads.is_flagged_for_human(i)]
     if orphaned:
         return orphaned[0]
 
@@ -100,7 +104,12 @@ def _next_ticket() -> dict | None:
     return beads.claim(candidates[0]["id"])
 
 
-def run(conn_string: str, routing: RoutingTable, gate: ConcurrencyGate | None = None) -> None:
+def run(
+    conn_string: str,
+    routing: RoutingTable,
+    gate: ConcurrencyGate | None = None,
+    turn_budget: int | None = None,
+) -> None:
     beads.ensure_initialized()
     gate = gate or ConcurrencyGate()
 
@@ -109,7 +118,7 @@ def run(conn_string: str, routing: RoutingTable, gate: ConcurrencyGate | None = 
 
     with PostgresSaver.from_conn_string(conn_string) as checkpointer:
         checkpointer.setup()
-        graph = build_graph_from_model(worker_model, checkpointer, classify=classify)
+        graph = build_graph_from_model(worker_model, checkpointer, classify=classify, turn_budget=turn_budget)
 
         log.info("worker started, polling every %ss", POLL_INTERVAL_SECONDS)
         while True:
@@ -134,15 +143,24 @@ def run(conn_string: str, routing: RoutingTable, gate: ConcurrencyGate | None = 
                         f"{issue.get('description', '')}"
                     )
                     graph.invoke(
-                        {"messages": [("user", prompt)], "ticket_id": thread_id},
+                        {"messages": [("user", prompt)], "ticket_id": thread_id, "turn_count": 0},
                         config,
                     )
-                beads.close(thread_id)
-                log.info("thread %s complete", thread_id)
+
+                # refuse_ticket already flagged+annotated the issue -- don't
+                # also close it, that would erase the "needs a human" signal
+                # bd human list depends on.
+                current = beads.show(thread_id)
+                if beads.is_flagged_for_human(current):
+                    log.info("thread %s refused, left for human review", thread_id)
+                else:
+                    beads.close(thread_id)
+                    log.info("thread %s complete", thread_id)
             except Exception:
                 log.exception("thread %s failed, left in_progress for retry", thread_id)
 
 
 if __name__ == "__main__":
     conn_string = os.environ["DATABASE_URL"]
-    run(conn_string, _routing_table_from_env())
+    turn_budget_env = os.environ.get("TURN_BUDGET")
+    run(conn_string, _routing_table_from_env(), turn_budget=int(turn_budget_env) if turn_budget_env else None)

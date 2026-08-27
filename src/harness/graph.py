@@ -22,9 +22,16 @@ ones get "a sibling call in this batch was denied" instead of running).
 Matches v1's own noted limitation that local-model tool-call translation
 only reliably handles one call per turn anyway -- not a real loss of
 capability today, worth revisiting if that changes.
+
+`turn_budget` (Phase 4) is a *soft* nudge, not a hard cutoff: reaching it
+appends one message asking the model to wrap up via `write_handoff_note`
+and stop, rather than truncating the loop or force-terminating the
+thread. Deliberate, per the welfare-essay behaviors PLAN.md commits to --
+an agent that's over budget still gets to finish its thought and hand off
+on its own terms rather than being cut off mid-turn.
 """
 
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.graph import END, StateGraph, START
 from langgraph.prebuilt import ToolNode, tools_condition
 
@@ -32,8 +39,13 @@ from .providers import ProviderConfig, build_chat_model
 from .state import HarnessState
 from .tools import ALL_TOOLS
 
+HANDOFF_NUDGE = (
+    "You've reached your turn budget for this session. Please wrap up: call "
+    "write_handoff_note with what's done and what's left, then stop."
+)
 
-def build_graph_from_model(model, checkpointer, classify=None, interrupt_after=None):
+
+def build_graph_from_model(model, checkpointer, classify=None, interrupt_after=None, turn_budget=None):
     """Build the graph from an already-tool-bound model. Split out from
     `build_graph` so tests can pass a fake model without a real provider.
 
@@ -43,12 +55,24 @@ def build_graph_from_model(model, checkpointer, classify=None, interrupt_after=N
     (tests/test_graph.py, tests/test_worker_resume.py) so they don't need a
     classifier model.
 
+    `turn_budget` is an optional int: when the running turn count hits it
+    exactly, one HANDOFF_NUDGE message is appended before that call (once,
+    not repeated on every subsequent turn). `None` disables it entirely --
+    existing tests that don't pass it are unaffected.
+
     `interrupt_after` is test-only (see tests/test_worker_resume.py) --
     production never sets it.
     """
 
     def call_model(state: HarnessState):
-        return {"messages": [model.invoke(state["messages"])]}
+        turn_count = state.get("turn_count", 0) + 1
+        messages = state["messages"]
+        extra = []
+        if turn_budget is not None and turn_count == turn_budget:
+            nudge = HumanMessage(content=HANDOFF_NUDGE)
+            messages = messages + [nudge]
+            extra = [nudge]
+        return {"messages": [*extra, model.invoke(messages)], "turn_count": turn_count}
 
     def permission_gate(state: HarnessState):
         if classify is None:
@@ -90,6 +114,6 @@ def build_graph_from_model(model, checkpointer, classify=None, interrupt_after=N
     return builder.compile(checkpointer=checkpointer, interrupt_after=interrupt_after)
 
 
-def build_graph(provider_cfg: ProviderConfig, checkpointer, classifier=None):
+def build_graph(provider_cfg: ProviderConfig, checkpointer, classifier=None, turn_budget=None):
     model = build_chat_model(provider_cfg).bind_tools(ALL_TOOLS)
-    return build_graph_from_model(model, checkpointer, classify=classifier)
+    return build_graph_from_model(model, checkpointer, classify=classifier, turn_budget=turn_budget)

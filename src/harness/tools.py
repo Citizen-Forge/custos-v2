@@ -1,12 +1,16 @@
-"""Minimal Phase 1 tool set: shell exec, file read/write, and Beads memory."""
+"""Minimal Phase 1 tool set: shell exec, file read/write, Beads memory,
+and Phase 4's refuse-work / handoff-note primitives."""
 
 import os
 import subprocess
+from typing import Annotated
 
 from langchain_core.tools import tool
+from langgraph.prebuilt import InjectedState
 
 from . import beads, permissions
 from .config import WORKSPACE_ROOT
+from .state import HarnessState
 
 
 @tool
@@ -57,4 +61,26 @@ def remember_fact(text: str) -> str:
     return f"remembered: {result.get('key', text)}"
 
 
-ALL_TOOLS = [shell_exec, read_file, write_file, remember_fact]
+@tool
+def refuse_ticket(reason: str, state: Annotated[HarnessState, InjectedState]) -> str:
+    """Decline this ticket instead of attempting it -- for work that's
+    outside scope, ambiguous enough to need a human call, or that seems
+    like it shouldn't be done at all. Flags the ticket for human review
+    (`bd human list`) rather than silently retrying or force-completing
+    it. Use this instead of guessing when you're genuinely unsure whether
+    the work should happen."""
+    beads.flag_for_human(state["ticket_id"], reason)
+    return f"flagged for human review: {reason}"
+
+
+@tool
+def write_handoff_note(note: str, state: Annotated[HarnessState, InjectedState]) -> str:
+    """Record a note for whoever (or whatever future session of yourself)
+    picks this ticket up next -- what's done, what's left, anything
+    non-obvious. Call this before wrapping up, especially if asked to stop
+    partway through rather than finishing."""
+    beads.append_note(state["ticket_id"], note)
+    return "handoff note recorded"
+
+
+ALL_TOOLS = [shell_exec, read_file, write_file, remember_fact, refuse_ticket, write_handoff_note]

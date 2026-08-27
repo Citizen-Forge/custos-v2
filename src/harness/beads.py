@@ -65,6 +65,10 @@ def claim(issue_id: str, actor: str = DEFAULT_ACTOR) -> dict:
     return json.loads(_run(["update", issue_id, "--claim"], actor=actor))[0]
 
 
+def show(issue_id: str) -> dict:
+    return json.loads(_run(["show", issue_id]))[0]
+
+
 def close(issue_id: str, reason: str | None = None) -> dict:
     args = ["close", issue_id]
     if reason:
@@ -78,6 +82,29 @@ def create(title: str, description: str, issue_type: str = "task") -> dict:
 
 def remember(text: str) -> dict:
     return json.loads(_run(["remember", text]))
+
+
+def flag_for_human(issue_id: str, reason: str, actor: str = DEFAULT_ACTOR) -> dict:
+    """Phase 4 refuse-work primitive: labels the issue `human` (verified
+    live -- `bd human list` picks up anything with this label) and records
+    why, instead of silently retrying or force-completing. Deliberately
+    does NOT close or otherwise change status -- worker.py must exclude
+    human-labeled issues from its own resume polling, or a refused ticket
+    would just get reclaimed and re-refused forever."""
+    return json.loads(
+        _run(["update", issue_id, "--add-label", "human", "--notes", reason], actor=actor)
+    )[0]
+
+
+def is_flagged_for_human(issue: dict) -> bool:
+    return "human" in (issue.get("labels") or [])
+
+
+def append_note(issue_id: str, text: str, actor: str = DEFAULT_ACTOR) -> dict:
+    """Verified live: --append-notes accumulates (newline-joined) rather
+    than overwriting, unlike the plain --notes flag that flag_for_human
+    uses for its one-shot reason."""
+    return json.loads(_run(["update", issue_id, "--append-notes", text], actor=actor))[0]
 
 
 def prime() -> str:
