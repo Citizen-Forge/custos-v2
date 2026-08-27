@@ -89,11 +89,18 @@ else gets built on top of it.
   left `in_progress` never reappears there, so the worker also polls
   `bd list --status=in_progress` for orphaned work. Verified live against
   bd v1.2.2, not assumed (see `src/harness/beads.py`'s docstring).
-- Tool layer: file read/write, shell exec — minimal set. Port the
-  classifier-based permission gating concept from v1
-  (`claude-gateway/src/server` PreToolUse hook) into a direct tool-call
-  boundary inside the graph, since there's no more Claude Code hook
-  contract to hang off of.
+- Tool layer: file read/write, shell exec, `bd remember`. Permission gating
+  is a real graph node (`permission_gate` in `graph.py`), not the Claude
+  Code PreToolUse hook v1 used (no hook contract to hang off of anymore) —
+  it sits between the model and real tool execution, classifies via an LLM
+  (`classifier.py`, ported concept from v1's `permissionClassifier` task),
+  and a denial never reaches the tool: the gate synthesizes a "permission
+  denied" ToolMessage and routes straight back to the model. Also fixed a
+  real gap found while building this: `read_file` had *no* workspace-escape
+  check at all until now (`permissions.check_within_workspace`, shared with
+  `write_file` — a hard invariant, not classifier-overridable). Proven live
+  with a scripted fake classifier (`tests/test_permission_gate.py`): a
+  denied call verifiably never executes, an allowed one verifiably does.
 - Provider abstraction: port `OpenAICompatibleProvider` from v1
   (`claude-gateway/src/providers/openai-compatible.ts` equivalent) — it's
   already provider-agnostic plumbing (Ollama, OpenAI-compat, Gemini compat
@@ -104,7 +111,11 @@ else gets built on top of it.
   are back in scope.
 - **Exit criteria:** hand the harness one ticket, kill the process mid-task,
   restart it, watch it resume and complete without re-doing finished work,
-  using a local model through the queue.
+  using a local model through the queue. **Met for the durability mechanism
+  itself** — `tests/test_worker_resume.py` proves it live against real
+  Postgres + real Beads with a scripted model (no local model was reachable
+  in this environment to prove it end-to-end with real inference; that's
+  still open, see below).
 
 ### Phase 2 — Multi-provider routing + fallback
 - Priority/fallback chains on top of the Phase 1 provider abstraction
@@ -165,6 +176,13 @@ else gets built on top of it.
   actual model choice (Qwen3.8-27B class vs. smaller), quantization, and
   real context length. Phase 1 doesn't need this — it targets whatever runs
   on Docker Desktop today.
+- **Real-model verification** — no Ollama/local model was reachable in this
+  dev environment, so everything above (durability, permission gate) is
+  proven against real Postgres/Beads but a *scripted fake* model, not real
+  inference. First thing to run once a model is reachable again: the manual
+  kill/resume demo in README.md with an actual model, plus a real run of
+  the permission classifier to see how it behaves against genuine tool-call
+  arguments rather than a scripted verdict.
 - **Beads: adopt real Beads vs. build a lighter homegrown version** —
   leaning adopt (Phase 3), not yet confirmed.
 - **Qdrant's fate** relative to Beads (Phase 3).

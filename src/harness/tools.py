@@ -12,7 +12,12 @@ from .config import WORKSPACE_ROOT
 @tool
 def shell_exec(command: str) -> str:
     """Run a shell command in the workspace and return its combined output."""
-    permissions.check_shell(command)
+    # Gating happens one layer up, in graph.py's permission_gate node --
+    # every call reaches here already allowed (statically-safe fast path
+    # or classifier-approved). No redundant check here: unlike file paths,
+    # there's no workspace-independent hard invariant for shell commands
+    # to enforce, and re-gating on the same static safe-set would silently
+    # break any command the classifier explicitly approved.
     result = subprocess.run(
         command,
         shell=True,
@@ -27,6 +32,7 @@ def shell_exec(command: str) -> str:
 @tool
 def read_file(path: str) -> str:
     """Read a text file's contents, relative to the workspace root."""
+    permissions.check_within_workspace(path, WORKSPACE_ROOT)
     resolved = os.path.abspath(os.path.join(WORKSPACE_ROOT, path))
     with open(resolved, "r", encoding="utf-8") as f:
         return f.read()
@@ -35,7 +41,7 @@ def read_file(path: str) -> str:
 @tool
 def write_file(path: str, content: str) -> str:
     """Write text content to a file, relative to the workspace root."""
-    permissions.check_write(path, WORKSPACE_ROOT)
+    permissions.check_within_workspace(path, WORKSPACE_ROOT)
     resolved = os.path.abspath(os.path.join(WORKSPACE_ROOT, path))
     os.makedirs(os.path.dirname(resolved), exist_ok=True)
     with open(resolved, "w", encoding="utf-8") as f:

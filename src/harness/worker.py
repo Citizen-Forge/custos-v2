@@ -27,6 +27,7 @@ import time
 from langgraph.checkpoint.postgres import PostgresSaver
 
 from . import beads
+from .classifier import build_classifier
 from .graph import build_graph
 from .providers import ProviderConfig
 
@@ -45,6 +46,20 @@ def _provider_from_env() -> ProviderConfig:
     )
 
 
+def _classifier_provider_from_env() -> ProviderConfig:
+    # v1 used a distinct, smaller/faster model for classification
+    # (qwen2.5:3b-instruct) than for general work. Phase 2's routing is
+    # where that split gets a real config surface; for now this defaults
+    # to the same endpoint as the main model but is already a separate
+    # env var so pointing it elsewhere doesn't require code changes.
+    return ProviderConfig(
+        name="classifier",
+        base_url=os.environ.get("CLASSIFIER_MODEL_BASE_URL", os.environ.get("LOCAL_MODEL_BASE_URL", "http://host.docker.internal:11434/v1")),
+        model=os.environ.get("CLASSIFIER_MODEL_NAME", os.environ.get("LOCAL_MODEL_NAME", "qwen2.5:7b-instruct")),
+        api_key=os.environ.get("CLASSIFIER_MODEL_API_KEY", os.environ.get("LOCAL_MODEL_API_KEY")),
+    )
+
+
 def _next_ticket() -> dict | None:
     orphaned = beads.in_progress()
     if orphaned:
@@ -57,12 +72,13 @@ def _next_ticket() -> dict | None:
     return beads.claim(candidates[0]["id"])
 
 
-def run(conn_string: str, provider_cfg: ProviderConfig) -> None:
+def run(conn_string: str, provider_cfg: ProviderConfig, classifier_provider_cfg: ProviderConfig) -> None:
     beads.ensure_initialized()
+    classifier = build_classifier(classifier_provider_cfg)
 
     with PostgresSaver.from_conn_string(conn_string) as checkpointer:
         checkpointer.setup()
-        graph = build_graph(provider_cfg, checkpointer)
+        graph = build_graph(provider_cfg, checkpointer, classifier=classifier)
 
         log.info(
             "worker started against %s, polling every %ss",
@@ -102,4 +118,4 @@ def run(conn_string: str, provider_cfg: ProviderConfig) -> None:
 
 if __name__ == "__main__":
     conn_string = os.environ["DATABASE_URL"]
-    run(conn_string, _provider_from_env())
+    run(conn_string, _provider_from_env(), _classifier_provider_from_env())

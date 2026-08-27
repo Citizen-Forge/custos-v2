@@ -1,16 +1,23 @@
 """
-Tool-call permission gate — Phase 1 skeleton only.
+Tool-call permission layer. Two deliberately separate concerns:
 
-This is a static per-verb allow-list, which is exactly the design Custos
-v1 started with *and later flagged as a real safety bug*: a coarse verb
-whitelist let `rm foo.txt` silently whitelist `rm -rf /` forever after.
-v1's fix was a live LLM classifier on every call (see
-claude-gateway/src/server's PreToolUse hook, `permissionClassifier` task).
+1. `is_statically_safe` -- a fast-path allow-list so obviously-safe calls
+   skip the LLM classifier (classifier.py) entirely. Mirrors v1's design:
+   always-allow read-only tools and a small static set of
+   argument-invariant-safe verbs. This is a *speed* optimization, not the
+   security boundary -- anything not statically safe falls through to the
+   classifier, which is the real gate (wired in graph.py's permission_gate
+   node).
 
-Porting that classifier is a deliberate fast-follow, not done here — Phase
-1's exit criteria is proving the durable queue/resume loop, not permission
-correctness. Do not point real filesystem/shell access at this as-is.
+2. `check_within_workspace` -- a hard invariant enforced *inside* the file
+   tools themselves (tools.py), independent of whatever the static
+   allow-list or classifier decided. This one is not classifier-
+   overridable on purpose: workspace containment is a sandbox boundary,
+   not a task-semantic judgment call, so it doesn't belong to the same
+   layer that's reasoning about intent.
 """
+
+import os
 
 
 class PermissionDenied(Exception):
@@ -21,18 +28,28 @@ _SAFE_READONLY_VERBS = {"ls", "cat", "pwd", "head", "tail", "grep", "find"}
 _SHELL_OPERATORS = ("|", ">", ">>", "&&", ";", "`", "$(")
 
 
-def check_shell(command: str) -> None:
+def _is_safe_shell(command: str) -> bool:
     stripped = command.strip()
     verb = stripped.split()[0] if stripped else ""
     has_operator = any(op in command for op in _SHELL_OPERATORS)
-    if verb in _SAFE_READONLY_VERBS and not has_operator:
-        return
-    raise PermissionDenied(f"shell command requires explicit approval: {command!r}")
+    return verb in _SAFE_READONLY_VERBS and not has_operator
 
 
-def check_write(path: str, workspace_root: str) -> None:
-    import os
-
+def _is_within_workspace(path: str, workspace_root: str) -> bool:
     resolved = os.path.abspath(os.path.join(workspace_root, path))
-    if not resolved.startswith(os.path.abspath(workspace_root)):
-        raise PermissionDenied(f"write path escapes workspace: {path!r}")
+    return resolved.startswith(os.path.abspath(workspace_root))
+
+
+def is_statically_safe(tool_name: str, tool_args: dict, workspace_root: str) -> bool:
+    if tool_name == "remember_fact":
+        return True  # additive, non-destructive by construction
+    if tool_name == "read_file":
+        return _is_within_workspace(tool_args.get("path", ""), workspace_root)
+    if tool_name == "shell_exec":
+        return _is_safe_shell(tool_args.get("command", ""))
+    return False  # write_file and anything unrecognized always gets classified
+
+
+def check_within_workspace(path: str, workspace_root: str) -> None:
+    if not _is_within_workspace(path, workspace_root):
+        raise PermissionDenied(f"path escapes workspace: {path!r}")
