@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: custos
+      POSTGRES_PASSWORD: custos
+      POSTGRES_DB: custos_harness
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U custos"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  harness:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://custos:custos@postgres:5432/custos_harness
+      LOCAL_MODEL_BASE_URL: ${LOCAL_MODEL_BASE_URL:-http://host.docker.internal:11434/v1}
+      LOCAL_MODEL_NAME: ${LOCAL_MODEL_NAME:-qwen2.5:7b-instruct}
+      HARNESS_WORKSPACE: /workspace
+    volumes:
+      - ./src:/app/src
+      - ./tests:/app/tests
+      - ./scripts:/app/scripts
+      - ./workspace:/workspace
+    command: ["python", "-m", "harness.worker"]
+
+volumes:
+  pgdata:

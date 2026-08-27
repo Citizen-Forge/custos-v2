@@ -1,0 +1,5 @@
+langgraph>=0.6
+langgraph-checkpoint-postgres
+langchain-openai
+psycopg[binary]
+pytest
