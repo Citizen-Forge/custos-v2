@@ -40,6 +40,22 @@ def _cfg(name, concurrency_limit=1):
     return ProviderConfig(name=name, base_url="http://fake", model="fake", concurrency_limit=concurrency_limit)
 
 
+def test_dynamic_seat_falls_back_to_default_role_chain():
+    worker_chain = [_cfg("shared-local")]
+    routing = RoutingTable({"worker": worker_chain}, default_role="worker")
+
+    # "aria-ux" was never registered -- a seat the product-owner created
+    # at runtime -- but should still resolve to the shared default chain.
+    assert routing.chain_for("aria-ux") == worker_chain
+    assert routing.chain_for("worker") == worker_chain
+
+
+def test_unknown_role_without_default_still_raises():
+    routing = RoutingTable({"worker": [_cfg("shared-local")]})  # no default_role
+    with pytest.raises(KeyError):
+        routing.chain_for("aria-ux")
+
+
 def test_falls_back_to_next_provider_on_failure():
     primary = _cfg("primary")
     backup = _cfg("backup")

@@ -30,6 +30,30 @@ that actually does the work.
   system behavior, not just cosmetic naming.
 - **Sequencing: phased, harness first.** Nothing else is useful until a
   durable, queue-friendly execution loop exists.
+- **Seats are emergent, not a fixed roster (2026-08-27).** The
+  product-owner assigns work to seats as part of its planning function;
+  when no existing seat specializes in a kind of work, the product-owner
+  liaises with the meta-agent to create one. Specialization ("this seat
+  keeps getting frontend tickets because it's good at them") is meant to
+  arise from real assignment history, not be declared upfront — so the
+  system deliberately does NOT hardcode a seat taxonomy, a matching
+  algorithm, or even a fixed initial roster: the product-owner's own
+  judgment over live data (the roster + each seat's outcomes) is the
+  mechanism, and it was explicitly tasked with bootstrapping the initial
+  engineer/QA/etc. roster itself, not handed a pre-built one. See Phase
+  4's "Emergent seat system" for what's built.
+- **Not yet decided: an "overwatch" agent that can modify the harness's
+  own code** (write new tools, extend its own capabilities), raised
+  2026-08-27. Directionally consistent with the architecture already
+  being built — the meta-agent creating new seats *is* a small-scale
+  version of "the system grows itself" — but categorically riskier: a new
+  seat is just a name + a prompt (low blast radius, bad performance is
+  visible in outcomes.py), while a new *tool* is generated code that runs
+  with the same trust level as `shell_exec`/`write_file`, inside the same
+  sandbox everything else's permission gating protects. That needs its
+  own gating design (stricter than prompt pending/approve, most likely)
+  before any of it gets built — noted here so it doesn't get scope-crept
+  into ordinary seat/prompt work by accident. See "Open questions."
 
 ## The harness decision
 
@@ -214,18 +238,82 @@ ticket/thread, not yet a cross-ticket "seat":**
   ignore it and keep going. Deliberate, matching the welfare essay's
   actual mechanics rather than force-terminating a thread mid-turn.
 
-**Still open, needs a real cross-ticket concept before it makes sense:**
-- Persistent identity ("seat") that spans *multiple* tickets — chosen
-  name/pronouns, accumulated history. Today's handoff notes live on the
-  Beads issue itself (one ticket = one thread = one place for notes to
-  live), which is a reasonable v1 but isn't yet "the same agent worked
-  this seat across 40 different tickets and remembers all of them."
-  Self-chosen names specifically need a real model call to do properly
-  (asking the model to pick), not just an assigned default — worth doing
-  once a model is reachable rather than faking it now.
+**Emergent seat system, built 2026-08-27** (design input from the user:
+option 2 — product-owner assigns work as part of planning; seats should
+genuinely specialize and accumulate their own history; when no specialist
+exists the product-owner liaises with the meta-agent to create one;
+emergence over hardcoded taxonomy; the product-owner bootstraps the
+initial roster itself):
+
+- `src/harness/seats.py`: an open-ended Postgres registry — `seat_id`,
+  free-text `specialty`, `created_by`, `status`. Deliberately thin: a
+  `seat_id` doubles as the `role` string `routing.py`/`prompts.py`/
+  `outcomes.py` already accept (those were built role-open-ended from
+  Phase 2/5 specifically so this didn't need a parallel prompt/outcome
+  system). Specialization lives in what a seat actually gets assigned and
+  how it performs, not in a taxonomy this module enforces.
+- `beads.assign_to_seat` / `assigned_seat` / `unassigned_ready` /
+  `ready_for_seat`: ticket→seat assignment via Beads' own
+  `--set-metadata` (verified live it round-trips correctly through `bd
+  ready`/`bd show`/`bd list --metadata-field`) — no second data store
+  needed alongside Beads for this either.
+- **`worker.py` generalized from one hardcoded role to per-seat
+  processes** (`SEAT_ID` env var, `DEFAULT_SEAT_ID = "worker"` for
+  bootstrap). The actual mechanism that makes specialization emerge
+  rather than being a free-for-all: a seat's worker now only claims
+  tickets explicitly assigned to it (`ready_for_seat`) plus its own
+  orphaned in-progress work — never "any ready ticket." An unassigned
+  ticket just sits until the product-owner triages it; no seat's worker
+  will touch it. Proven live (`tests/test_worker_seats.py`): seat A's
+  poll provably never touches seat B's or an unassigned ticket.
+- **`routing.py` gained `default_role`** — a real gap this surfaced:
+  dynamically-created seats have no pre-registered provider chain (there's
+  no way to configure one in advance for a specialist that didn't exist at
+  startup). `chain_for` now falls back to a configured default chain, so
+  every seat gets *some* model without its own routing entry. This is
+  deliberately the one place specialization ISN'T per-seat — prompts.py
+  and outcomes.py are exactly-keyed, routing is shared by default, and
+  nothing stops registering a dedicated chain for a specific seat_id
+  later if it ever needs one.
+- **`meta_agent.create_specialist_seat`**: the product-owner's "no
+  specialist exists yet" path, distinct from `propose_prompt_update`.
+  Creates a new seat + its initial system prompt, active *immediately* —
+  no pending/approve step, unlike revising an existing seat's prompt.
+  Deliberate asymmetry: creating something new is lower risk than
+  changing something already working (worst case a fresh seat performs
+  badly, which is exactly what outcomes.py would surface for a future
+  prompt revision to address).
+- **`src/harness/product_owner.py`**: a tool-calling LangGraph agent, not
+  a rule table — `list_seats` (enriched with each seat's outcomes),
+  `list_unassigned_tickets`, `assign_ticket`, `request_new_seat`
+  (delegates to `create_specialist_seat`). One LangGraph thread per
+  *triage session*, not per ticket, since a session naturally inspects
+  and acts on several tickets before finishing.
+  `scripts/run_product_owner.py` is the standalone entrypoint, same
+  pattern as `run_meta_agent.py` — not scheduled yet.
+- Proven live (`tests/test_product_owner.py`, `test_meta_agent.py`,
+  `test_worker_seats.py`, `test_routing.py`): each tool's real effect on
+  Beads/Postgres, a full triage session through the actual graph with a
+  scripted model, `create_specialist_seat`'s active-immediately +
+  collision-refusal + fail-closed behaviors, and `default_role` fallback
+  resolving an unregistered seat_id to the shared chain. Also verified
+  end-to-end over real HTTP: created a real seat + an assigned ticket,
+  confirmed both showed up correctly via the dashboard's new Seats
+  section and `/tickets`' metadata.
+
+**Still open:**
+- Self-chosen names/pronouns specifically need a real model call to do
+  properly (asking the model to pick), not just an assigned seat_id —
+  worth doing once a model is reachable rather than faking it now.
+  `create_specialist_seat` currently has the model choose the seat_id
+  itself already, which is a step toward this but not quite the same as
+  an agent choosing its own name/identity independent of its function.
 - "Laurels": user feedback on completed work surfaced back to a seat.
-  Blocked on there being a UI (Phase 6) to actually collect that feedback
-  from a human in the first place.
+  Blocked on there being a UI to actually collect that feedback from a
+  human in the first place (Phase 6's dashboard doesn't have this yet).
+- The product-owner's triage session isn't scheduled/triggered
+  automatically yet — like the meta-agent, it's a manual `docker compose
+  run` today.
 
 ### Phase 5 — Meta-agent (agent-improves-agents) — substrate done, judgment unverified
 The meta-agent's actual reasoning — is this outcome data meaningful, would
@@ -331,14 +419,32 @@ fine, both write subcommands don't. Composed the same documented effect
 verified working elsewhere. An upstream bd limitation, not a design
 choice — revisit if a bd release fixes it.
 
+**Seats surface added** (`GET /seats`, dashboard's Seats section): the
+roster + each seat's outcomes (closed/refused/still-open), polling every
+5s like the rest of the dashboard. Not personality/history yet — that's
+still blocked on Phase 4's open self-chosen-identity item.
+
+**Second live-caught hygiene bug, same category as the workspace one
+above**: smoke-testing `/seats` over real HTTP showed a dozen leftover
+`test-seat-*` rows — `prompts.py`/`seats.py` tests had been writing
+straight into the same Postgres database `worker.py`/`api.py` use,
+exactly the workspace bug's shape, just in the other durable store this
+harness has. `tests/conftest.py` now also creates a fresh throwaway
+database per test session (`CREATE DATABASE custos_harness_test_<uuid>`,
+rewrites `DATABASE_URL` for the session) — `DATABASE_URL` is read at call
+time throughout the harness (not cached at import like
+`HARNESS_WORKSPACE`), so this was a clean fix with no import-order
+gotcha. Verified live: `/seats` and `/tickets` both returned `[]` against
+a freshly wiped Postgres volume after a full test run.
+
 **Still open (genuinely a UI, not backend, task):**
 - Deeper roadmap/board/steering concepts (the dashboard covers tickets +
-  prompts + outcomes, not a full kanban/epic-planning surface).
+  prompts + outcomes + seats, not a full kanban/epic-planning surface).
 - Queue depth + estimated wait per ticket — matters once inference is
   genuinely slow, so the UI sets expectations instead of looking stuck.
   Nothing to estimate from without real inference timing data yet.
-- Agent seats/personalities/history surface — blocked on Phase 4's
-  still-open cross-ticket seat identity.
+- Personality/history surface (chosen names, Laurels) — blocked on Phase
+  4's still-open self-chosen-identity item.
 - DevOps-equivalent tab for model/provider config and concurrency limits
   — today those are env vars (`.env.example`), no admin UI to edit them
   live like v1 had.
@@ -360,9 +466,21 @@ choice — revisit if a bd release fixes it.
   resolved, adopted from Phase 1.
 - ~~Qdrant's fate relative to Beads~~ — resolved 2026-08-27, dropped (see
   Phase 3).
+- ~~How does work get assigned to specific named agents rather than one
+  generalist~~ — resolved 2026-08-27, product-owner assigns emergently
+  (see "Decisions locked in" and Phase 4's "Emergent seat system").
+- **"Overwatch" agent that can modify the harness's own code** — raised
+  2026-08-27, not designed. What gating does a tool-writing (not just
+  seat/prompt-writing) agent need before this is safe to build? Needs its
+  own conversation, not a decision made in passing while building seats.
 
 ## Immediate next step
 
-Start Phase 1: scaffold the LangGraph-based harness in this repo
-(`custos-v2`), Docker Compose for the checkpointer store, port the
-provider abstraction, build the minimal tool layer + permission gate.
+Phases 1–6 have working substrate, live-tested against real Postgres +
+real Beads with scripted models standing in for the still-unreachable
+Ollama. What's left either needs a real model to validate (permission
+classifier behavior, product-owner/meta-agent judgment quality, the
+"before/after did a prompt change help" signal) or further design input
+(the overwatch/self-modifying-code question above). Next concrete step
+once hardware is reachable again: run the manual kill/resume demo and a
+real triage session end-to-end with an actual local model, not a script.

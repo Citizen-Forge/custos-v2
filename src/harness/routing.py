@@ -13,6 +13,19 @@ classifier/curator) directly into its routing keys; this uses an open
 without another routing layer on top. "Pinning" a role to one model is
 just a chain of length 1 -- no separate concept needed.
 
+`default_role` (added for the dynamic seat system, PLAN.md's product-
+owner design): a seat created at runtime by the product-owner has no
+pre-configured provider chain -- there's no way to register one in
+advance for a specialist that didn't exist at startup. `chain_for` falls
+back to the `default_role`'s chain when the exact role isn't configured,
+so every seat gets *some* model without needing its own routing entry.
+This is deliberately the only place specialization is NOT per-seat:
+prompts.py and outcomes.py are exactly-keyed by seat_id (that's where a
+seat's actual personality/specialization lives), but which literal model
+backend answers the call is shared by default. Nothing stops a specific
+seat_id being registered explicitly later if it ever needs its own
+dedicated backend.
+
 Deliberately does NOT implement a "fail open" fallback when an entire
 chain is cooling down: `RoutedModel.invoke` raises instead, and relies on
 the worker's existing crash-safe retry (a failed ticket stays
@@ -62,15 +75,17 @@ class ConcurrencyGate:
 
 
 class RoutingTable:
-    def __init__(self, chains: dict[str, list[ProviderConfig]]):
+    def __init__(self, chains: dict[str, list[ProviderConfig]], default_role: str | None = None):
         self._chains = chains
+        self._default_role = default_role
         self._cooldowns: dict[str, _Cooldown] = {}
 
     def chain_for(self, role: str) -> list[ProviderConfig]:
-        try:
+        if role in self._chains:
             return self._chains[role]
-        except KeyError:
-            raise KeyError(f"no provider chain configured for role {role!r}") from None
+        if self._default_role and self._default_role in self._chains:
+            return self._chains[self._default_role]
+        raise KeyError(f"no provider chain configured for role {role!r} (and no usable default_role)")
 
     def is_cooling_down(self, cfg: ProviderConfig) -> bool:
         return self._cooldowns.get(cfg.name, _Cooldown()).active()

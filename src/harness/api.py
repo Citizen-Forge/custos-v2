@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import beads, outcomes, prompts
+from . import beads, outcomes, prompts, seats
 
 
 class RespondBody(BaseModel):
@@ -50,6 +50,12 @@ _PUBLIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__fil
 def _prompt_conn():
     conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
     prompts.init_table(conn)
+    return conn
+
+
+def _seats_conn():
+    conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+    seats.init_table(conn)
     return conn
 
 
@@ -118,6 +124,18 @@ def approve_prompt(role: str, version: int):
 @app.get("/outcomes/{actor}")
 def get_outcomes(actor: str):
     return outcomes.summary(actor)
+
+
+@app.get("/seats")
+def list_seats():
+    conn = _seats_conn()
+    try:
+        roster = seats.list_all(conn)
+        for s in roster:
+            s["outcomes"] = outcomes.summary(s["seat_id"])
+        return roster
+    finally:
+        conn.close()
 
 
 # Mounted last, deliberately: a StaticFiles mount at "/" only catches

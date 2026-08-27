@@ -117,6 +117,23 @@ def test_pending_prompts_endpoint_filters_by_role():
     assert "not mine" not in texts
 
 
+def test_seats_endpoint_includes_outcomes():
+    import uuid
+
+    from harness import seats as seats_module
+
+    seat_id = f"api-test-seat-{uuid.uuid4().hex[:8]}"
+    conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+    seats_module.init_table(conn)
+    seats_module.create(conn, seat_id, "test specialty", created_by="test")
+
+    roster = client.get("/seats").json()
+
+    entry = next(s for s in roster if s["seat_id"] == seat_id)
+    assert entry["specialty"] == "test specialty"
+    assert "closed" in entry["outcomes"]
+
+
 def test_outcomes_endpoint():
     beads.ensure_initialized()
     actor = f"api-test-actor-{uuid.uuid4().hex[:8]}"

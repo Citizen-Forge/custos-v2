@@ -29,6 +29,13 @@ and stop, rather than truncating the loop or force-terminating the
 thread. Deliberate, per the welfare-essay behaviors PLAN.md commits to --
 an agent that's over budget still gets to finish its thought and hand off
 on its own terms rather than being cut off mid-turn.
+
+`tools` is caller-supplied, not hardcoded to the general worker's
+`ALL_TOOLS` -- the product-owner agent (product_owner.py) runs the same
+graph shape with a completely different tool set (list seats, assign
+tickets, request a new specialist), and future seats may too. Defaults to
+`ALL_TOOLS` so every call site that predates this (tests, `build_graph`)
+keeps working unchanged.
 """
 
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -45,9 +52,12 @@ HANDOFF_NUDGE = (
 )
 
 
-def build_graph_from_model(model, checkpointer, classify=None, interrupt_after=None, turn_budget=None):
+def build_graph_from_model(model, checkpointer, tools=None, classify=None, interrupt_after=None, turn_budget=None):
     """Build the graph from an already-tool-bound model. Split out from
     `build_graph` so tests can pass a fake model without a real provider.
+
+    `tools`: the toolset available to this graph's `tools` node. Defaults
+    to `ALL_TOOLS` (the general worker's set) when omitted.
 
     `classify` is an optional `(tool_name, tool_args) -> classifier.Verdict`
     callable (see classifier.build_classifier). When omitted, the gate node
@@ -63,6 +73,7 @@ def build_graph_from_model(model, checkpointer, classify=None, interrupt_after=N
     `interrupt_after` is test-only (see tests/test_worker_resume.py) --
     production never sets it.
     """
+    tools = ALL_TOOLS if tools is None else tools
 
     def call_model(state: HarnessState):
         turn_count = state.get("turn_count", 0) + 1
@@ -105,7 +116,7 @@ def build_graph_from_model(model, checkpointer, classify=None, interrupt_after=N
     builder = StateGraph(HarnessState)
     builder.add_node("agent", call_model)
     builder.add_node("permission_gate", permission_gate)
-    builder.add_node("tools", ToolNode(ALL_TOOLS))
+    builder.add_node("tools", ToolNode(tools))
     builder.add_edge(START, "agent")
     builder.add_conditional_edges("agent", tools_condition, {"tools": "permission_gate", END: END})
     builder.add_conditional_edges("permission_gate", route_after_gate, {"tools": "tools", "agent": "agent"})
@@ -114,6 +125,7 @@ def build_graph_from_model(model, checkpointer, classify=None, interrupt_after=N
     return builder.compile(checkpointer=checkpointer, interrupt_after=interrupt_after)
 
 
-def build_graph(provider_cfg: ProviderConfig, checkpointer, classifier=None, turn_budget=None):
-    model = build_chat_model(provider_cfg).bind_tools(ALL_TOOLS)
-    return build_graph_from_model(model, checkpointer, classify=classifier, turn_budget=turn_budget)
+def build_graph(provider_cfg: ProviderConfig, checkpointer, tools=None, classifier=None, turn_budget=None):
+    tools = ALL_TOOLS if tools is None else tools
+    model = build_chat_model(provider_cfg).bind_tools(tools)
+    return build_graph_from_model(model, checkpointer, tools=tools, classify=classifier, turn_budget=turn_budget)

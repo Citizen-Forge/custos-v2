@@ -107,6 +107,10 @@
 </header>
 <main>
   <section>
+    <h2>Seats <span class="count" id="seats-count">0</span></h2>
+    <div id="seats-list"></div>
+  </section>
+  <section>
     <h2>Ready <span class="count" id="ready-count">0</span></h2>
     <div id="ready-list"></div>
   </section>
@@ -235,8 +239,30 @@ async function refreshPrompts() {
   }
 }
 
+async function refreshSeats() {
+  try {
+    const items = await fetchJSON("/seats");
+    document.getElementById("seats-count").textContent = items.length;
+    const container = document.getElementById("seats-list");
+    container.innerHTML = items.length
+      ? items.map(s => `<div class="item">
+          <span class="id">${escapeHtml(s.seat_id)}</span>
+          <div class="desc">${escapeHtml(s.specialty)}</div>
+          <div class="stat-row" style="margin-top:0.3rem">
+            <div class="stat"><b>${s.outcomes.closed}</b>closed</div>
+            <div class="stat"><b>${s.outcomes.refused}</b>refused</div>
+            <div class="stat"><b>${s.outcomes.still_open}</b>open</div>
+          </div>
+        </div>`).join("")
+      : `<div class="empty">no seats yet -- the product-owner creates these as work demands</div>`;
+  } catch (e) {
+    document.getElementById("seats-list").innerHTML = `<div class="empty">error: ${e.message}</div>`;
+  }
+}
+
 async function refreshAll() {
   await Promise.all([
+    refreshSeats(),
     refreshTickets("ready", "ready-list", "ready-count"),
     refreshTickets("in_progress", "in-progress-list", "in-progress-count"),
     refreshTickets("human", "human-list", "human-count", humanTicketItem),

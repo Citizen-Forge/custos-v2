@@ -61,6 +61,33 @@ def in_progress() -> list[dict]:
     return json.loads(_run(["list", "--status=in_progress"]))
 
 
+def assign_to_seat(issue_id: str, seat_id: str, actor: str = DEFAULT_ACTOR) -> dict:
+    """The product-owner's core assignment primitive -- earmarks a ready
+    ticket for a specific seat without claiming it (status stays `open`;
+    the seat's own worker process claims it on its next poll). Verified
+    live: `--set-metadata` round-trips through `bd ready`/`bd show`/`bd
+    list --metadata-field` correctly, which is what makes seat-scoped
+    polling (worker.py's `_next_ticket`) possible without a second data
+    store alongside Beads."""
+    return json.loads(
+        _run(["update", issue_id, "--set-metadata", f"assigned_seat={seat_id}"], actor=actor)
+    )[0]
+
+
+def assigned_seat(issue: dict) -> str | None:
+    return (issue.get("metadata") or {}).get("assigned_seat")
+
+
+def unassigned_ready() -> list[dict]:
+    """Ready issues with no seat assignment yet -- exactly what the
+    product-owner's triage pass looks at."""
+    return [i for i in ready() if not assigned_seat(i)]
+
+
+def ready_for_seat(seat_id: str) -> list[dict]:
+    return [i for i in ready() if assigned_seat(i) == seat_id]
+
+
 def list_by_assignee(actor: str) -> list[dict]:
     """Every issue ever assigned to `actor`, any status including closed
     -- Phase 5's outcome tracking reads this directly rather than

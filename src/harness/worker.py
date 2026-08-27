@@ -1,22 +1,31 @@
 """
-Phase 1/2 queue worker -- polls Beads (not a bespoke queue table) for
-work, advances the matching LangGraph thread one `invoke` cycle through a
-routed model (routing.py: fallback chain + per-provider concurrency cap),
-and closes the Beads issue on success.
+Per-seat queue worker -- polls Beads (not a bespoke queue table) for work
+assigned to ONE specific seat, advances the matching LangGraph thread one
+`invoke` cycle through a routed model, and closes the Beads issue on
+success. One process per active seat (`SEAT_ID` env var, default
+"worker" for the original single-generalist bootstrap case).
+
+A seat only claims tickets the product-owner has explicitly assigned to
+it (`beads.ready_for_seat`), plus its own orphaned in-progress work --
+NOT "any ready ticket" anymore. That's the actual mechanism that makes
+specialization emerge from product-owner assignment rather than being a
+free-for-all where the fastest generic worker grabs everything (see
+product_owner.py and PLAN.md's seat-assignment design). Tickets with no
+assigned_seat metadata yet just sit in `bd ready` until a product-owner
+triage session assigns them -- no seat's worker will touch them.
 
 Two Beads queries drive polling, because `bd ready` only ever returns
 `status=open` issues (see beads.py's module docstring) -- an issue left
 `in_progress` by a crashed run never reappears there:
 
-1. `beads.in_progress()` first -- orphaned work from a crashed run, safe
-   to just resume in Phase 1's single-worker scope (this worker is the
-   only writer). Multiple concurrent workers reclaiming the same
-   `in_progress` issue is a real race this doesn't guard against yet --
-   needed before Phase 2 concurrency trusts this with more than one
-   worker process (note: this is about multiple *worker processes*, a
-   separate concern from routing.py's per-provider concurrency cap, which
-   already works today).
-2. `beads.ready()` otherwise -- new work, claimed before starting.
+1. This seat's own orphaned in-progress work first -- safe to just resume
+   in the single-worker-per-seat scope (this process is the only writer
+   for its own seat_id). Multiple concurrent processes for the *same*
+   seat reclaiming the same issue is a real race this doesn't guard
+   against yet -- separate from routing.py's per-provider concurrency
+   cap, which already works today regardless.
+2. Tickets assigned to this seat and still `ready` otherwise -- claimed
+   before starting.
 
 The Beads issue id doubles as the LangGraph `thread_id`, so "resume this
 ticket" and "resume this graph thread" are the same operation.
@@ -50,11 +59,9 @@ log = logging.getLogger("worker")
 
 POLL_INTERVAL_SECONDS = int(os.environ.get("WORKER_POLL_INTERVAL", "5"))
 
-# Same string used as: the RoutingTable role, the Beads --actor on claim
-# (so outcomes.py's per-actor tracking means something), and the
-# prompts.py role whose active system prompt gets injected. One identity,
-# not three coincidentally-matching strings.
-WORKER_ROLE = "worker"
+# The original single-generalist bootstrap seat -- exists so the system
+# is usable before any product-owner triage has created specialist seats.
+DEFAULT_SEAT_ID = "worker"
 
 
 def _chain_from_env(env_prefix: str, default_base_url: str, default_model: str) -> list[ProviderConfig]:
@@ -82,58 +89,68 @@ def _chain_from_env(env_prefix: str, default_base_url: str, default_model: str) 
 
 def _routing_table_from_env() -> RoutingTable:
     # CLASSIFIER_* defaults to whatever LOCAL_* resolves to, so an
-    # unconfigured classifier chain quietly uses the same model as the
-    # worker rather than failing -- override CLASSIFIER_MODEL_* to point
+    # unconfigured classifier chain quietly uses the same model as
+    # workers rather than failing -- override CLASSIFIER_MODEL_* to point
     # it at a smaller/faster model (v1 used qwen2.5:3b-instruct for this).
+    # default_role="worker": any seat_id not explicitly registered here
+    # (i.e. every seat the product-owner creates at runtime) falls back
+    # to the shared LOCAL_* chain -- see routing.py's module docstring
+    # for why routing is the one place specialization isn't per-seat.
     local_base_url = os.environ.get("LOCAL_MODEL_BASE_URL", "http://host.docker.internal:11434/v1")
     local_model = os.environ.get("LOCAL_MODEL_NAME", "qwen2.5:7b-instruct")
     return RoutingTable(
         {
-            "worker": _chain_from_env("LOCAL", local_base_url, local_model),
+            DEFAULT_SEAT_ID: _chain_from_env("LOCAL", local_base_url, local_model),
             "classifier": _chain_from_env("CLASSIFIER", local_base_url, local_model),
-        }
+        },
+        default_role=DEFAULT_SEAT_ID,
     )
 
 
-def _next_ticket() -> dict | None:
+def _next_ticket(seat_id: str) -> dict | None:
     # Human-flagged issues (Phase 4's refuse_ticket tool) are excluded
     # here on purpose: they're `in_progress` but intentionally parked, not
     # orphaned by a crash. Without this filter a refused ticket would get
     # reclaimed and re-run (and presumably re-refused) every poll forever.
-    orphaned = [i for i in beads.in_progress() if not beads.is_flagged_for_human(i)]
+    orphaned = [
+        i
+        for i in beads.in_progress()
+        if i.get("assignee") == seat_id and not beads.is_flagged_for_human(i)
+    ]
     if orphaned:
         return orphaned[0]
 
-    candidates = beads.ready()
+    candidates = beads.ready_for_seat(seat_id)
     if not candidates:
         return None
 
-    return beads.claim(candidates[0]["id"], actor=WORKER_ROLE)
+    return beads.claim(candidates[0]["id"], actor=seat_id)
 
 
 def run(
     conn_string: str,
     routing: RoutingTable,
+    seat_id: str = DEFAULT_SEAT_ID,
     gate: ConcurrencyGate | None = None,
     turn_budget: int | None = None,
 ) -> None:
     beads.ensure_initialized()
     gate = gate or ConcurrencyGate()
 
-    worker_model = RoutedModel("worker", routing, gate, tools=ALL_TOOLS)
+    worker_model = RoutedModel(seat_id, routing, gate, tools=ALL_TOOLS)
     classify = build_classifier_from_model(RoutedModel("classifier", routing, gate))
 
     with psycopg.connect(conn_string, autocommit=True) as prompt_conn:
         prompts.init_table(prompt_conn)
-        system_prompt = prompts.get_active(prompt_conn, WORKER_ROLE)
+        system_prompt = prompts.get_active(prompt_conn, seat_id)
 
     with PostgresSaver.from_conn_string(conn_string) as checkpointer:
         checkpointer.setup()
         graph = build_graph_from_model(worker_model, checkpointer, classify=classify, turn_budget=turn_budget)
 
-        log.info("worker started, polling every %ss", POLL_INTERVAL_SECONDS)
+        log.info("worker started for seat %r, polling every %ss", seat_id, POLL_INTERVAL_SECONDS)
         while True:
-            issue = _next_ticket()
+            issue = _next_ticket(seat_id)
             if issue is None:
                 time.sleep(POLL_INTERVAL_SECONDS)
                 continue
@@ -177,4 +194,9 @@ def run(
 if __name__ == "__main__":
     conn_string = os.environ["DATABASE_URL"]
     turn_budget_env = os.environ.get("TURN_BUDGET")
-    run(conn_string, _routing_table_from_env(), turn_budget=int(turn_budget_env) if turn_budget_env else None)
+    run(
+        conn_string,
+        _routing_table_from_env(),
+        seat_id=os.environ.get("SEAT_ID", DEFAULT_SEAT_ID),
+        turn_budget=int(turn_budget_env) if turn_budget_env else None,
+    )

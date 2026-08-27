@@ -14,13 +14,14 @@ import uuid
 
 import psycopg
 
-from harness import prompts
-from harness.meta_agent import propose_prompt_update
+from harness import prompts, seats
+from harness.meta_agent import create_specialist_seat, propose_prompt_update
 
 
 def _conn():
     conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
     prompts.init_table(conn)
+    seats.init_table(conn)
     return conn
 
 
@@ -74,3 +75,44 @@ def test_unparseable_response_fails_closed():
 
     assert result is None
     assert prompts.pending(conn, role) == []
+
+
+def test_create_specialist_seat_goes_active_immediately_no_approval_needed():
+    conn = _conn()
+    seat_id = f"test-seat-{uuid.uuid4().hex[:8]}"
+
+    model = FakeModel(json.dumps({"seat_id": seat_id, "system_prompt": "you specialize in X"}))
+    result = create_specialist_seat(conn, "specializes in X", requested_by="product_owner", model=model)
+
+    assert result == {"seat_id": seat_id, "specialty": "specializes in X", "version": 1}
+    created = seats.get(conn, seat_id)
+    assert created is not None
+    assert created["specialty"] == "specializes in X"
+    assert created["created_by"] == "product_owner"
+    # unlike propose_prompt_update, a brand-new seat's first prompt is
+    # active immediately -- nothing existing to protect with a pending step
+    assert prompts.get_active(conn, seat_id) == "you specialize in X"
+    assert prompts.pending(conn, seat_id) == []
+
+
+def test_create_specialist_seat_refuses_to_collide_with_existing_seat():
+    conn = _conn()
+    seat_id = f"test-seat-{uuid.uuid4().hex[:8]}"
+    seats.create(conn, seat_id, "already exists", created_by="someone")
+
+    model = FakeModel(json.dumps({"seat_id": seat_id, "system_prompt": "would overwrite"}))
+    result = create_specialist_seat(conn, "new specialty", requested_by="product_owner", model=model)
+
+    assert result is None
+    assert seats.get(conn, seat_id)["specialty"] == "already exists"  # untouched
+
+
+def test_create_specialist_seat_fails_closed_on_unparseable_response():
+    conn = _conn()
+    seat_id = f"test-seat-{uuid.uuid4().hex[:8]}"  # would-be id, never actually used
+    model = FakeModel("not json")
+
+    result = create_specialist_seat(conn, "some specialty", requested_by="product_owner", model=model)
+
+    assert result is None
+    assert seats.get(conn, seat_id) is None  # nothing got created

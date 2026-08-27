@@ -8,17 +8,21 @@ first, this README is just "how to run what exists so far."
 
 ## Status
 
-Phases 1–5 built and live-tested against real Postgres + real Beads
-(scripted fake models standing in for the still-unreachable Ollama).
-Phase 6 has a working API layer; the actual frontend isn't started. See
-PLAN.md for the detailed status of each phase.
+Phases 1–6 have working substrate, live-tested against real Postgres +
+real Beads (scripted fake models standing in for the still-unreachable
+Ollama). Work is now assigned to specific named agent **seats** by a
+product-owner agent, not claimed generically by one worker — see
+PLAN.md's Phase 4 "Emergent seat system" and the "Seats" section below.
+See PLAN.md for the detailed status of each phase.
 
 Work items live in [Beads](https://github.com/gastownhall/beads) (`bd`),
 not a bespoke queue table — see PLAN.md's "Decisions locked in" for why.
 `bd`'s own `.beads/` data directory lives in the mounted `workspace/`
 folder alongside whatever files an agent's tool calls touch. Test runs
-use their own isolated temp workspace (`tests/conftest.py`), not this
-one — found and fixed a real bug where they didn't, early on.
+use their own isolated temp workspace *and* a fresh throwaway Postgres
+database (`tests/conftest.py`) — both were found live to be missing at
+different points this session (real tickets/seats were leaking into the
+same store the actual services use) and fixed.
 
 ## Running it (Docker only — no local Python install, see
 [[feedback_docker-for-runtimes]])
@@ -29,18 +33,37 @@ one — found and fixed a real bug where they didn't, early on.
 docker compose up -d postgres
 docker compose run --rm harness pytest -v
 
-# create a real ticket and let the worker pick it up
+# create a real ticket and let the default "worker" seat pick it up
 docker compose run --rm harness python scripts/enqueue_demo.py \
     "demo ticket" "list the files in the workspace"
 docker compose up harness
 ```
 
-`LOCAL_MODEL_BASE_URL` defaults to `http://host.docker.internal:11434/v1`
-(a host-machine Ollama). Override in `.env` (copy from `.env.example`) to
-point at a different OpenAI-compatible endpoint. No local model is
-reachable in this environment yet, so end-to-end LLM behavior is still
-unverified against a real model — `tests/test_worker_resume.py` proves the
-durability mechanism itself using a scripted fake model instead.
+`docker compose up harness` runs the `worker` seat (`DEFAULT_SEAT_ID`) by
+default — set `SEAT_ID=<seat_id>` to run a worker process for a
+specialist seat the product-owner has created instead. `LOCAL_MODEL_*`
+env vars are the shared model chain every seat falls back to unless it's
+explicitly registered its own (`routing.py`'s `default_role`) — defaults
+to `http://host.docker.internal:11434/v1`, a host-machine Ollama.
+Override in `.env` (copy from `.env.example`) to point at a different
+OpenAI-compatible endpoint. No local model is reachable in this
+environment yet, so end-to-end LLM behavior is still unverified against a
+real model — the test suite proves the mechanisms themselves using
+scripted fake models instead.
+
+## Seats and the product-owner
+
+```bash
+docker compose run --rm harness python scripts/run_product_owner.py
+```
+
+One triage session: the product-owner looks at unassigned ready tickets
+and the current seat roster (each with its outcomes), assigns tickets to
+existing seats, and creates new specialist seats (via the meta-agent,
+active immediately, no approval needed) when nothing existing fits — its
+own judgment call, not a rule table. See the dashboard's Seats section or
+`GET /seats` to see the roster it's built. Not scheduled yet, run
+manually for now — same as the meta-agent below.
 
 ## API + dashboard
 
@@ -49,9 +72,9 @@ docker compose up -d api   # http://localhost:8000, brings up postgres too
 ```
 
 Open `http://localhost:8000/` for the dashboard (vanilla HTML/JS, no
-build step — `public/index.html`): ready/in-progress/needs-a-human ticket
-lists, pending prompt proposals with an Approve button, and an outcomes
-lookup. Polls every 5s.
+build step — `public/index.html`): the seat roster (with each seat's
+outcomes), ready/in-progress/needs-a-human ticket lists, pending prompt
+proposals with an Approve button, and an outcomes lookup. Polls every 5s.
 
 ```bash
 curl localhost:8000/tickets?status=ready
