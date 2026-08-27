@@ -153,19 +153,45 @@ matters most for local-model hardware — the concurrency gate actually
 serializes two calls to `concurrency_limit=1` rather than letting them
 run concurrently (proven by timing, not just by the semaphore existing).
 
-### Phase 3 — Context & cross-session memory
-- Small context windows mean blind truncation is out. Evaluate **adopting
-  real Beads** (Go + Dolt, has an MCP server) rather than reinventing it —
-  it already does dependency-graph issue tracking *and* "memory decay"
-  semantic compaction of closed work *and* `bd prime`-style context
-  injection, which is exactly this problem. A LangGraph tool node can call
-  Beads' MCP server directly.
-- Decide what Beads replaces vs. complements: it could directly back v1's
-  roadmap/board data model (nice fit — you said you like that part of the
-  UI) rather than being a separate system next to it.
-- Decide the fate of v1's Qdrant semantic-memory layer: fold into Beads,
-  keep as a third loose-recall layer, or drop. Open question, not resolved
-  here.
+### Phase 3 — Context & cross-session memory — partially done
+**Qdrant question resolved (2026-08-27): dropped, not carried into v2.**
+`bd search` (verified live) is rich keyword/field/date-filtered search
+over title+description+notes, including closed issues — genuinely NOT
+semantic/embedding search, but combined with `bd remember`/`bd prime`
+(agent-curated durable facts) and "memory decay" (automatic summarization
+of closed work), it covers the actual use cases v1's Qdrant layer served
+*today's* design needs: finding related past/current work, and injecting
+durable cross-session knowledge. What Qdrant uniquely offered — true
+semantic similarity over unstructured text, catching conceptually-related
+work phrased differently — is a real gap, but an unproven one: there's no
+usage data yet showing keyword search actually falls short in practice,
+and running a second stateful service (Qdrant) to cover a gap that might
+not matter is the wrong default. Reversible, not a hard commitment —
+revisit if real usage shows keyword search missing things a human would
+have found obviously related.
+
+**Built (`tests/test_beads_extras.py`):**
+- `search_related_work` tool — wraps `beads.search`, lets an agent check
+  for related past/current work before starting rather than duplicating
+  effort or missing context sitting in a closed issue's notes.
+- `create_subtask` tool — wraps `beads.create(..., parent=...)`, using
+  `InjectedState` for the parent id like `refuse_ticket`/
+  `write_handoff_note` (an agent can decompose oversized work into
+  Beads' native epic/subtask hierarchy — verified live that `--parent`
+  produces real hierarchical ids, e.g. `demo-5lu` → `demo-5lu.1`). This is
+  the actual mechanism a future roadmap/board UI (Phase 6) would sit on
+  top of — epics and stories are just Beads issues with parent/child
+  links, no separate data model needed.
+
+**Still open:**
+- Beads' MCP server wasn't used — everything here goes through the CLI
+  directly (matches beads.py's existing pattern, and there was no
+  concrete reason yet to prefer MCP over a subprocess call).
+- No dedicated "product-owner turns a rough idea into an epic+stories"
+  workflow yet — that's a role/prompt-design question more than
+  infrastructure, and depends on Phase 2's role-pinning actually routing
+  a product-owner role to a frontier model, which needs real model access
+  to be worth designing prompts against.
 
 ### Phase 4 — Agent personality & welfare behaviors — partially done
 **Built and live-tested (`tests/test_welfare_behaviors.py`), scoped to one
@@ -230,9 +256,10 @@ ticket/thread, not yet a cross-ticket "seat":**
   kill/resume demo in README.md with an actual model, plus a real run of
   the permission classifier to see how it behaves against genuine tool-call
   arguments rather than a scripted verdict.
-- **Beads: adopt real Beads vs. build a lighter homegrown version** —
-  leaning adopt (Phase 3), not yet confirmed.
-- **Qdrant's fate** relative to Beads (Phase 3).
+- ~~Beads: adopt real Beads vs. build a lighter homegrown version~~ —
+  resolved, adopted from Phase 1.
+- ~~Qdrant's fate relative to Beads~~ — resolved 2026-08-27, dropped (see
+  Phase 3).
 
 ## Immediate next step
 

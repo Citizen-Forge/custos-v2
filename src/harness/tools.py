@@ -62,6 +62,30 @@ def remember_fact(text: str) -> str:
 
 
 @tool
+def search_related_work(query: str) -> str:
+    """Search past and current Beads issues (title/description keyword
+    match, includes closed ones) for work related to what you're about to
+    do -- check before starting in case it's already been done, is in
+    progress elsewhere, or there's useful prior context in a closed
+    issue's notes."""
+    results = beads.search(query)
+    if not results:
+        return "no related issues found"
+    return "\n".join(f"{r['id']} [{r['status']}]: {r['title']}" for r in results)
+
+
+@tool
+def create_subtask(title: str, description: str, state: Annotated[HarnessState, InjectedState]) -> str:
+    """Break a piece of this ticket's work out into its own subtask,
+    parented under the current ticket in Beads' dependency graph -- use
+    this when a ticket turns out to be bigger than one sitting of work, so
+    the pieces are individually trackable/resumable rather than all living
+    inside one giant thread."""
+    subtask = beads.create(title, description, parent=state["ticket_id"])
+    return f"created subtask {subtask['id']}: {subtask['title']}"
+
+
+@tool
 def refuse_ticket(reason: str, state: Annotated[HarnessState, InjectedState]) -> str:
     """Decline this ticket instead of attempting it -- for work that's
     outside scope, ambiguous enough to need a human call, or that seems
@@ -83,4 +107,13 @@ def write_handoff_note(note: str, state: Annotated[HarnessState, InjectedState])
     return "handoff note recorded"
 
 
-ALL_TOOLS = [shell_exec, read_file, write_file, remember_fact, refuse_ticket, write_handoff_note]
+ALL_TOOLS = [
+    shell_exec,
+    read_file,
+    write_file,
+    remember_fact,
+    search_related_work,
+    create_subtask,
+    refuse_ticket,
+    write_handoff_note,
+]

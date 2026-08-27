@@ -76,8 +76,20 @@ def close(issue_id: str, reason: str | None = None) -> dict:
     return json.loads(_run(args))[0]
 
 
-def create(title: str, description: str, issue_type: str = "task") -> dict:
-    return json.loads(_run(["create", title, "-d", description, "--type", issue_type]))
+def create(title: str, description: str, issue_type: str = "task", parent: str | None = None) -> dict:
+    args = ["create", title, "-d", description, "--type", issue_type]
+    if parent:
+        args += ["--parent", parent]
+    return json.loads(_run(args))
+
+
+def search(query: str, status: str = "all", limit: int = 10) -> list[dict]:
+    """Verified live: keyword/substring search over title+description
+    (plus a long list of filter flags -- status/label/date/etc, not used
+    here). NOT semantic/embedding search -- see PLAN.md Phase 3 for why
+    that's an acceptable v1 tradeoff (Qdrant dropped, not carried into
+    v2)."""
+    return json.loads(_run(["search", query, "--status", status, "--limit", str(limit)]))
 
 
 def remember(text: str) -> dict:
