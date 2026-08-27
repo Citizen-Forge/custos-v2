@@ -227,14 +227,49 @@ ticket/thread, not yet a cross-ticket "seat":**
   Blocked on there being a UI (Phase 6) to actually collect that feedback
   from a human in the first place.
 
-### Phase 5 — Meta-agent (agent-improves-agents)
-- Frontier-backed agent reads completed work + outcomes (including Laurels)
-  across seats, proposes system-prompt diffs per seat/role.
-- Human-approval gate before a prompt change takes effect — matches v1's
-  existing "autonomy off by default for every role except product-owner"
-  pattern.
-- Track a simple before/after signal per seat (completion rate, rework
-  rate, refusal rate) to judge whether a proposed change actually helped.
+### Phase 5 — Meta-agent (agent-improves-agents) — substrate done, judgment unverified
+The meta-agent's actual reasoning — is this outcome data meaningful, would
+this prompt revision actually help — is inherently untestable without a
+real model doing real judgment, so it isn't validated here (no Ollama
+reachable in this environment). What's built and live-tested is
+everything around it, since none of that needed real inference to prove:
+
+- `prompts.py`: versioned system prompts per role in Postgres, with a
+  pending/approve workflow. A proposal never takes effect on its own —
+  `approve` is a separate, explicit step, matching v1's "autonomy off by
+  default for every role except product-owner." Before this existed there
+  was nothing persistent for a meta-agent to *tune* — the graph's model
+  had no system prompt at all.
+- `outcomes.py`: per-role signal sourced directly from Beads' own audit
+  trail (`beads.list_by_assignee`, using the `--actor` field beads.py
+  already sets on every write) — closed/refused/still-open counts, plus
+  the actual refusal reasons. Not a rigorous evaluation framework, just
+  enough for a human (or the meta-agent) to notice a real pattern.
+- `meta_agent.py`: gathers outcomes + the role's current active prompt,
+  asks a model for a revision, and queues it as pending via `prompts.py`.
+  Fails closed on an unparseable response (same posture as
+  `classifier.py`) and skips queuing anything if the model proposes no
+  actual change.
+- `scripts/run_meta_agent.py`: standalone entrypoint, deliberately NOT
+  part of the ticket worker's loop — a system-level agent reviewing other
+  agents' work is a different kind of process than one doing ticket work.
+  Not scheduled yet (cron/periodic run is still manual).
+- `worker.py` now actually fetches and injects the active `"worker"` role
+  prompt as a system message when starting a new ticket, and claims
+  tickets under a consistent `WORKER_ROLE` actor string shared across
+  routing/Beads/prompts — before this, "role" existed in routing.py but
+  wasn't the same identity Beads or prompts.py could see.
+- Proven live (`tests/test_prompts.py`, `test_outcomes.py`,
+  `test_meta_agent.py`) with real Postgres, real Beads, and a scripted
+  fake model: propose→pending→approve→active lifecycle, version
+  superseding, outcome counts matching real created/closed/refused
+  issues, and the three response-handling paths (real change queued, same
+  text queues nothing, garbage fails closed).
+
+**Not done:** the "before/after" signal — comparing outcomes.py's numbers
+across a prompt change to see if it actually helped — since there's no
+real usage yet to compare, and any such comparison is only meaningful
+once real tickets are actually being worked by a real model.
 
 ### Phase 6 — UI/product surface
 - Rebuild roadmap/board/steering concepts on the new backend.

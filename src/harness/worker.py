@@ -35,9 +35,10 @@ import logging
 import os
 import time
 
+import psycopg
 from langgraph.checkpoint.postgres import PostgresSaver
 
-from . import beads
+from . import beads, prompts
 from .classifier import build_classifier_from_model
 from .graph import build_graph_from_model
 from .providers import ProviderConfig
@@ -48,6 +49,12 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker")
 
 POLL_INTERVAL_SECONDS = int(os.environ.get("WORKER_POLL_INTERVAL", "5"))
+
+# Same string used as: the RoutingTable role, the Beads --actor on claim
+# (so outcomes.py's per-actor tracking means something), and the
+# prompts.py role whose active system prompt gets injected. One identity,
+# not three coincidentally-matching strings.
+WORKER_ROLE = "worker"
 
 
 def _chain_from_env(env_prefix: str, default_base_url: str, default_model: str) -> list[ProviderConfig]:
@@ -101,7 +108,7 @@ def _next_ticket() -> dict | None:
     if not candidates:
         return None
 
-    return beads.claim(candidates[0]["id"])
+    return beads.claim(candidates[0]["id"], actor=WORKER_ROLE)
 
 
 def run(
@@ -115,6 +122,10 @@ def run(
 
     worker_model = RoutedModel("worker", routing, gate, tools=ALL_TOOLS)
     classify = build_classifier_from_model(RoutedModel("classifier", routing, gate))
+
+    with psycopg.connect(conn_string, autocommit=True) as prompt_conn:
+        prompts.init_table(prompt_conn)
+        system_prompt = prompts.get_active(prompt_conn, WORKER_ROLE)
 
     with PostgresSaver.from_conn_string(conn_string) as checkpointer:
         checkpointer.setup()
@@ -142,8 +153,11 @@ def run(
                         f"{context}\n\n---\n\nTicket: {issue['title']}\n\n"
                         f"{issue.get('description', '')}"
                     )
+                    initial_messages = (
+                        [("system", system_prompt)] if system_prompt else []
+                    ) + [("user", prompt)]
                     graph.invoke(
-                        {"messages": [("user", prompt)], "ticket_id": thread_id, "turn_count": 0},
+                        {"messages": initial_messages, "ticket_id": thread_id, "turn_count": 0},
                         config,
                     )
 

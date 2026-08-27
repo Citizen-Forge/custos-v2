@@ -61,6 +61,13 @@ def in_progress() -> list[dict]:
     return json.loads(_run(["list", "--status=in_progress"]))
 
 
+def list_by_assignee(actor: str) -> list[dict]:
+    """Every issue ever assigned to `actor`, any status including closed
+    -- Phase 5's outcome tracking reads this directly rather than
+    maintaining a separate metrics store."""
+    return json.loads(_run(["list", "--assignee", actor, "--all"]))
+
+
 def claim(issue_id: str, actor: str = DEFAULT_ACTOR) -> dict:
     return json.loads(_run(["update", issue_id, "--claim"], actor=actor))[0]
 
