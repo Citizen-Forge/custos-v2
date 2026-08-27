@@ -42,10 +42,18 @@ reachable in this environment yet, so end-to-end LLM behavior is still
 unverified against a real model — `tests/test_worker_resume.py` proves the
 durability mechanism itself using a scripted fake model instead.
 
-## API
+## API + dashboard
 
 ```bash
 docker compose up -d api   # http://localhost:8000, brings up postgres too
+```
+
+Open `http://localhost:8000/` for the dashboard (vanilla HTML/JS, no
+build step — `public/index.html`): ready/in-progress/needs-a-human ticket
+lists, pending prompt proposals with an Approve button, and an outcomes
+lookup. Polls every 5s.
+
+```bash
 curl localhost:8000/tickets?status=ready
 curl localhost:8000/prompts/pending
 curl -X POST localhost:8000/prompts/worker/1/approve

@@ -42,6 +42,7 @@ services:
       HARNESS_WORKSPACE: /workspace
     volumes:
       - ./src:/app/src
+      - ./public:/app/public
       - ./workspace:/workspace
     ports:
       - "8000:8000"

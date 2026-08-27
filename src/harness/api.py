@@ -14,13 +14,29 @@ v1 took explicitly, see project memory on v1's admin/remote auth).
 """
 
 import os
+from contextlib import asynccontextmanager
 
 import psycopg
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 
 from . import beads, outcomes, prompts
 
-app = FastAPI(title="Custos v2 harness API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Found live: without this, a fresh workspace (no .beads yet) 500s on
+    # the very first /tickets request instead of returning an empty list.
+    # worker.py already did this on its own startup; api.py hadn't, since
+    # it can be the very first thing to touch a workspace (e.g. checking
+    # the dashboard before any ticket work has happened).
+    beads.ensure_initialized()
+    yield
+
+
+app = FastAPI(title="Custos v2 harness API", lifespan=lifespan)
+
+_PUBLIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "public")
 
 
 def _prompt_conn():
@@ -75,3 +91,12 @@ def approve_prompt(role: str, version: int):
 @app.get("/outcomes/{actor}")
 def get_outcomes(actor: str):
     return outcomes.summary(actor)
+
+
+# Mounted last, deliberately: a StaticFiles mount at "/" only catches
+# paths not matched by the routes above it, since Starlette checks routes
+# in registration order. Vanilla HTML/JS, no build step -- following v1's
+# admin.html precedent rather than introducing a new frontend framework
+# decision (see PLAN.md Phase 6).
+if os.path.isdir(_PUBLIC_DIR):
+    app.mount("/", StaticFiles(directory=_PUBLIC_DIR, html=True), name="static")

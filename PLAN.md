@@ -296,15 +296,33 @@ which silently did nothing because docker-compose already sets
 caught by actually checking `workspace/` after the "fix," not just
 trusting the tests still passed.
 
+**Dashboard built (`public/index.html`):** vanilla HTML/JS, no build
+step, following v1's `admin.html` precedent rather than introducing a new
+frontend framework decision. Mounted at `/` in `api.py` (a `StaticFiles`
+mount registered *after* the API routes, so it only catches paths the
+explicit routes don't — Starlette checks routes in registration order).
+Shows Ready/In-Progress/Needs-a-human ticket lists, pending prompt
+proposals with an inline Approve button, and an outcomes lookup by
+actor/role — polls every 5s. Proven live over real HTTP, not just that it
+renders: created a real ticket via `enqueue_demo.py` and watched it
+appear through the actual API response.
+
+**Real bug found and fixed while verifying this live**: `GET /tickets`
+500'd on a workspace that had never had `bd init` run (e.g. checking the
+dashboard before any ticket work has ever happened) — `api.py` never
+called `beads.ensure_initialized()` anywhere, unlike `worker.py`, which
+does it on its own startup. Fixed with a FastAPI `lifespan` hook. Caught
+by actually hitting the live endpoint after standing the container up,
+not by the test suite — the tests all called `ensure_initialized()`
+explicitly themselves, which is correct test hygiene but meant they
+couldn't have caught this gap in the app's own startup behavior.
+
 **Still open (genuinely a UI, not backend, task):**
-- Rebuild roadmap/board/steering concepts as an actual frontend. v1's
-  precedent (`public/admin.html` — vanilla HTML/JS, no build step) is the
-  natural default to follow rather than introducing a new frontend
-  framework decision.
-- Queue depth + estimated wait per ticket in the UI — matters once
-  inference is genuinely slow, so the UI sets expectations instead of
-  looking stuck. The API doesn't expose an ETA yet (nothing to estimate
-  from without real inference timing data).
+- Deeper roadmap/board/steering concepts (the dashboard covers tickets +
+  prompts + outcomes, not a full kanban/epic-planning surface).
+- Queue depth + estimated wait per ticket — matters once inference is
+  genuinely slow, so the UI sets expectations instead of looking stuck.
+  Nothing to estimate from without real inference timing data yet.
 - Agent seats/personalities/history surface — blocked on Phase 4's
   still-open cross-ticket seat identity.
 - DevOps-equivalent tab for model/provider config and concurrency limits

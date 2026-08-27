@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Custos v2</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2f3a;
+    --text: #e6e8eb;
+    --muted: #9aa3b2;
+    --accent: #5b8cff;
+    --danger: #ff6b6b;
+    --ok: #4cd97b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+  }
+  header h1 { font-size: 1.1rem; margin: 0; }
+  header .sub { color: var(--muted); font-size: 0.85rem; }
+  main {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 1rem;
+    padding: 1.5rem;
+  }
+  section {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+  }
+  section h2 {
+    font-size: 0.95rem;
+    margin: 0 0 0.75rem;
+    display: flex;
+    justify-content: space-between;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  section h2 .count {
+    background: var(--border);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 0.05rem 0.5rem;
+    font-size: 0.8rem;
+  }
+  .item {
+    border-bottom: 1px solid var(--border);
+    padding: 0.6rem 0;
+    font-size: 0.9rem;
+  }
+  .item:last-child { border-bottom: none; }
+  .item .id { color: var(--accent); font-family: monospace; font-size: 0.8rem; }
+  .item .title { font-weight: 500; }
+  .item .desc { color: var(--muted); font-size: 0.82rem; margin-top: 0.15rem; }
+  .item .notes { color: var(--danger); font-size: 0.82rem; margin-top: 0.15rem; }
+  .empty { color: var(--muted); font-size: 0.85rem; font-style: italic; }
+  button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 0.3rem 0.7rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  button:hover { opacity: 0.85; }
+  .prompt-actions { margin-top: 0.4rem; display: flex; gap: 0.5rem; align-items: center; }
+  .reason { color: var(--muted); font-size: 0.82rem; }
+  form.outcomes { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
+  input[type=text] {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 4px;
+    padding: 0.35rem 0.5rem;
+    font-size: 0.85rem;
+    flex: 1;
+  }
+  .stat-row { display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.85rem; }
+  .stat { color: var(--muted); }
+  .stat b { color: var(--text); font-size: 1.1rem; display: block; }
+  #status { font-size: 0.75rem; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Custos v2</h1>
+  <span class="sub">harness dashboard</span>
+  <span id="status" style="margin-left:auto"></span>
+</header>
+<main>
+  <section>
+    <h2>Ready <span class="count" id="ready-count">0</span></h2>
+    <div id="ready-list"></div>
+  </section>
+  <section>
+    <h2>In Progress <span class="count" id="in-progress-count">0</span></h2>
+    <div id="in-progress-list"></div>
+  </section>
+  <section>
+    <h2>Needs a Human <span class="count" id="human-count">0</span></h2>
+    <div id="human-list"></div>
+  </section>
+  <section>
+    <h2>Pending Prompt Proposals <span class="count" id="prompts-count">0</span></h2>
+    <div id="prompts-list"></div>
+  </section>
+  <section>
+    <h2>Outcomes</h2>
+    <form class="outcomes" id="outcomes-form">
+      <input type="text" id="outcomes-actor" placeholder="actor / role, e.g. worker">
+      <button type="submit">Look up</button>
+    </form>
+    <div id="outcomes-result"></div>
+  </section>
+</main>
+<script>
+const REFRESH_MS = 5000;
+
+function el(html) {
+  const t = document.createElement("template");
+  t.innerHTML = html.trim();
+  return t.content.firstChild;
+}
+
+function ticketItem(t) {
+  const notes = t.notes ? `<div class="notes">${escapeHtml(t.notes)}</div>` : "";
+  return `<div class="item">
+    <span class="id">${t.id}</span> <span class="title">${escapeHtml(t.title)}</span>
+    <div class="desc">${escapeHtml(t.description || "")}</div>
+    ${notes}
+  </div>`;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
+async function fetchJSON(url, opts) {
+  const res = await fetch(url, opts);
+  if (!res.ok) throw new Error(`${url} -> ${res.status}`);
+  return res.json();
+}
+
+async function refreshTickets(status, listId, countId) {
+  try {
+    const items = await fetchJSON(`/tickets?status=${status}`);
+    document.getElementById(countId).textContent = items.length;
+    const container = document.getElementById(listId);
+    container.innerHTML = items.length
+      ? items.map(ticketItem).join("")
+      : `<div class="empty">nothing here</div>`;
+  } catch (e) {
+    document.getElementById(listId).innerHTML = `<div class="empty">error: ${e.message}</div>`;
+  }
+}
+
+async function approvePrompt(role, version) {
+  await fetchJSON(`/prompts/${role}/${version}/approve`, { method: "POST" });
+  refreshPrompts();
+}
+
+async function refreshPrompts() {
+  try {
+    const items = await fetchJSON("/prompts/pending");
+    document.getElementById("prompts-count").textContent = items.length;
+    const container = document.getElementById("prompts-list");
+    container.innerHTML = items.length
+      ? items.map(p => `<div class="item">
+          <span class="id">${escapeHtml(p.role)} v${p.version}</span>
+          <div class="reason">${escapeHtml(p.reason || "no reason given")}</div>
+          <details><summary style="cursor:pointer;color:var(--muted);font-size:0.8rem">proposed text</summary>
+            <div class="desc" style="white-space:pre-wrap">${escapeHtml(p.text)}</div>
+          </details>
+          <div class="prompt-actions">
+            <button onclick="approvePrompt('${p.role}', ${p.version})">Approve</button>
+          </div>
+        </div>`).join("")
+      : `<div class="empty">no pending proposals</div>`;
+  } catch (e) {
+    document.getElementById("prompts-list").innerHTML = `<div class="empty">error: ${e.message}</div>`;
+  }
+}
+
+async function refreshAll() {
+  await Promise.all([
+    refreshTickets("ready", "ready-list", "ready-count"),
+    refreshTickets("in_progress", "in-progress-list", "in-progress-count"),
+    refreshTickets("human", "human-list", "human-count"),
+    refreshPrompts(),
+  ]);
+  document.getElementById("status").textContent = "updated " + new Date().toLocaleTimeString();
+}
+
+document.getElementById("outcomes-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const actor = document.getElementById("outcomes-actor").value.trim();
+  if (!actor) return;
+  const result = document.getElementById("outcomes-result");
+  try {
+    const data = await fetchJSON(`/outcomes/${encodeURIComponent(actor)}`);
+    result.innerHTML = `<div class="stat-row">
+      <div class="stat"><b>${data.total}</b>total</div>
+      <div class="stat"><b>${data.closed}</b>closed</div>
+      <div class="stat"><b>${data.refused}</b>refused</div>
+      <div class="stat"><b>${data.still_open}</b>still open</div>
+    </div>`;
+  } catch (e) {
+    result.innerHTML = `<div class="empty">error: ${e.message}</div>`;
+  }
+});
+
+refreshAll();
+setInterval(refreshAll, REFRESH_MS);
+</script>
+</body>
+</html>
