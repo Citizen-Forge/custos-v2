@@ -1,11 +1,10 @@
 """
 Minimal HTTP API over the harness's existing state -- Beads tickets,
-pending prompt proposals, per-role outcomes. Read-mostly; the one write
-endpoint (approve a pending prompt) is deliberately narrow, matching v1's
-"autonomy off by default" posture -- this is an admin surface for a human
-to inspect and approve things, not a general write API. `bd human
-respond/dismiss` (actually resolving a refused ticket) isn't wrapped yet
--- reading the state is the part Phase 6's UI needs first.
+pending prompt proposals, per-role outcomes. Read-mostly; the write
+endpoints (approve a pending prompt, respond to/dismiss a human-flagged
+ticket) are deliberately narrow, matching v1's "autonomy off by default"
+posture -- this is an admin surface for a human to inspect and resolve
+things, not a general write API.
 
 No auth yet -- matches where Phases 1-5 already are, nothing here is
 exposed beyond the docker-compose network today. Needed before this is
@@ -19,8 +18,17 @@ from contextlib import asynccontextmanager
 import psycopg
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from . import beads, outcomes, prompts
+
+
+class RespondBody(BaseModel):
+    response: str
+
+
+class DismissBody(BaseModel):
+    reason: str | None = None
 
 
 @asynccontextmanager
@@ -65,6 +73,25 @@ def list_tickets(status: str = "ready"):
 def get_ticket(issue_id: str):
     try:
         return beads.show(issue_id)
+    except beads.BeadsError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@app.post("/tickets/{issue_id}/respond")
+def respond_to_ticket(issue_id: str, body: RespondBody):
+    """Resolve a human-flagged ticket with a response, closing it -- see
+    beads.respond_to_human's docstring for why this composes append_note
+    + close rather than calling the real (broken) `bd human respond`."""
+    try:
+        return beads.respond_to_human(issue_id, body.response)
+    except beads.BeadsError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@app.post("/tickets/{issue_id}/dismiss")
+def dismiss_ticket(issue_id: str, body: DismissBody = DismissBody()):
+    try:
+        return beads.dismiss_human(issue_id, body.reason)
     except beads.BeadsError as e:
         raise HTTPException(404, str(e)) from e
 

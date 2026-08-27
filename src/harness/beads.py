@@ -126,6 +126,31 @@ def append_note(issue_id: str, text: str, actor: str = DEFAULT_ACTOR) -> dict:
     return json.loads(_run(["update", issue_id, "--append-notes", text], actor=actor))[0]
 
 
+def respond_to_human(issue_id: str, response: str, actor: str = DEFAULT_ACTOR) -> dict:
+    """Resolve a human-flagged issue with a response, closing it -- the
+    completion half of refuse_ticket's loop (flag_for_human -> a human
+    reviews it -> this).
+
+    NOT implemented via `bd human respond`: verified live against bd
+    v1.2.2 that the real subcommand hard-fails with "storage is nil" on
+    an embedded (non-server) Dolt backend -- reproduced with and without
+    --json, and `bd human dismiss` fails the same way, while `bd human
+    list` (the read path) works fine. This composes the same documented
+    effect ("adds the response as a comment[-equivalent note] and closes
+    with reason 'Responded'") out of append_note + close, both already
+    verified working, rather than depending on the broken subcommand."""
+    append_note(issue_id, f"human response: {response}", actor=actor)
+    return close(issue_id, reason="Responded")
+
+
+def dismiss_human(issue_id: str, reason: str | None = None, actor: str = DEFAULT_ACTOR) -> dict:
+    """See respond_to_human's docstring -- same "bd human dismiss is
+    broken on embedded Dolt" workaround, composed from close() alone."""
+    if reason:
+        append_note(issue_id, f"dismissed: {reason}", actor=actor)
+    return close(issue_id, reason="Dismissed")
+
+
 def prime() -> str:
     result = subprocess.run(
         ["bd", "prime"], cwd=WORKSPACE_ROOT, capture_output=True, text=True, timeout=30

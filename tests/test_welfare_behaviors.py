@@ -28,6 +28,32 @@ class RefusesImmediately:
         )
 
 
+def test_respond_to_human_closes_with_response_recorded():
+    beads.ensure_initialized()
+    issue = beads.create("respond test", "x")
+    beads.claim(issue["id"])
+    beads.flag_for_human(issue["id"], "which approach?")
+
+    result = beads.respond_to_human(issue["id"], "go with option A")
+
+    assert result["status"] == "closed"
+    assert result["close_reason"] == "Responded"
+    assert "go with option A" in result["notes"]
+
+
+def test_dismiss_human_closes_with_reason_recorded():
+    beads.ensure_initialized()
+    issue = beads.create("dismiss test", "x")
+    beads.claim(issue["id"])
+    beads.flag_for_human(issue["id"], "not sure about this")
+
+    result = beads.dismiss_human(issue["id"], reason="no longer needed")
+
+    assert result["status"] == "closed"
+    assert result["close_reason"] == "Dismissed"
+    assert "no longer needed" in result["notes"]
+
+
 def test_refuse_ticket_flags_the_real_issue_for_human_review():
     beads.ensure_initialized()
     issue = beads.create("refuse-work test", "should this even be attempted")

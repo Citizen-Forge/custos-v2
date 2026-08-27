@@ -161,13 +161,47 @@ async function fetchJSON(url, opts) {
   return res.json();
 }
 
-async function refreshTickets(status, listId, countId) {
+function humanTicketItem(t) {
+  const notes = t.notes ? `<div class="notes">${escapeHtml(t.notes)}</div>` : "";
+  return `<div class="item">
+    <span class="id">${t.id}</span> <span class="title">${escapeHtml(t.title)}</span>
+    <div class="desc">${escapeHtml(t.description || "")}</div>
+    ${notes}
+    <div class="prompt-actions">
+      <button onclick="respondToTicket('${t.id}')">Respond</button>
+      <button onclick="dismissTicket('${t.id}')">Dismiss</button>
+    </div>
+  </div>`;
+}
+
+async function respondToTicket(id) {
+  const response = window.prompt("Response to send back (closes the ticket):");
+  if (!response) return;
+  await fetchJSON(`/tickets/${id}/respond`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ response }),
+  });
+  refreshAll();
+}
+
+async function dismissTicket(id) {
+  const reason = window.prompt("Reason for dismissing (optional, closes the ticket):") || null;
+  await fetchJSON(`/tickets/${id}/dismiss`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+  refreshAll();
+}
+
+async function refreshTickets(status, listId, countId, renderFn = ticketItem) {
   try {
     const items = await fetchJSON(`/tickets?status=${status}`);
     document.getElementById(countId).textContent = items.length;
     const container = document.getElementById(listId);
     container.innerHTML = items.length
-      ? items.map(ticketItem).join("")
+      ? items.map(renderFn).join("")
       : `<div class="empty">nothing here</div>`;
   } catch (e) {
     document.getElementById(listId).innerHTML = `<div class="empty">error: ${e.message}</div>`;
@@ -205,7 +239,7 @@ async function refreshAll() {
   await Promise.all([
     refreshTickets("ready", "ready-list", "ready-count"),
     refreshTickets("in_progress", "in-progress-list", "in-progress-count"),
-    refreshTickets("human", "human-list", "human-count"),
+    refreshTickets("human", "human-list", "human-count", humanTicketItem),
     refreshPrompts(),
   ]);
   document.getElementById("status").textContent = "updated " + new Date().toLocaleTimeString();

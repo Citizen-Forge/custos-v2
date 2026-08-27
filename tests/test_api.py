@@ -64,6 +64,32 @@ def test_list_tickets_rejects_unknown_status():
     assert client.get("/tickets", params={"status": "bogus"}).status_code == 400
 
 
+def test_respond_endpoint_closes_the_ticket():
+    beads.ensure_initialized()
+    issue = beads.create("api respond test", "x")
+    beads.claim(issue["id"])
+    beads.flag_for_human(issue["id"], "needs a call")
+
+    response = client.post(f"/tickets/{issue['id']}/respond", json={"response": "proceed"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "closed"
+    assert "proceed" in data["notes"]
+
+
+def test_dismiss_endpoint_closes_the_ticket():
+    beads.ensure_initialized()
+    issue = beads.create("api dismiss test", "x")
+    beads.claim(issue["id"])
+    beads.flag_for_human(issue["id"], "needs a call")
+
+    response = client.post(f"/tickets/{issue['id']}/dismiss", json={"reason": "not needed"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "closed"
+
+
 def test_approve_prompt_endpoint_activates_it():
     role = f"api-test-role-{uuid.uuid4().hex[:8]}"
     conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)

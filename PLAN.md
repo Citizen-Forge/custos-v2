@@ -317,6 +317,20 @@ not by the test suite — the tests all called `ensure_initialized()`
 explicitly themselves, which is correct test hygiene but meant they
 couldn't have caught this gap in the app's own startup behavior.
 
+**Refuse-work loop closed**: `beads.respond_to_human`/`dismiss_human`
+(`POST /tickets/{id}/respond` and `/dismiss`, with Respond/Dismiss buttons
+on the dashboard's human-flagged tickets) resolve a `refuse_ticket`'d
+issue — Phase 4 could flag work for a human, but there was previously no
+way to actually close that loop. **Not implemented via the real `bd human
+respond`/`dismiss` commands**: verified live against bd v1.2.2 that both
+hard-fail with `storage is nil` on an embedded (non-server) Dolt backend,
+reproduced with and without `--json` — `bd human list` (read-only) works
+fine, both write subcommands don't. Composed the same documented effect
+("adds the response as a comment[-equivalent note] and closes with reason
+'Responded'/'Dismissed'") out of `append_note` + `close`, both already
+verified working elsewhere. An upstream bd limitation, not a design
+choice — revisit if a bd release fixes it.
+
 **Still open (genuinely a UI, not backend, task):**
 - Deeper roadmap/board/steering concepts (the dashboard covers tickets +
   prompts + outcomes, not a full kanban/epic-planning surface).
