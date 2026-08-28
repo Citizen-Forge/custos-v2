@@ -586,12 +586,17 @@ other way round.
   GPU-touching container attempting to start, not just runtime stability
   under load. `ollama` won't start at all until the card is physically
   removed — **user's call, pending, not something to keep attempting
-  software workarounds for** (see [[reference_unraid-box]]). Separately,
-  once that's fixed: the 2 working cards currently have almost no free
-  VRAM (~2GB combined) — `minimax-m2-server` (unhealthy, still running)
-  is using the rest. Model sizing (Qwen3.8-27B class vs. smaller) needs
-  both the hardware fix and a decision on how Ollama and
-  minimax-m2-server share the box.
+  software workarounds for** (see [[reference_unraid-box]]).
+  `minimax-m2-server`'s current VRAM/RAM usage isn't a resource conflict
+  to arbitrate — it was built specifically to replace Ollama for Custos's
+  sole use, and the plan (confirmed 2026-08-28) is to retire it in favor
+  of **Qwen3.8-Flash-Next at Q3_K_XL** once the hardware's fixed: 125B
+  params MoE, 90GB GGUF file, Unsloth's own docs want "at least 90GB RAM
+  or unified memory" and recommend 96GB for optimal performance. The box
+  has 94GB system RAM + up to 16GB VRAM once both working GPUs are free
+  (~110GB combined) — plausible but close to Unsloth's own comfort
+  margin, genuinely needs empirical performance evaluation once hardware
+  allows, not assumed. See project memory for the full picture.
 - **Real-model verification — still blocked**, now specifically on the
   above rather than generically "no Ollama reachable." Docker Desktop's
   own local Ollama (the original Phase 1 fallback target, before the
