@@ -576,17 +576,31 @@ other way round.
 
 ## Open questions (not blocking Phase 1, but will block later phases)
 
-- **Hardware specs** — VRAM/GPU on the Unraid box, once you're back. Drives
-  actual model choice (Qwen3.8-27B class vs. smaller), quantization, and
-  real context length. Phase 1 doesn't need this — it targets whatever runs
-  on Docker Desktop today.
-- **Real-model verification** — no Ollama/local model was reachable in this
-  dev environment, so everything above (durability, permission gate) is
-  proven against real Postgres/Beads but a *scripted fake* model, not real
-  inference. First thing to run once a model is reachable again: the manual
-  kill/resume demo in README.md with an actual model, plus a real run of
-  the permission classifier to see how it behaves against genuine tool-call
-  arguments rather than a scripted verdict.
+- **Hardware specs — checked 2026-08-28, partially resolved, new blocker
+  found.** The Unraid box has 3 GPUs, not the 2 assumed earlier: RTX 3070
+  Ti (8GB) + 2x GTX 1070 Ti (8GB) = 24GB nominal. But one GTX 1070 Ti is
+  physically failing (`nvidia-smi`: "Unable to determine the device
+  handle" — a recurrence of the PCIe-bus-fault incident documented in
+  [[project_minimax-m2-inference]]), and this time it's severe enough that
+  the NVIDIA Container Toolkit's CDI auto-enumeration fails for *any*
+  GPU-touching container attempting to start, not just runtime stability
+  under load. `ollama` won't start at all until the card is physically
+  removed — **user's call, pending, not something to keep attempting
+  software workarounds for** (see [[reference_unraid-box]]). Separately,
+  once that's fixed: the 2 working cards currently have almost no free
+  VRAM (~2GB combined) — `minimax-m2-server` (unhealthy, still running)
+  is using the rest. Model sizing (Qwen3.8-27B class vs. smaller) needs
+  both the hardware fix and a decision on how Ollama and
+  minimax-m2-server share the box.
+- **Real-model verification — still blocked**, now specifically on the
+  above rather than generically "no Ollama reachable." Docker Desktop's
+  own local Ollama (the original Phase 1 fallback target, before the
+  Unraid box was in scope at all) is untried as an interim path — worth
+  raising if real-model testing is wanted before the Unraid GPU is fixed.
+  First thing to run once *any* model is reachable: the manual kill/resume
+  demo in README.md, plus a real run of the permission classifier to see
+  how it behaves against genuine tool-call arguments rather than a
+  scripted verdict.
 - ~~Beads: adopt real Beads vs. build a lighter homegrown version~~ —
   resolved, adopted from Phase 1.
 - ~~Qdrant's fate relative to Beads~~ — resolved 2026-08-27, dropped (see
