@@ -161,6 +161,27 @@
     <div id="tool-proposals-list"></div>
   </section>
   <section>
+    <h2>Settings</h2>
+    <div style="margin-bottom:1rem">
+      <label style="display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.3rem">
+        Cost slider: <span id="cost-slider-value">0</span>/100 (slow/free ↔ fast/costly)
+      </label>
+      <input type="range" id="cost-slider" min="0" max="100" value="0" style="width:100%">
+      <div class="desc">Steers which configured provider tier the product-owner should reach for (check_model_options tool). Scaffolding today -- see PLAN.md.</div>
+    </div>
+    <div style="margin-bottom:1rem">
+      <label style="display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.3rem">Avatar style (DiceBear)</label>
+      <div style="display:flex;gap:0.5rem">
+        <input type="text" id="avatar-style-input" placeholder="e.g. micah, bottts, personas">
+        <button onclick="saveAvatarStyle()">Save</button>
+      </div>
+    </div>
+    <div>
+      <div style="font-size:0.85rem;color:var(--muted);margin-bottom:0.3rem">Model registry</div>
+      <div id="model-registry-list"></div>
+    </div>
+  </section>
+  <section>
     <h2>Outcomes</h2>
     <form class="outcomes" id="outcomes-form">
       <input type="text" id="outcomes-actor" placeholder="actor / role, e.g. worker">
@@ -197,9 +218,65 @@ async function loadAvatarStyle() {
   try {
     const data = await fetchJSON("/settings/avatar-style");
     avatarStyle = data.value;
+    document.getElementById("avatar-style-input").value = avatarStyle;
   } catch (e) {
     // keep the client-side default -- a missing/unreachable setting
     // shouldn't break avatar rendering, just fall back quietly.
+  }
+}
+
+async function saveAvatarStyle() {
+  const value = document.getElementById("avatar-style-input").value.trim();
+  if (!value) return;
+  try {
+    await fetchJSON("/settings/avatar-style", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+    avatarStyle = value;
+    refreshSeats(); // re-render with the new style immediately
+  } catch (e) {
+    window.alert(`failed to save: ${e.message}`);
+  }
+}
+
+async function loadCostSlider() {
+  try {
+    const data = await fetchJSON("/settings/cost-slider");
+    document.getElementById("cost-slider").value = data.value;
+    document.getElementById("cost-slider-value").textContent = data.value;
+  } catch (e) {
+    // keep the default -- same reasoning as loadAvatarStyle
+  }
+}
+
+document.getElementById("cost-slider").addEventListener("change", async (e) => {
+  const value = parseInt(e.target.value, 10);
+  document.getElementById("cost-slider-value").textContent = value;
+  try {
+    await fetchJSON("/settings/cost-slider", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+  } catch (err) {
+    window.alert(`failed to save: ${err.message}`);
+  }
+});
+
+async function refreshModelRegistry() {
+  try {
+    const items = await fetchJSON("/settings/model-registry");
+    const container = document.getElementById("model-registry-list");
+    container.innerHTML = items.length
+      ? items.map(p => `<div class="item">
+          <span class="id">${escapeHtml(p.name)}</span> — ${escapeHtml(p.model)}
+          <span class="story-seat">cost tier ${p.cost_tier}</span>
+        </div>`).join("")
+      : `<div class="empty">no providers configured</div>`;
+  } catch (e) {
+    document.getElementById("model-registry-list").innerHTML = `<div class="empty">error: ${e.message}</div>`;
   }
 }
 
@@ -464,8 +541,16 @@ document.getElementById("outcomes-form").addEventListener("submit", async (e) =>
   }
 });
 
-refreshAll();
-setInterval(refreshAll, REFRESH_MS);
+async function init() {
+  // Settings rarely change -- load once before the first render (so
+  // avatars use the real style from the start, not a flash of the
+  // default) rather than polling them every refresh cycle like tickets.
+  await Promise.all([loadAvatarStyle(), loadCostSlider(), refreshModelRegistry()]);
+  await refreshAll();
+  setInterval(refreshAll, REFRESH_MS);
+}
+
+init();
 </script>
 </body>
 </html>
