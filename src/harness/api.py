@@ -162,6 +162,7 @@ def list_seats():
         for s in roster:
             s["outcomes"] = outcomes.summary(s["seat_id"])
             s["verification"] = verifications.summary(conn, s["seat_id"])
+            s["queue"] = outcomes.queue_stats(s["seat_id"])
         return roster
     finally:
         conn.close()

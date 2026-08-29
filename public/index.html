@@ -182,6 +182,15 @@ function ticketItem(t) {
   </div>`;
 }
 
+function formatDuration(totalSeconds) {
+  const s = Math.round(totalSeconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = (m / 60).toFixed(1);
+  return `${h}h`;
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
@@ -327,6 +336,12 @@ async function refreshSeats() {
           ${s.verification.verified_total > 0 ? `<div class="stat-row">
             <div class="stat"><b>${s.verification.passed}</b>verified pass</div>
             <div class="stat"><b>${s.verification.failed}</b>verified fail</div>
+          </div>` : ""}
+          ${(s.queue.ready + s.queue.in_progress) > 0 ? `<div class="desc" style="margin-top:0.3rem">
+            queue: ${s.queue.ready} ready, ${s.queue.in_progress} in progress
+            ${s.queue.estimated_wait_seconds != null
+              ? ` — ~${formatDuration(s.queue.estimated_wait_seconds)} at this seat's own pace (${s.queue.sample_size} past ticket${s.queue.sample_size === 1 ? "" : "s"})`
+              : ` — no completion history yet to estimate from`}
           </div>` : ""}
         </div>`).join("")
       : `<div class="empty">no seats yet -- the product-owner creates these as work demands</div>`;
