@@ -193,6 +193,12 @@
 <script>
 const REFRESH_MS = 5000;
 
+// Carries API_AUTH_TOKEN (see auth.py) on every API call once one's
+// been entered -- no-op against a deployment that never set the env
+// var, since the backend accepts unauthenticated requests in that case.
+const TOKEN_STORAGE_KEY = "custos_api_token";
+let authToken = localStorage.getItem(TOKEN_STORAGE_KEY) || "";
+
 function el(html) {
   const t = document.createElement("template");
   t.innerHTML = html.trim();
@@ -309,7 +315,23 @@ function escapeHtml(s) {
 }
 
 async function fetchJSON(url, opts) {
-  const res = await fetch(url, opts);
+  const headers = { ...(opts && opts.headers) };
+  if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+  const res = await fetch(url, { ...opts, headers });
+
+  if (res.status === 401) {
+    // The deployment has API_AUTH_TOKEN set and we don't have a valid
+    // one yet -- ask once, save it, and let the caller's own retry
+    // logic (refreshAll's next cycle) pick it up rather than looping
+    // prompts here.
+    const entered = window.prompt("API token required (Authorization: Bearer <token>):");
+    if (entered) {
+      authToken = entered.trim();
+      localStorage.setItem(TOKEN_STORAGE_KEY, authToken);
+    }
+    throw new Error(`${url} -> 401`);
+  }
+
   if (!res.ok) throw new Error(`${url} -> ${res.status}`);
   return res.json();
 }

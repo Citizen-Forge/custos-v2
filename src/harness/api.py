@@ -6,22 +6,26 @@ ticket) are deliberately narrow, matching v1's "autonomy off by default"
 posture -- this is an admin surface for a human to inspect and resolve
 things, not a general write API.
 
-No auth yet -- matches where Phases 1-5 already are, nothing here is
-exposed beyond the docker-compose network today. Needed before this is
-reachable from anywhere but localhost; flagged, not hidden (same posture
-v1 took explicitly, see project memory on v1's admin/remote auth).
+Auth: a shared bearer token via API_AUTH_TOKEN (see auth.py) -- optional,
+same "flagged, not hidden" posture the module docstring used to carry
+here when this was unbuilt. /health stays open (docker healthcheck has
+no way to carry a token) and the static dashboard files are served
+unauthenticated (the dashboard JS itself carries the token on its own
+API calls, see public/index.html) -- everything else requires it
+whenever API_AUTH_TOKEN is set.
 """
 
 import os
 from contextlib import asynccontextmanager
 
 import psycopg
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import avatar, beads, model_registry, outcomes, prompts, seats, settings, tool_proposals, verifications, wiki
+from .auth import require_auth
 
 
 class RespondBody(BaseModel):
@@ -53,6 +57,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Custos v2 harness API", lifespan=lifespan)
 
+# Every route below except /health requires API_AUTH_TOKEN when it's
+# set (see auth.py) -- grouped on a router rather than each endpoint
+# individually so a new endpoint is protected by default, not by
+# remembering to add the dependency each time.
+router = APIRouter(dependencies=[Depends(require_auth)])
+
 _PUBLIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "public")
 
 
@@ -80,7 +90,7 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/tickets")
+@router.get("/tickets")
 def list_tickets(status: str = "ready"):
     if status == "ready":
         return beads.ready()
@@ -91,7 +101,7 @@ def list_tickets(status: str = "ready"):
     raise HTTPException(400, f"unknown status {status!r}, expected ready|in_progress|human")
 
 
-@app.get("/projects")
+@router.get("/projects")
 def list_projects():
     """The full project -> epic -> story tree for the board UI. Walks
     Beads' own hierarchy live (no cached/parallel structure to drift out
@@ -108,7 +118,7 @@ def list_projects():
     return tree
 
 
-@app.get("/tickets/{issue_id}")
+@router.get("/tickets/{issue_id}")
 def get_ticket(issue_id: str):
     try:
         return beads.show(issue_id)
@@ -116,7 +126,7 @@ def get_ticket(issue_id: str):
         raise HTTPException(404, str(e)) from e
 
 
-@app.post("/tickets/{issue_id}/respond")
+@router.post("/tickets/{issue_id}/respond")
 def respond_to_ticket(issue_id: str, body: RespondBody):
     """Resolve a human-flagged ticket with a response, closing it -- see
     beads.respond_to_human's docstring for why this composes append_note
@@ -127,7 +137,7 @@ def respond_to_ticket(issue_id: str, body: RespondBody):
         raise HTTPException(404, str(e)) from e
 
 
-@app.post("/tickets/{issue_id}/dismiss")
+@router.post("/tickets/{issue_id}/dismiss")
 def dismiss_ticket(issue_id: str, body: DismissBody = DismissBody()):
     try:
         return beads.dismiss_human(issue_id, body.reason)
@@ -135,7 +145,7 @@ def dismiss_ticket(issue_id: str, body: DismissBody = DismissBody()):
         raise HTTPException(404, str(e)) from e
 
 
-@app.get("/prompts/pending")
+@router.get("/prompts/pending")
 def list_pending_prompts(role: str | None = None):
     conn = _prompt_conn()
     try:
@@ -144,7 +154,7 @@ def list_pending_prompts(role: str | None = None):
         conn.close()
 
 
-@app.post("/prompts/{role}/{version}/approve")
+@router.post("/prompts/{role}/{version}/approve")
 def approve_prompt(role: str, version: int):
     conn = _prompt_conn()
     try:
@@ -154,12 +164,12 @@ def approve_prompt(role: str, version: int):
         conn.close()
 
 
-@app.get("/outcomes/{actor}")
+@router.get("/outcomes/{actor}")
 def get_outcomes(actor: str):
     return outcomes.summary(actor)
 
 
-@app.get("/seats")
+@router.get("/seats")
 def list_seats():
     conn = _seats_conn()
     try:
@@ -173,7 +183,7 @@ def list_seats():
         conn.close()
 
 
-@app.get("/tool-proposals")
+@router.get("/tool-proposals")
 def list_tool_proposals(status: str = "reviewed"):
     """Default to `reviewed`: what a human should look at (sandboxed +
     a reviewer verdict attached, still short of active either way) --
@@ -185,12 +195,12 @@ def list_tool_proposals(status: str = "reviewed"):
         conn.close()
 
 
-@app.get("/wiki")
+@router.get("/wiki")
 def list_wiki_pages():
     return {"pages": wiki.list_pages()}
 
 
-@app.get("/wiki/{slug:path}")
+@router.get("/wiki/{slug:path}")
 def get_wiki_page(slug: str):
     content = wiki.read_page(slug)
     if content is None:
@@ -198,7 +208,7 @@ def get_wiki_page(slug: str):
     return {"slug": slug, "content": content}
 
 
-@app.get("/avatars/{seat_id}")
+@router.get("/avatars/{seat_id}")
 def get_avatar(seat_id: str):
     """A real Gemini-generated portrait for this seat, if one exists
     (avatar.py -- optional, needs GEMINI_API_KEY configured). 404 when
@@ -210,7 +220,7 @@ def get_avatar(seat_id: str):
     return FileResponse(path, media_type="image/png")
 
 
-@app.get("/settings/cost-slider")
+@router.get("/settings/cost-slider")
 def get_cost_slider():
     """0 (slow/free) to 100 (fast/costly) -- steers which configured
     provider tier the product-owner should reach for. See
@@ -224,7 +234,7 @@ def get_cost_slider():
         conn.close()
 
 
-@app.put("/settings/cost-slider")
+@router.put("/settings/cost-slider")
 def set_cost_slider(body: CostSliderBody):
     conn = _seats_conn()
     try:
@@ -238,13 +248,13 @@ def set_cost_slider(body: CostSliderBody):
         conn.close()
 
 
-@app.get("/settings/model-registry")
+@router.get("/settings/model-registry")
 def get_model_registry():
     registry = model_registry.load_registry()
     return [{"name": p.name, "model": p.model, "cost_tier": p.cost_tier} for p in registry]
 
 
-@app.get("/settings/avatar-style")
+@router.get("/settings/avatar-style")
 def get_avatar_style():
     """A DiceBear (api.dicebear.com) style name, applied to every seat's
     avatar in the dashboard via its seat_id as the seed."""
@@ -256,7 +266,7 @@ def get_avatar_style():
         conn.close()
 
 
-@app.put("/settings/avatar-style")
+@router.put("/settings/avatar-style")
 def set_avatar_style(body: AvatarStyleBody):
     conn = _seats_conn()
     try:
@@ -270,7 +280,7 @@ def set_avatar_style(body: AvatarStyleBody):
         conn.close()
 
 
-@app.post("/tool-proposals/{proposal_id}/approve")
+@router.post("/tool-proposals/{proposal_id}/approve")
 def approve_tool_proposal(proposal_id: int):
     """The one and only way a tool proposal ever becomes active --
     deliberately no auto-approval path exists anywhere in this codebase,
@@ -283,7 +293,7 @@ def approve_tool_proposal(proposal_id: int):
         conn.close()
 
 
-@app.post("/tool-proposals/{proposal_id}/reject")
+@router.post("/tool-proposals/{proposal_id}/reject")
 def reject_tool_proposal(proposal_id: int, body: DismissBody = DismissBody()):
     conn = _tool_proposals_conn()
     try:
@@ -292,6 +302,8 @@ def reject_tool_proposal(proposal_id: int, body: DismissBody = DismissBody()):
     finally:
         conn.close()
 
+
+app.include_router(router)
 
 # Mounted last, deliberately: a StaticFiles mount at "/" only catches
 # paths not matched by the routes above it, since Starlette checks routes

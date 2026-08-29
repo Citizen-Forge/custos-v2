@@ -266,3 +266,36 @@ def test_model_registry_endpoint_lists_configured_providers(monkeypatch):
 
     assert response.status_code == 200
     assert any(p["model"] == "test-model-for-api" for p in response.json())
+
+
+def test_health_is_reachable_without_a_token_even_when_auth_is_on(monkeypatch):
+    monkeypatch.setenv("API_AUTH_TOKEN", "secret-test-token")
+    assert client.get("/health").json() == {"status": "ok"}
+
+
+def test_protected_endpoint_rejects_missing_token_when_auth_is_on(monkeypatch):
+    monkeypatch.setenv("API_AUTH_TOKEN", "secret-test-token")
+    response = client.get("/tickets", params={"status": "ready"})
+    assert response.status_code == 401
+
+
+def test_protected_endpoint_rejects_wrong_token_when_auth_is_on(monkeypatch):
+    monkeypatch.setenv("API_AUTH_TOKEN", "secret-test-token")
+    response = client.get(
+        "/tickets", params={"status": "ready"}, headers={"Authorization": "Bearer wrong-token"}
+    )
+    assert response.status_code == 401
+
+
+def test_protected_endpoint_accepts_correct_token_when_auth_is_on(monkeypatch):
+    monkeypatch.setenv("API_AUTH_TOKEN", "secret-test-token")
+    response = client.get(
+        "/tickets", params={"status": "ready"}, headers={"Authorization": "Bearer secret-test-token"}
+    )
+    assert response.status_code == 200
+
+
+def test_protected_endpoint_has_no_auth_requirement_when_token_unset(monkeypatch):
+    monkeypatch.delenv("API_AUTH_TOKEN", raising=False)
+    response = client.get("/tickets", params={"status": "ready"})
+    assert response.status_code == 200
