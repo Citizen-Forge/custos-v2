@@ -192,6 +192,26 @@ def test_projects_endpoint_returns_the_full_tree():
     assert found_epic["stories"][0]["title"] == "api-test story"
 
 
+def test_avatar_endpoint_404s_when_no_generated_avatar_exists():
+    response = client.get("/avatars/never-generated-seat")
+    assert response.status_code == 404
+
+
+def test_avatar_endpoint_serves_a_real_generated_file(monkeypatch, tmp_path):
+    from harness import avatar as avatar_module
+
+    monkeypatch.setattr(avatar_module, "WORKSPACE_ROOT", str(tmp_path))
+    avatar_dir = tmp_path / "avatars"
+    avatar_dir.mkdir()
+    (avatar_dir / "some-seat.png").write_bytes(b"fake png bytes")
+
+    response = client.get("/avatars/some-seat")
+
+    assert response.status_code == 200
+    assert response.content == b"fake png bytes"
+    assert response.headers["content-type"] == "image/png"
+
+
 def test_wiki_list_and_get_endpoints():
     from harness import wiki
 
@@ -221,6 +241,20 @@ def test_cost_slider_get_and_put_round_trip():
 
 def test_cost_slider_rejects_out_of_range_value():
     response = client.put("/settings/cost-slider", json={"value": 200})
+    assert response.status_code == 422
+
+
+def test_avatar_style_get_and_put_round_trip():
+    response = client.put("/settings/avatar-style", json={"value": "bottts"})
+    assert response.status_code == 200
+    assert response.json()["value"] == "bottts"
+
+    response = client.get("/settings/avatar-style")
+    assert response.json()["value"] == "bottts"
+
+
+def test_avatar_style_rejects_empty_value():
+    response = client.put("/settings/avatar-style", json={"value": "  "})
     assert response.status_code == 422
 
 

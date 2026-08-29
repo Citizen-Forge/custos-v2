@@ -187,6 +187,22 @@ function ticketItem(t) {
   </div>`;
 }
 
+// User's pick (2026-08-29), adjustable live via GET/PUT
+// /settings/avatar-style -- fetched once at startup, not on every
+// refresh cycle, since it rarely changes; refreshAll() re-renders
+// seats using whatever's currently cached here.
+let avatarStyle = "micah";
+
+async function loadAvatarStyle() {
+  try {
+    const data = await fetchJSON("/settings/avatar-style");
+    avatarStyle = data.value;
+  } catch (e) {
+    // keep the client-side default -- a missing/unreachable setting
+    // shouldn't break avatar rendering, just fall back quietly.
+  }
+}
+
 function avatarUrl(seed) {
   // DiceBear's public, documented HTTP API -- deterministic per seed
   // (a given seat_id always renders the same face), no backend compute,
@@ -195,9 +211,9 @@ function avatarUrl(seed) {
   // rate-limiting/blocking) and NOT a locally-run GAN (StyleGAN3 is
   // GPU-optimized; CPU inference would be slow and would compete with
   // the Qwen inference server for the same constrained hardware this
-  // whole project has been tuned around). "personas" is an illustrated
-  // portrait style, not photorealistic -- a real tradeoff, see PLAN.md.
-  return `https://api.dicebear.com/9.x/personas/svg?seed=${encodeURIComponent(seed)}`;
+  // whole project has been tuned around). Illustrated portrait style,
+  // not photorealistic -- a real tradeoff, see PLAN.md.
+  return `https://api.dicebear.com/9.x/${encodeURIComponent(avatarStyle)}/svg?seed=${encodeURIComponent(seed)}`;
 }
 
 function formatDuration(totalSeconds) {
@@ -345,7 +361,8 @@ async function refreshSeats() {
     container.innerHTML = items.length
       ? items.map(s => `<div class="item">
           <div class="seat-head">
-            <img class="avatar" src="${avatarUrl(s.seat_id)}" alt="" loading="lazy">
+            <img class="avatar" src="/avatars/${encodeURIComponent(s.seat_id)}" alt=""
+                 loading="lazy" onerror="this.onerror=null;this.src=avatarUrl(s.seat_id)">
             <span class="id">${s.display_name ? `${escapeHtml(s.display_name)} <span style="opacity:0.6;font-weight:normal">(${escapeHtml(s.seat_id)}${s.pronouns ? `, ${escapeHtml(s.pronouns)}` : ""})</span>` : escapeHtml(s.seat_id)}</span>
           </div>
           <div class="desc">${escapeHtml(s.specialty)}</div>

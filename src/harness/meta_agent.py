@@ -22,7 +22,7 @@ Two capabilities, deliberately different risk postures:
 
 import json
 
-from . import outcomes, prompts, seats, slack, verifications, wiki
+from . import avatar, outcomes, prompts, seats, slack, verifications, wiki
 
 PROMPT_TEMPLATE = """You are reviewing an AI agent's system prompt based on its recent \
 track record, and proposing an improved version if one is warranted.
@@ -178,6 +178,13 @@ def create_specialist_seat(conn, specialty_description: str, requested_by: str, 
             wiki.write_page(wiki.agent_profile_slug(seat_id), profile_page)
         except OSError:
             pass
+        # Real portrait generated from the seat's own written
+        # description (user's own call, 2026-08-29 -- prefers this over
+        # a deterministic illustrated avatar for realism). Optional:
+        # no-ops if GEMINI_API_KEY isn't configured, and the dashboard
+        # falls back to a DiceBear avatar whenever this hasn't produced
+        # one -- never blocks seat creation on an external API call.
+        avatar.generate_avatar(seat_id, profile_page)
 
     who = f"{display_name} ({seat_id})" if display_name else seat_id
     slack.post_message(f":wave: Welcome {who} to the team! Recruited to work on: {specialty_description}")

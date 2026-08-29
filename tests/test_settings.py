@@ -52,3 +52,29 @@ def test_generic_get_set_round_trips_any_key():
 def test_generic_get_returns_default_for_unknown_key():
     conn = _conn()
     assert settings.get(conn, "never-set-key", default="fallback") == "fallback"
+
+
+def test_default_avatar_style_constant_is_micah():
+    # settings is a real table shared across this whole test session (see
+    # every other "defaults to X" test in this file) -- another test
+    # setting a different value earlier in the same run is expected, not
+    # a bug, so this checks the constant itself rather than asserting a
+    # specific live value through a connection other tests also touch.
+    assert settings.DEFAULT_AVATAR_STYLE == "micah"
+
+
+def test_set_and_get_avatar_style_round_trips():
+    conn = _conn()
+    settings.set_avatar_style(conn, "bottts")
+
+    assert settings.get_avatar_style(conn) == "bottts"
+
+
+def test_set_avatar_style_rejects_empty_value():
+    conn = _conn()
+    import pytest
+
+    with pytest.raises(ValueError):
+        settings.set_avatar_style(conn, "")
+    with pytest.raises(ValueError):
+        settings.set_avatar_style(conn, "   ")

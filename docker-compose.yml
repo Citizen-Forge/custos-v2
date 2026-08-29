@@ -49,6 +49,38 @@ services:
       - "8000:8000"
     command: ["uvicorn", "harness.api:app", "--host", "0.0.0.0", "--port", "8000"]
 
+  # Periodically runs product-owner/meta-agent/overwatch/verifier instead
+  # of manual `docker compose run` invocations for each. On by default
+  # (a standard `docker compose up` service, same as harness/api) -- a
+  # deliberate reversal of v1's "autonomy off by default" posture, per
+  # the user's own call (2026-08-29): this harness is built around a
+  # local, unmetered model, so the cost/risk calculus that justified
+  # gating things behind manual activation in v1 (real API spend per
+  # call) doesn't really apply here. Scoped narrowly, though -- this
+  # flips whether recurring *work* happens automatically, not whether
+  # generated *tool code* activates automatically: prompts.py's revision
+  # approval and tool_proposals.py's approve/reject gate are untouched,
+  # since those protect against a bad change silently taking effect
+  # (a real safety boundary), not against unwanted spend. Disable with
+  # `docker compose up postgres harness api` (omitting scheduler) if
+  # that reversal turns out to be wrong for a given deployment.
+  scheduler:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://custos:custos@postgres:5432/custos_harness
+      LOCAL_MODEL_BASE_URL: ${LOCAL_MODEL_BASE_URL:-http://host.docker.internal:11434/v1}
+      LOCAL_MODEL_NAME: ${LOCAL_MODEL_NAME:-qwen2.5:7b-instruct}
+      HARNESS_WORKSPACE: /workspace
+      SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-1800}
+    volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      - ./workspace:/workspace
+    command: ["python", "scripts/run_scheduler.py"]
+
   # PLAN.md Phase 7: the only service that ever mounts the Docker socket.
   # Deliberately separate from harness/api -- if a worker container that
   # runs arbitrary agent shell_exec calls also held this, an agent could

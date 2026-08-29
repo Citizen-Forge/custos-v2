@@ -141,9 +141,50 @@ this phase is about, not an oversight.
 dashboard's Tool Proposals section carry a candidate tool from
 `propose` → `sandboxed` → `reviewed` → `approved`/`rejected`. Nothing
 auto-activates at any stage, unlike a new seat's first prompt — `approve`
-is always a distinct, human-triggered call. The overwatch agent that
-would actually propose tools, and the reviewer agent that would actually
-review them, aren't built yet — this is the substrate they'll need.
+is always a distinct, human-triggered call.
+
+```bash
+# overwatch proposes a tool from real capability-gap evidence (or an
+# explicit brief while that evidence is still thin):
+docker compose run --rm -e OVERWATCH_BRIEF="..." harness python scripts/run_overwatch.py
+# sandboxing needs the Docker socket, so it's a separate step, sandbox-runner only:
+docker compose --profile sandbox run --rm sandbox-runner python scripts/run_sandbox_for_proposals.py
+# reviewer forms a real allow/deny verdict on the source + sandbox evidence:
+docker compose run --rm harness python scripts/run_reviewer.py
+# then a human approves/rejects via the API/dashboard, same as any tool proposal.
+```
+
+## Verifier (acceptance-criteria pass/fail)
+
+A real, automated positive-feedback signal (replaces the earlier idea of
+a human-feedback "Laurels" surface): give a ticket explicit acceptance
+criteria at creation time, and once a seat closes it, a separate verifier
+agent judges the real evidence against those criteria and records a
+pass/fail — not self-graded by the seat that did the work.
+
+```bash
+docker compose run --rm harness python scripts/run_verifier.py
+```
+
+## Scheduler (on by default)
+
+Runs product-owner triage, meta-agent revision proposals, overwatch
+capability scanning, and the verifier on a loop instead of manual
+`docker compose run` invocations for each — starts automatically with
+`docker compose up`, same as harness/api. Deliberately a reversal of v1's
+"autonomy off by default" posture, per the user's own call: this project
+is built around a local, unmetered model, so the cost/risk calculus that
+justified gating recurring work behind manual activation elsewhere
+doesn't really apply here. Narrowly scoped, though — the things that
+protect against a *bad change silently taking effect* (prompts.py's
+revision-approval step, tool_proposals.py's approve/reject gate) are
+untouched; this only flips whether recurring work gets kicked off on its
+own, not whether generated tool code or prompt revisions auto-activate.
+
+```bash
+# to opt back OUT of automatic scheduling for a given deployment:
+docker compose up postgres harness api
+```
 
 ## Proving the durability guarantee manually (with a real model)
 

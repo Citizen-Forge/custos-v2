@@ -17,10 +17,11 @@ from contextlib import asynccontextmanager
 
 import psycopg
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import beads, model_registry, outcomes, prompts, seats, settings, tool_proposals, verifications, wiki
+from . import avatar, beads, model_registry, outcomes, prompts, seats, settings, tool_proposals, verifications, wiki
 
 
 class RespondBody(BaseModel):
@@ -33,6 +34,10 @@ class DismissBody(BaseModel):
 
 class CostSliderBody(BaseModel):
     value: int
+
+
+class AvatarStyleBody(BaseModel):
+    value: str
 
 
 @asynccontextmanager
@@ -193,6 +198,18 @@ def get_wiki_page(slug: str):
     return {"slug": slug, "content": content}
 
 
+@app.get("/avatars/{seat_id}")
+def get_avatar(seat_id: str):
+    """A real Gemini-generated portrait for this seat, if one exists
+    (avatar.py -- optional, needs GEMINI_API_KEY configured). 404 when
+    none was generated -- the dashboard's <img onerror> falls back to a
+    deterministic DiceBear avatar in that case, not an error state."""
+    path = avatar.avatar_path(seat_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"no generated avatar for {seat_id!r}")
+    return FileResponse(path, media_type="image/png")
+
+
 @app.get("/settings/cost-slider")
 def get_cost_slider():
     """0 (slow/free) to 100 (fast/costly) -- steers which configured
@@ -225,6 +242,32 @@ def set_cost_slider(body: CostSliderBody):
 def get_model_registry():
     registry = model_registry.load_registry()
     return [{"name": p.name, "model": p.model, "cost_tier": p.cost_tier} for p in registry]
+
+
+@app.get("/settings/avatar-style")
+def get_avatar_style():
+    """A DiceBear (api.dicebear.com) style name, applied to every seat's
+    avatar in the dashboard via its seat_id as the seed."""
+    conn = _seats_conn()
+    try:
+        settings.init_table(conn)
+        return {"value": settings.get_avatar_style(conn)}
+    finally:
+        conn.close()
+
+
+@app.put("/settings/avatar-style")
+def set_avatar_style(body: AvatarStyleBody):
+    conn = _seats_conn()
+    try:
+        settings.init_table(conn)
+        try:
+            settings.set_avatar_style(conn, body.value)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        return {"value": settings.get_avatar_style(conn)}
+    finally:
+        conn.close()
 
 
 @app.post("/tool-proposals/{proposal_id}/approve")
