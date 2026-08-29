@@ -182,6 +182,17 @@
     </div>
   </section>
   <section>
+    <h2>Wiki <span class="count" id="wiki-count">0</span></h2>
+    <div id="wiki-list"></div>
+    <div id="wiki-viewer" style="display:none;margin-top:0.75rem;border-top:1px solid var(--border);padding-top:0.75rem">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <span class="id" id="wiki-viewer-slug"></span>
+        <button onclick="closeWikiPage()">Close</button>
+      </div>
+      <pre id="wiki-viewer-content" style="white-space:pre-wrap;font-family:inherit;font-size:0.85rem;margin-top:0.5rem"></pre>
+    </div>
+  </section>
+  <section>
     <h2>Outcomes</h2>
     <form class="outcomes" id="outcomes-form">
       <input type="text" id="outcomes-actor" placeholder="actor / role, e.g. worker">
@@ -465,6 +476,7 @@ async function refreshSeats() {
             <span class="id">${s.display_name ? `${escapeHtml(s.display_name)} <span style="opacity:0.6;font-weight:normal">(${escapeHtml(s.seat_id)}${s.pronouns ? `, ${escapeHtml(s.pronouns)}` : ""})</span>` : escapeHtml(s.seat_id)}</span>
           </div>
           <div class="desc">${escapeHtml(s.specialty)}</div>
+          <button onclick="viewWikiPage('agents/${encodeURIComponent(s.seat_id)}')" style="margin-top:0.3rem">Profile</button>
           <div class="stat-row" style="margin-top:0.3rem">
             <div class="stat"><b>${s.outcomes.closed}</b>closed</div>
             <div class="stat"><b>${s.outcomes.refused}</b>refused</div>
@@ -532,6 +544,41 @@ async function refreshProjects() {
   }
 }
 
+async function refreshWiki() {
+  try {
+    const data = await fetchJSON("/wiki");
+    document.getElementById("wiki-count").textContent = data.pages.length;
+    const container = document.getElementById("wiki-list");
+    container.innerHTML = data.pages.length
+      ? data.pages.map(slug => `<div class="item">
+          <span class="id">${escapeHtml(slug)}</span>
+          <button onclick="viewWikiPage('${escapeHtml(slug)}')" style="float:right">View</button>
+        </div>`).join("")
+      : `<div class="empty">no pages yet</div>`;
+  } catch (e) {
+    document.getElementById("wiki-list").innerHTML = `<div class="empty">error: ${e.message}</div>`;
+  }
+}
+
+async function viewWikiPage(slug) {
+  const viewer = document.getElementById("wiki-viewer");
+  const content = document.getElementById("wiki-viewer-content");
+  document.getElementById("wiki-viewer-slug").textContent = slug;
+  viewer.style.display = "block";
+  content.textContent = "loading…";
+  try {
+    const page = await fetchJSON(`/wiki/${slug.split("/").map(encodeURIComponent).join("/")}`);
+    content.textContent = page.content;
+  } catch (e) {
+    content.textContent = `no page at '${slug}' yet`;
+  }
+  viewer.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function closeWikiPage() {
+  document.getElementById("wiki-viewer").style.display = "none";
+}
+
 async function refreshAll() {
   await Promise.all([
     refreshProjects(),
@@ -541,6 +588,7 @@ async function refreshAll() {
     refreshTickets("human", "human-list", "human-count", humanTicketItem),
     refreshPrompts(),
     refreshToolProposals(),
+    refreshWiki(),
   ]);
   document.getElementById("status").textContent = "updated " + new Date().toLocaleTimeString();
 }
