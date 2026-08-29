@@ -8,7 +8,7 @@ from typing import Annotated
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
-from . import beads, permissions, slack
+from . import beads, permissions, slack, wiki
 from .config import WORKSPACE_ROOT
 from .state import HarnessState
 
@@ -110,6 +110,35 @@ def scan_team_channel() -> str:
 
 
 @tool
+def read_wiki_page(slug: str) -> str:
+    """Read a page from the project wiki (human-facing documentation, distinct from Beads
+    notes) -- e.g. 'agents/some-seat-id' for that seat's own profile, or a topic doc.
+    Returns a clear message rather than an error if the page doesn't exist yet."""
+    content = wiki.read_page(slug)
+    if content is None:
+        return f"no wiki page at {slug!r} yet"
+    return content
+
+
+@tool
+def write_wiki_page(slug: str, content: str) -> str:
+    """Write (or overwrite) a page in the project wiki -- for human-facing documentation,
+    not internal ticket notes (use write_handoff_note for those). Markdown, e.g.
+    'agents/some-seat-id' for a profile page, or a topic like 'deployment-notes'."""
+    path = wiki.write_page(slug, content)
+    return f"wrote wiki page {slug} ({path})"
+
+
+@tool
+def list_wiki_pages() -> str:
+    """List every page that currently exists in the project wiki."""
+    pages = wiki.list_pages()
+    if not pages:
+        return "wiki is empty"
+    return "\n".join(pages)
+
+
+@tool
 def write_handoff_note(note: str, state: Annotated[HarnessState, InjectedState]) -> str:
     """Record a note for whoever (or whatever future session of yourself)
     picks this ticket up next -- what's done, what's left, anything
@@ -126,6 +155,9 @@ ALL_TOOLS = [
     remember_fact,
     search_related_work,
     scan_team_channel,
+    read_wiki_page,
+    write_wiki_page,
+    list_wiki_pages,
     create_subtask,
     refuse_ticket,
     write_handoff_note,

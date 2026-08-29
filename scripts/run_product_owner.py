@@ -21,7 +21,7 @@ import os
 import psycopg
 from langgraph.checkpoint.postgres import PostgresSaver
 
-from harness import prompts, seats
+from harness import prompts, seats, settings
 from harness.product_owner import ROLE, build_tools, run_triage_session
 from harness.providers import ProviderConfig
 from harness.routing import ConcurrencyGate, RoutedModel, RoutingTable
@@ -62,6 +62,7 @@ def main() -> None:
     with psycopg.connect(conn_string, autocommit=True) as conn:
         prompts.init_table(conn)
         seats.init_table(conn)
+        settings.init_table(conn)
 
         # tools=None here: a plain reasoning caller for request_new_seat's
         # delegation to meta_agent.create_specialist_seat, distinct from

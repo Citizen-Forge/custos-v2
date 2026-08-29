@@ -33,7 +33,7 @@ import uuid
 
 from langchain_core.tools import tool
 
-from . import beads, meta_agent, outcomes, seats
+from . import beads, meta_agent, model_registry, outcomes, seats, settings
 from .graph import build_graph_from_model
 
 ROLE = "product_owner"
@@ -118,6 +118,20 @@ def build_tools(conn, requesting_model):
         return f"created seat {result['seat_id']}"
 
     @tool
+    def check_model_options() -> str:
+        """See the current system-wide cost-slider setting (0=slow/free, 100=fast/costly)
+        and which configured model providers fit within it. Scaffolding today (only a local
+        provider is typically configured) -- visibility, not yet automatic per-call routing."""
+        slider = settings.get_cost_slider(conn)
+        registry = model_registry.load_registry()
+        eligible = model_registry.providers_at_or_below(registry, slider)
+        lines = [f"cost slider: {slider}/100"]
+        for p in registry:
+            fits = "eligible" if p in eligible else "too costly for current slider"
+            lines.append(f"- {p.name} (cost_tier={p.cost_tier}, model={p.model}): {fits}")
+        return "\n".join(lines)
+
+    @tool
     def list_projects() -> str:
         """List top-level projects sorted by priority (0=highest) -- check this before
         deciding what to work on next or where a new idea belongs. Every project's backlog
@@ -159,6 +173,7 @@ def build_tools(conn, requesting_model):
         list_unassigned_tickets,
         assign_ticket,
         request_new_seat,
+        check_model_options,
         list_projects,
         create_project,
         create_epic,

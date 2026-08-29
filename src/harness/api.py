@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import beads, outcomes, prompts, seats, tool_proposals, verifications
+from . import beads, model_registry, outcomes, prompts, seats, settings, tool_proposals, verifications, wiki
 
 
 class RespondBody(BaseModel):
@@ -29,6 +29,10 @@ class RespondBody(BaseModel):
 
 class DismissBody(BaseModel):
     reason: str | None = None
+
+
+class CostSliderBody(BaseModel):
+    value: int
 
 
 @asynccontextmanager
@@ -156,6 +160,53 @@ def list_tool_proposals(status: str = "reviewed"):
         return tool_proposals.list_by_status(conn, status)
     finally:
         conn.close()
+
+
+@app.get("/wiki")
+def list_wiki_pages():
+    return {"pages": wiki.list_pages()}
+
+
+@app.get("/wiki/{slug:path}")
+def get_wiki_page(slug: str):
+    content = wiki.read_page(slug)
+    if content is None:
+        raise HTTPException(status_code=404, detail=f"no wiki page at {slug!r}")
+    return {"slug": slug, "content": content}
+
+
+@app.get("/settings/cost-slider")
+def get_cost_slider():
+    """0 (slow/free) to 100 (fast/costly) -- steers which configured
+    provider tier the product-owner should reach for. See
+    model_registry.py -- scaffolding today, not yet wired to automatic
+    per-call routing (only a local provider is typically configured)."""
+    conn = _seats_conn()  # any connection works; reuses the seats helper's init pattern
+    try:
+        settings.init_table(conn)
+        return {"value": settings.get_cost_slider(conn)}
+    finally:
+        conn.close()
+
+
+@app.put("/settings/cost-slider")
+def set_cost_slider(body: CostSliderBody):
+    conn = _seats_conn()
+    try:
+        settings.init_table(conn)
+        try:
+            settings.set_cost_slider(conn, body.value)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        return {"value": settings.get_cost_slider(conn)}
+    finally:
+        conn.close()
+
+
+@app.get("/settings/model-registry")
+def get_model_registry():
+    registry = model_registry.load_registry()
+    return [{"name": p.name, "model": p.model, "cost_tier": p.cost_tier} for p in registry]
 
 
 @app.post("/tool-proposals/{proposal_id}/approve")

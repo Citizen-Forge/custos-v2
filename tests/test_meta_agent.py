@@ -14,7 +14,7 @@ import uuid
 
 import psycopg
 
-from harness import prompts, seats, verifications
+from harness import prompts, seats, verifications, wiki
 from harness.meta_agent import create_specialist_seat, propose_prompt_update
 
 
@@ -89,6 +89,7 @@ def test_create_specialist_seat_goes_active_immediately_no_approval_needed():
                 "system_prompt": "you specialize in X",
                 "display_name": "Rowan",
                 "pronouns": "they/them",
+                "profile_page": "Hi, I'm Rowan! I specialize in X.",
             }
         )
     )
@@ -100,6 +101,7 @@ def test_create_specialist_seat_goes_active_immediately_no_approval_needed():
         "version": 1,
         "display_name": "Rowan",
         "pronouns": "they/them",
+        "profile_page": "Hi, I'm Rowan! I specialize in X.",
     }
     created = seats.get(conn, seat_id)
     assert created is not None
@@ -109,6 +111,10 @@ def test_create_specialist_seat_goes_active_immediately_no_approval_needed():
     # which stays the functional identifier
     assert created["display_name"] == "Rowan"
     assert created["pronouns"] == "they/them"
+    # the seat's own wiki profile page, written as part of creation (the
+    # user's own framing: a real page a human -- or the seat itself,
+    # later -- can read, not just a name in a table)
+    assert wiki.read_page(wiki.agent_profile_slug(seat_id)) == "Hi, I'm Rowan! I specialize in X."
     # unlike propose_prompt_update, a brand-new seat's first prompt is
     # active immediately -- nothing existing to protect with a pending step
     assert prompts.get_active(conn, seat_id) == "you specialize in X"
@@ -128,6 +134,8 @@ def test_create_specialist_seat_without_identity_fields_stores_null_not_a_placeh
 
     assert result["display_name"] is None
     assert result["pronouns"] is None
+    assert result["profile_page"] is None
+    assert wiki.read_page(wiki.agent_profile_slug(seat_id)) is None  # no fabricated page either
     assert seats.get(conn, seat_id)["display_name"] is None
 
 

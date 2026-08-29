@@ -34,6 +34,13 @@ class ProviderConfig:
     # scripts/run_*.py), since unbounded generation is a real
     # reliability/cost risk here, not a hypothetical one.
     max_tokens: int | None = None
+    # Cost/capability tier, 0-100 (0=free/local, 100=most expensive) --
+    # added 2026-08-29 per the user's own architecture call: rather than
+    # a human pre-deciding one fixed ordered fallback chain, the
+    # product-owner should be able to choose which provider to use per
+    # piece of work, steered by a single system-wide slider (settings.py)
+    # rather than needing separate policy per role. See model_registry.py.
+    cost_tier: int = 0
 
 
 def build_chat_model(cfg: ProviderConfig) -> ChatOpenAI:

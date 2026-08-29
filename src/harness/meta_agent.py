@@ -22,7 +22,7 @@ Two capabilities, deliberately different risk postures:
 
 import json
 
-from . import outcomes, prompts, seats, slack, verifications
+from . import outcomes, prompts, seats, slack, verifications, wiki
 
 PROMPT_TEMPLATE = """You are reviewing an AI agent's system prompt based on its recent \
 track record, and proposing an improved version if one is warranted.
@@ -101,9 +101,13 @@ distinct from the functional seat_id, chosen the way a person would pick how the
 be known, not derived mechanically from the specialty. Pick pronouns freely (they/them, \
 she/her, he/him, or something else entirely) -- there's no default and no wrong answer here.
 
+Finally, write a short first-person wiki profile page introducing yourself to the team and \
+any human looking at the roster -- who you are, what you specialize in, how you like to work. \
+A few sentences, written as this agent, not a third-person description of it.
+
 Respond with strict JSON and nothing else: \
 {{"seat_id": "<id>", "system_prompt": "<full prompt text>", "display_name": "<chosen name>", \
-"pronouns": "<chosen pronouns>"}}
+"pronouns": "<chosen pronouns>", "profile_page": "<first-person markdown bio>"}}
 """
 
 
@@ -129,6 +133,7 @@ def create_specialist_seat(conn, specialty_description: str, requested_by: str, 
         system_prompt = data["system_prompt"]
         display_name = data.get("display_name") or None
         pronouns = data.get("pronouns") or None
+        profile_page = data.get("profile_page") or None
     except (json.JSONDecodeError, KeyError, TypeError):
         return None
 
@@ -141,6 +146,16 @@ def create_specialist_seat(conn, specialty_description: str, requested_by: str, 
     )
     prompts.approve(conn, seat_id, version)
 
+    if profile_page:
+        # The seat's own wiki profile (user's own framing: "a sort of
+        # profile of who they are") -- best-effort, same posture as
+        # Slack: a failure here shouldn't undo an otherwise-successful
+        # seat creation, so this never raises.
+        try:
+            wiki.write_page(wiki.agent_profile_slug(seat_id), profile_page)
+        except OSError:
+            pass
+
     who = f"{display_name} ({seat_id})" if display_name else seat_id
     slack.post_message(f":wave: Welcome {who} to the team! Recruited to work on: {specialty_description}")
 
@@ -150,4 +165,5 @@ def create_specialist_seat(conn, specialty_description: str, requested_by: str, 
         "version": version,
         "display_name": display_name,
         "pronouns": pronouns,
+        "profile_page": profile_page,
     }

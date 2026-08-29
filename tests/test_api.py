@@ -175,3 +175,45 @@ def test_outcomes_endpoint():
 
     assert data["total"] == 1
     assert data["closed"] == 1
+
+
+def test_wiki_list_and_get_endpoints():
+    from harness import wiki
+
+    slug = f"api-test-page-{uuid.uuid4().hex[:8]}"
+    wiki.write_page(slug, "# real content")
+
+    listing = client.get("/wiki").json()
+    assert slug in listing["pages"]
+
+    page = client.get(f"/wiki/{slug}").json()
+    assert page["content"] == "# real content"
+
+
+def test_wiki_get_endpoint_404s_for_missing_page():
+    response = client.get("/wiki/never-written-anywhere")
+    assert response.status_code == 404
+
+
+def test_cost_slider_get_and_put_round_trip():
+    response = client.put("/settings/cost-slider", json={"value": 55})
+    assert response.status_code == 200
+    assert response.json()["value"] == 55
+
+    response = client.get("/settings/cost-slider")
+    assert response.json()["value"] == 55
+
+
+def test_cost_slider_rejects_out_of_range_value():
+    response = client.put("/settings/cost-slider", json={"value": 200})
+    assert response.status_code == 422
+
+
+def test_model_registry_endpoint_lists_configured_providers(monkeypatch):
+    monkeypatch.delenv("MODEL_REGISTRY", raising=False)
+    monkeypatch.setenv("LOCAL_MODEL_NAME", "test-model-for-api")
+
+    response = client.get("/settings/model-registry")
+
+    assert response.status_code == 200
+    assert any(p["model"] == "test-model-for-api" for p in response.json())
