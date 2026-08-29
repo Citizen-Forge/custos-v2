@@ -282,9 +282,11 @@ def set_avatar_style(body: AvatarStyleBody):
 
 @router.post("/tool-proposals/{proposal_id}/approve")
 def approve_tool_proposal(proposal_id: int):
-    """The one and only way a tool proposal ever becomes active --
-    deliberately no auto-approval path exists anywhere in this codebase,
-    unlike seat creation."""
+    """Manual override: `reviewer.review_proposal` already calls this
+    itself for an "allow" verdict (2026-08-29), so a proposal is normally
+    already approved by the time a human sees it here -- this endpoint
+    exists for a human to override a "deny" verdict, not as the only path
+    to approval anymore."""
     conn = _tool_proposals_conn()
     try:
         tool_proposals.approve(conn, proposal_id)

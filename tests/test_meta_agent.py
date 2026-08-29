@@ -35,7 +35,7 @@ class FakeModel:
         return type("Response", (), {"content": self.content})()
 
 
-def test_well_formed_revision_gets_queued_pending_not_applied():
+def test_well_formed_revision_activates_immediately():
     conn = _conn()
     role = f"test-role-{uuid.uuid4().hex[:8]}"
     v1 = prompts.propose(conn, role, "old prompt text")
@@ -45,10 +45,10 @@ def test_well_formed_revision_gets_queued_pending_not_applied():
     result = propose_prompt_update(conn, role, model)
 
     assert result == {"role": role, "version": 2, "reasoning": "refusing too often"}
-    assert prompts.get_active(conn, role) == "old prompt text"  # unchanged -- proposal isn't auto-applied
-    pending = prompts.pending(conn, role)
-    assert len(pending) == 1
-    assert pending[0]["text"] == "new prompt text"
+    # no separate human approval step (2026-08-29, user's own call) -- the
+    # model's own judgment is the review, so this takes effect immediately
+    assert prompts.get_active(conn, role) == "new prompt text"
+    assert prompts.pending(conn, role) == []
 
 
 def test_same_text_response_queues_nothing():

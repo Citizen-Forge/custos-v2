@@ -1,10 +1,11 @@
 """
 Phase 7's reviewer judgment: whether a real model's verdict is actually
 *correct* can't be verified without real inference. What's tested here is
-the substrate around it -- a well-formed verdict gets recorded (never
-applied), an unparseable response fails closed to "deny" rather than
-leaving the proposal stuck, and reviewing a proposal that doesn't exist
-is a no-op rather than an error.
+the substrate around it -- a well-formed verdict gets recorded AND acted
+on immediately (2026-08-29: no separate human approval step anymore, see
+reviewer.py's module docstring), an unparseable response fails closed to
+"deny"/rejected rather than leaving the proposal stuck, and reviewing a
+proposal that doesn't exist is a no-op rather than an error.
 """
 
 import json
@@ -46,7 +47,7 @@ def _sandboxed_proposal(conn, **overrides):
     return proposal_id
 
 
-def test_well_formed_verdict_gets_recorded_never_applied():
+def test_well_formed_allow_verdict_gets_recorded_and_approved_immediately():
     conn = _conn()
     proposal_id = _sandboxed_proposal(conn)
 
@@ -59,11 +60,27 @@ def test_well_formed_verdict_gets_recorded_never_applied():
         "reasoning": "matches its declared capability, ran clean",
     }
     proposal = tool_proposals.get(conn, proposal_id)
-    assert proposal["status"] == "reviewed"  # not approved -- that's a separate human-only step
+    # 2026-08-29: no separate human approval step -- an "allow" verdict
+    # activates the proposal in the same call that records it
+    assert proposal["status"] == "approved"
+    assert proposal["approved_at"] is not None
     assert proposal["review_verdict"] == "allow"
 
 
-def test_unparseable_response_fails_closed_to_deny_but_still_moves_forward():
+def test_well_formed_deny_verdict_gets_recorded_and_rejected_immediately():
+    conn = _conn()
+    proposal_id = _sandboxed_proposal(conn)
+
+    model = FakeModel(json.dumps({"verdict": "deny", "reasoning": "does more than it declares"}))
+    result = review_proposal(conn, proposal_id, model)
+
+    assert result["verdict"] == "deny"
+    proposal = tool_proposals.get(conn, proposal_id)
+    assert proposal["status"] == "rejected"
+    assert proposal["review_reasoning"] == "does more than it declares"
+
+
+def test_unparseable_response_fails_closed_to_deny_and_rejects():
     conn = _conn()
     proposal_id = _sandboxed_proposal(conn)
 
@@ -73,8 +90,7 @@ def test_unparseable_response_fails_closed_to_deny_but_still_moves_forward():
     assert result["verdict"] == "deny"
     assert "unparseable" in result["reasoning"]
     proposal = tool_proposals.get(conn, proposal_id)
-    assert proposal["status"] == "reviewed"  # unlike meta_agent's fail-closed (returns None, no state
-    # change), this one still records a verdict -- a human needs a status to act on, not a stuck proposal
+    assert proposal["status"] == "rejected"  # fail closed all the way through, not stuck mid-pipeline
 
 
 def test_unexpected_verdict_value_fails_closed_to_deny():
@@ -85,7 +101,7 @@ def test_unexpected_verdict_value_fails_closed_to_deny():
     result = review_proposal(conn, proposal_id, model)
 
     assert result["verdict"] == "deny"
-    assert tool_proposals.get(conn, proposal_id)["status"] == "reviewed"
+    assert tool_proposals.get(conn, proposal_id)["status"] == "rejected"
 
 
 def test_reviewing_a_nonexistent_proposal_is_a_noop():

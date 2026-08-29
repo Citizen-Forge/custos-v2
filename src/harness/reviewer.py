@@ -7,10 +7,17 @@ capabilities, and its real sandbox run (stdout/stderr/exit code), decide
 allow/deny and why.
 
 Single-shot, same shape as meta_agent.py's propose_prompt_update -- no
-tools needed, just source + sandbox evidence in, a verdict out. Never
-applies anything on its own: `record_review` only ever moves a proposal
-to `reviewed` status, and `approve`/`reject` stay separate, human-only
-calls (tool_proposals.py's docstring, PLAN.md Phase 7's promotion gate).
+tools needed, just source + sandbox evidence in, a verdict out.
+
+User's own call (2026-08-29, after watching this reviewer correctly deny
+4/5 real adversarial proposals in scripts/probe_reviewer_adversarial.py
+-- see PLAN.md): the verdict now directly drives approve/reject, not
+just a recommendation for a human to act on separately. Reverses the
+original "review is advisory, a human approves/rejects" posture
+tool_proposals.py's docstring used to describe. `approve`/`reject`
+themselves stay available as a manual override path (a human can still
+flip either decision via the API/dashboard) -- what changed is that
+nothing waits on that override before a verdict takes effect.
 """
 
 import json
@@ -49,10 +56,10 @@ def review_proposal(conn, proposal_id: int, model) -> dict | None:
     """Returns the recorded verdict dict, or None if the proposal doesn't
     exist. An unparseable model response is recorded as a "deny" verdict
     with that fact as the reasoning -- fails closed like classifier.py,
-    but (unlike meta_agent.py's propose_prompt_update) still moves the
-    proposal to `reviewed` status rather than leaving it stuck in
-    `sandboxed` forever, since a human still makes the real approve/reject
-    call regardless of this verdict."""
+    but (unlike meta_agent.py's propose_prompt_update) still acts on it
+    rather than leaving the proposal stuck in `sandboxed` forever: an
+    "allow" verdict immediately approves the proposal, "deny" immediately
+    rejects it with the reviewer's own reasoning recorded as why."""
     proposal = tool_proposals.get(conn, proposal_id)
     if proposal is None:
         return None
@@ -80,4 +87,8 @@ def review_proposal(conn, proposal_id: int, model) -> dict | None:
         reasoning = f"reviewer response unparseable: {e}"
 
     tool_proposals.record_review(conn, proposal_id, verdict, reasoning)
+    if verdict == "allow":
+        tool_proposals.approve(conn, proposal_id)
+    else:
+        tool_proposals.reject(conn, proposal_id, reasoning)
     return {"proposal_id": proposal_id, "verdict": verdict, "reasoning": reasoning}

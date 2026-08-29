@@ -5,19 +5,22 @@ actually help -- is inherently untestable without a real model doing real
 judgment, so it isn't validated here. What IS built and tested is the
 substrate around it.
 
-Two capabilities, deliberately different risk postures:
+Both capabilities activate immediately, no separate human approval step:
 
-- `propose_prompt_update`: revises an *existing* seat's prompt. Queued as
-  *pending* -- a human must explicitly approve it before it ever takes
-  effect (v1's "autonomy off by default" pattern). Changing something
-  already working risks regressing established behavior.
+- `propose_prompt_update`: revises an *existing* seat's prompt. Used to
+  queue as *pending* for human approval; reversed 2026-08-29 (user's own
+  call, made after watching reviewer.py correctly deny 4/5 real
+  adversarial tool proposals -- see PLAN.md) -- the model's own
+  considered judgment (including declining to propose anything when the
+  evidence doesn't warrant a change, proven live: see
+  scripts/probe_verifier_failure_case.py) IS the review, so the proposal
+  activates the moment it's made. `prompts.propose`/`prompts.approve`
+  stay separate calls internally, but nothing waits between them anymore.
 - `create_specialist_seat`: the product-owner's "no specialist exists for
   this yet" path -- creates a brand new seat with an initial prompt that
-  goes *active immediately*, no approval step. Creating something new is
-  lower risk than changing something that already works: worst case, a
-  fresh seat performs badly, which is exactly what outcomes.py would
-  surface for a future propose_prompt_update to address. This asymmetry
-  is deliberate, not an oversight.
+  goes active immediately, no approval step. This was already how seat
+  creation worked before the 2026-08-29 change above; the two are now
+  consistent with each other rather than deliberately asymmetric.
 """
 
 import json
@@ -51,10 +54,13 @@ Respond with strict JSON and nothing else: \
 
 
 def propose_prompt_update(conn, role: str, model) -> dict | None:
-    """Returns the proposal dict if one was queued, None if the model
+    """Returns the activated revision's dict, or None if the model
     proposed no change or its response couldn't be parsed (fail closed,
     same posture as classifier.py -- an unparseable response never
-    silently becomes a proposal)."""
+    silently becomes a revision, active or otherwise). A well-formed
+    revision activates immediately (prompts.propose then prompts.approve,
+    back to back) -- see module docstring for why no separate human step
+    sits between them anymore."""
     current = prompts.get_active(conn, role) or "(no system prompt set yet)"
     summary = outcomes.summary(role)
     verification_summary = verifications.summary(conn, role)
@@ -80,6 +86,7 @@ def propose_prompt_update(conn, role: str, model) -> dict | None:
         return None
 
     version = prompts.propose(conn, role, revised, reasoning)
+    prompts.approve(conn, role, version)
     return {"role": role, "version": version, "reasoning": reasoning}
 
 

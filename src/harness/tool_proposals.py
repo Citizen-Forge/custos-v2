@@ -2,16 +2,21 @@
 Phase 7: pending tool proposals -- candidate code, its declared
 capabilities, its sandbox run results, and a (separate) reviewer agent's
 verdict, all tracked before anything is ever added to a seat's real tool
-list. Unlike `meta_agent.create_specialist_seat` (a new seat goes active
-immediately -- low blast radius, just a name and a prompt), a new *tool*
-never auto-activates at any stage: `approve` is a distinct, human-only
-step, deliberate given generated code would run at `shell_exec`-level
-trust once promoted. Mirrors `prompts.py`'s pending/approve shape,
-extended with what a code proposal specifically needs reviewed against.
+list.
 
 Lifecycle: pending (just proposed) -> sandboxed (ran in sandbox.py's
 container, results attached) -> reviewed (a reviewer agent's verdict
-attached -- still not applied) -> approved (human-only) or rejected.
+attached) -> approved or rejected. `approve`/`reject` are called by
+`reviewer.review_proposal` itself as of 2026-08-29 (user's own call,
+after watching the reviewer correctly deny 4/5 real adversarial
+proposals -- see PLAN.md): the reviewer's allow/deny verdict directly
+decides the outcome, same-turn, rather than waiting on a separate human
+step. Both functions stay callable directly too -- a human can still
+override either decision via the API/dashboard -- but nothing blocks on
+that override happening. (Contrast `meta_agent.create_specialist_seat`,
+where a new *seat* goes active immediately with no review step at all:
+that asymmetry -- new seat vs. reviewed code -- is unaffected by this
+change, still deliberate per meta_agent.py's own docstring.)
 """
 
 

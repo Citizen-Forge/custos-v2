@@ -10,13 +10,15 @@ compose up` includes it, same as harness/api) -- a deliberate reversal
 of v1's "autonomy off by default" posture, per the user's own call
 (2026-08-29): this harness is built around a local, unmetered model, so
 the cost/risk calculus that justified gating recurring work behind
-manual activation elsewhere doesn't really apply here. Scoped narrowly,
-though: this is about whether recurring *work* happens automatically,
-not whether generated *tool code* activates automatically --
+manual activation elsewhere doesn't really apply here. Originally scoped
+narrowly -- recurring *work* running automatically, not generated *tool
+code*/prompt revisions activating automatically -- but the user extended
+that same call later the same session, after watching the reviewer
+correctly deny 4/5 real adversarial proposals (see PLAN.md): both
 prompts.py's revision-approval step and tool_proposals.py's
-approve/reject gate are untouched, since those protect against a bad
-change silently taking effect (a real safety boundary), not against
-unwanted spend.
+approve/reject gate now activate on the agent's own verdict too, no
+human step between judgment and effect (meta_agent.py/reviewer.py's own
+docstrings have the detail).
 
 Runs each job sequentially every cycle, not concurrently or on
 independent timers: this harness's whole design assumes single/low
@@ -108,7 +110,7 @@ def run_meta_agent_job(conn_string: str) -> None:
         for seat in seats.list_all(conn):
             result = propose_prompt_update(conn, seat["seat_id"], model)
             if result:
-                log.info("meta-agent proposed a revision for %s (v%s)", seat["seat_id"], result["version"])
+                log.info("meta-agent activated a revision for %s (v%s)", seat["seat_id"], result["version"])
 
 
 def run_verifier_job(conn_string: str) -> None:

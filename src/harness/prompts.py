@@ -1,12 +1,17 @@
 """
 Phase 5 groundwork: versioned system prompts per role, with a
-pending/approve workflow. This is the actual substrate a meta-agent needs
+propose/approve workflow. This is the actual substrate a meta-agent needs
 to "tune" anything -- without it, there's no persistent, editable prompt
 to propose changes to in the first place.
 
-A proposed prompt never takes effect on its own; only `approve` flips it
-active. Matches v1's existing "autonomy off by default for every role
-except product-owner" pattern (PLAN.md Phase 5).
+`propose` and `approve` are still separate calls -- a version is recorded
+before it's made active -- but nothing requires a human between them
+anymore. `meta_agent.propose_prompt_update` calls both back to back as of
+2026-08-29 (user's own call, reversing v1's "autonomy off by default"
+pattern for this specific role: the model's own judgment, including
+declining to propose anything when the evidence doesn't warrant it, IS
+now the review). `approve` stays directly callable too, e.g. to reactivate
+an older version.
 
 Lives in the same Postgres instance as the checkpointer, its own table
 and connection -- similar split to what queue_store.py used to have

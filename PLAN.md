@@ -564,7 +564,11 @@ this — containment is a Docker/OS property, not a model judgment call:**
   /tool-proposals/{id}/reject`, and a dashboard section (Approve/Reject
   buttons, source + sandbox output behind a `<details>`) — proven live
   over real HTTP: proposed → sandboxed → reviewed → approved, watched the
-  status transition through the real API each step.
+  status transition through the real API each step. **Reversed
+  2026-08-29** once the reviewer's judgment was actually built and
+  stress-tested (see that section below) — the human-triggered step is
+  no longer required for the verdict to take effect; `approve`/`reject`
+  now exist as an override path, not the only path.
 
 **Not built yet, deliberately:** the overwatch agent's own judgment (what
 tool is needed, whether to propose one) and the reviewer agent's actual
@@ -866,12 +870,43 @@ precise reasoning tied to the actual evidence gap. Fed into
 `propose_prompt_update` for `workspace-implement-verify` (now at 1
 pass/1 fail on record): proposed a real v2 revision making "execution
 and acceptance-case output a non-negotiable precondition for recording
-success" -- queued pending, not auto-applied, awaiting human approval
-via `POST /prompts/{role}/{version}/approve`.
+success" -- queued pending at the time (the human-approval step was
+still in place a few paragraphs ago in this same session; see below for
+why it no longer is, and it's since been activated to match).
 
-**Genuinely still open**: the queued v2 prompt revision above hasn't
-been approved (deliberately -- that's a human call); no live Slack or
-Gemini avatar credentials were available this session to verify those
-two integrations end-to-end; deeper per-call cost-slider routing
-(`model_registry.py`) is still scaffolding since only one provider is
-typically configured.
+**Both human-approval gates removed, same session, user's own calls**:
+right after watching the reviewer correctly deny 4/5 real adversarial
+proposals above, the user first asked that tool proposals be
+approved/rejected by agent review alone, then extended the same call to
+prompt revisions -- "I don't want to see those at all," with an explicit
+instruction to remove both tabs from the dashboard.
+- `reviewer.review_proposal` (tool_proposals.py) now calls `approve`/
+  `reject` itself based on its own verdict, same call. Note this doesn't
+  yet gate anything with real teeth: no code anywhere loads an
+  `approved` tool proposal into a live seat's toolset, so this removes a
+  bookkeeping step today, not an active-privilege boundary -- that
+  boundary starts to matter once tool activation is actually built.
+- `meta_agent.propose_prompt_update` (prompts.py) now calls
+  `prompts.approve` itself right after `propose` -- the model's own
+  judgment (including declining to propose anything at all when the
+  evidence doesn't warrant it, proven live via
+  scripts/probe_verifier_failure_case.py) IS the review now.
+- Both `approve`/`reject` functions and API endpoints stay directly
+  callable as a manual override path -- what changed is that nothing
+  waits on that override before a verdict takes effect.
+- Dashboard's "Pending Prompt Proposals" and "Tool Proposals" sections
+  removed entirely, along with their JS (`refreshPrompts`,
+  `refreshToolProposals`, and the approve/reject button handlers).
+- The already-pending v2 revision mentioned just above was manually
+  activated via the still-available `POST /prompts/{role}/{version}/
+  approve` to bring it in line with what the new code path would have
+  done automatically.
+
+**Genuinely still open**: no live Slack or Gemini avatar credentials
+were available this session to verify those two integrations end-to-end;
+deeper per-call cost-slider routing (`model_registry.py`) is still
+scaffolding since only one provider is typically configured; tool
+*activation* itself (loading an approved proposal into a real seat's
+toolset) was never built -- approve/reject is still the end of the
+modeled lifecycle, not a trigger for anything, so the reviewer's verdict
+has no real teeth yet regardless of who acts on it.

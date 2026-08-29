@@ -153,14 +153,6 @@
     <div id="human-list"></div>
   </section>
   <section>
-    <h2>Pending Prompt Proposals <span class="count" id="prompts-count">0</span></h2>
-    <div id="prompts-list"></div>
-  </section>
-  <section>
-    <h2>Tool Proposals <span class="count" id="tool-proposals-count">0</span></h2>
-    <div id="tool-proposals-list"></div>
-  </section>
-  <section>
     <h2>Settings</h2>
     <div style="margin-bottom:1rem">
       <label style="display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.3rem">
@@ -394,75 +386,6 @@ async function refreshTickets(status, listId, countId, renderFn = ticketItem) {
   }
 }
 
-async function approvePrompt(role, version) {
-  await fetchJSON(`/prompts/${role}/${version}/approve`, { method: "POST" });
-  refreshPrompts();
-}
-
-async function refreshPrompts() {
-  try {
-    const items = await fetchJSON("/prompts/pending");
-    document.getElementById("prompts-count").textContent = items.length;
-    const container = document.getElementById("prompts-list");
-    container.innerHTML = items.length
-      ? items.map(p => `<div class="item">
-          <span class="id">${escapeHtml(p.role)} v${p.version}</span>
-          <div class="reason">${escapeHtml(p.reason || "no reason given")}</div>
-          <details><summary style="cursor:pointer;color:var(--muted);font-size:0.8rem">proposed text</summary>
-            <div class="desc" style="white-space:pre-wrap">${escapeHtml(p.text)}</div>
-          </details>
-          <div class="prompt-actions">
-            <button onclick="approvePrompt('${p.role}', ${p.version})">Approve</button>
-          </div>
-        </div>`).join("")
-      : `<div class="empty">no pending proposals</div>`;
-  } catch (e) {
-    document.getElementById("prompts-list").innerHTML = `<div class="empty">error: ${e.message}</div>`;
-  }
-}
-
-async function approveToolProposal(id) {
-  await fetchJSON(`/tool-proposals/${id}/approve`, { method: "POST" });
-  refreshToolProposals();
-}
-
-async function rejectToolProposal(id) {
-  const reason = window.prompt("Reason for rejecting (optional):") || null;
-  await fetchJSON(`/tool-proposals/${id}/reject`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ reason }),
-  });
-  refreshToolProposals();
-}
-
-async function refreshToolProposals() {
-  try {
-    // "reviewed" -- sandboxed + a reviewer verdict attached, exactly
-    // what PLAN.md Phase 7's promotion gate says a human should look at.
-    const items = await fetchJSON("/tool-proposals?status=reviewed");
-    document.getElementById("tool-proposals-count").textContent = items.length;
-    const container = document.getElementById("tool-proposals-list");
-    container.innerHTML = items.length
-      ? items.map(p => `<div class="item">
-          <span class="id">${escapeHtml(p.tool_name)}</span> by ${escapeHtml(p.proposed_by)}
-          <div class="desc">declares: ${escapeHtml(p.declared_capabilities)}</div>
-          <div class="reason">reviewer (${escapeHtml(p.review_verdict || "?")}): ${escapeHtml(p.review_reasoning || "")}</div>
-          <details><summary style="cursor:pointer;color:var(--muted);font-size:0.8rem">source + sandbox output</summary>
-            <div class="desc" style="white-space:pre-wrap">${escapeHtml(p.source_code)}</div>
-            <div class="desc" style="white-space:pre-wrap">exit ${p.sandbox_exit_code}: ${escapeHtml(p.sandbox_stdout || "")}${escapeHtml(p.sandbox_stderr || "")}</div>
-          </details>
-          <div class="prompt-actions">
-            <button onclick="approveToolProposal(${p.id})">Approve</button>
-            <button onclick="rejectToolProposal(${p.id})">Reject</button>
-          </div>
-        </div>`).join("")
-      : `<div class="empty">nothing awaiting review</div>`;
-  } catch (e) {
-    document.getElementById("tool-proposals-list").innerHTML = `<div class="empty">error: ${e.message}</div>`;
-  }
-}
-
 async function refreshSeats() {
   try {
     const items = await fetchJSON("/seats");
@@ -586,8 +509,6 @@ async function refreshAll() {
     refreshTickets("ready", "ready-list", "ready-count"),
     refreshTickets("in_progress", "in-progress-list", "in-progress-count"),
     refreshTickets("human", "human-list", "human-count", humanTicketItem),
-    refreshPrompts(),
-    refreshToolProposals(),
     refreshWiki(),
   ]);
   document.getElementById("status").textContent = "updated " + new Date().toLocaleTimeString();
