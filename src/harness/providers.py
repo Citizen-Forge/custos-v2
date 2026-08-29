@@ -25,6 +25,15 @@ class ProviderConfig:
     # drove the whole harness choice (Phase 1, PLAN.md). Frontier providers
     # can override this higher once Phase 2 adds routing.
     concurrency_limit: int = 1
+    # Caught live 2026-08-29: nothing here capped response length, and this
+    # project's reasoning-heavy local model generated 5000+ tokens (~10
+    # minutes at ~9 tok/s) for what should have been a short JSON verdict
+    # from reviewer.py, with no sign of stopping on its own. `None`
+    # preserves the old "let the API/model decide" behavior for any caller
+    # that doesn't set this — but every entrypoint script now does (see
+    # scripts/run_*.py), since unbounded generation is a real
+    # reliability/cost risk here, not a hypothetical one.
+    max_tokens: int | None = None
 
 
 def build_chat_model(cfg: ProviderConfig) -> ChatOpenAI:
@@ -32,4 +41,5 @@ def build_chat_model(cfg: ProviderConfig) -> ChatOpenAI:
         base_url=cfg.base_url,
         model=cfg.model,
         api_key=cfg.api_key or "not-needed",
+        max_tokens=cfg.max_tokens,
     )

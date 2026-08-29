@@ -33,6 +33,9 @@ def main() -> None:
         ),
         model=os.environ.get("META_AGENT_MODEL_NAME", os.environ.get("LOCAL_MODEL_NAME", "qwen2.5:7b-instruct")),
         api_key=os.environ.get("META_AGENT_MODEL_API_KEY"),
+        # See ProviderConfig.max_tokens -- generous enough for a full
+        # revised prompt plus reasoning, still bounded.
+        max_tokens=int(os.environ.get("META_AGENT_MAX_TOKENS", "4000")),
     )
     model = build_chat_model(provider_cfg)
 

@@ -81,18 +81,53 @@ def test_create_specialist_seat_goes_active_immediately_no_approval_needed():
     conn = _conn()
     seat_id = f"test-seat-{uuid.uuid4().hex[:8]}"
 
-    model = FakeModel(json.dumps({"seat_id": seat_id, "system_prompt": "you specialize in X"}))
+    model = FakeModel(
+        json.dumps(
+            {
+                "seat_id": seat_id,
+                "system_prompt": "you specialize in X",
+                "display_name": "Rowan",
+                "pronouns": "they/them",
+            }
+        )
+    )
     result = create_specialist_seat(conn, "specializes in X", requested_by="product_owner", model=model)
 
-    assert result == {"seat_id": seat_id, "specialty": "specializes in X", "version": 1}
+    assert result == {
+        "seat_id": seat_id,
+        "specialty": "specializes in X",
+        "version": 1,
+        "display_name": "Rowan",
+        "pronouns": "they/them",
+    }
     created = seats.get(conn, seat_id)
     assert created is not None
     assert created["specialty"] == "specializes in X"
     assert created["created_by"] == "product_owner"
+    # the seat's own chosen identity (Phase 4) -- distinct from seat_id,
+    # which stays the functional identifier
+    assert created["display_name"] == "Rowan"
+    assert created["pronouns"] == "they/them"
     # unlike propose_prompt_update, a brand-new seat's first prompt is
     # active immediately -- nothing existing to protect with a pending step
     assert prompts.get_active(conn, seat_id) == "you specialize in X"
     assert prompts.pending(conn, seat_id) == []
+
+
+def test_create_specialist_seat_without_identity_fields_stores_null_not_a_placeholder():
+    # A response that omits display_name/pronouns (e.g. an older prompt
+    # version, or a model that just didn't include them) shouldn't fail
+    # closed on that alone -- the seat still gets created, just without a
+    # chosen identity yet, rather than a fabricated one.
+    conn = _conn()
+    seat_id = f"test-seat-{uuid.uuid4().hex[:8]}"
+
+    model = FakeModel(json.dumps({"seat_id": seat_id, "system_prompt": "you specialize in Y"}))
+    result = create_specialist_seat(conn, "specializes in Y", requested_by="product_owner", model=model)
+
+    assert result["display_name"] is None
+    assert result["pronouns"] is None
+    assert seats.get(conn, seat_id)["display_name"] is None
 
 
 def test_create_specialist_seat_refuses_to_collide_with_existing_seat():

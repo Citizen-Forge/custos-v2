@@ -33,7 +33,19 @@ def _routing_table_from_env() -> RoutingTable:
     )
     api_key = os.environ.get("PRODUCT_OWNER_MODEL_API_KEY")
     return RoutingTable(
-        {ROLE: [ProviderConfig(name="product-owner", base_url=base_url, model=model, api_key=api_key)]}
+        {
+            ROLE: [
+                ProviderConfig(
+                    name="product-owner",
+                    base_url=base_url,
+                    model=model,
+                    api_key=api_key,
+                    # See ProviderConfig.max_tokens -- a triage session can
+                    # run several tool calls; generous but still bounded.
+                    max_tokens=int(os.environ.get("PRODUCT_OWNER_MAX_TOKENS", "4000")),
+                )
+            ]
+        }
     )
 
 

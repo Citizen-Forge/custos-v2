@@ -28,6 +28,7 @@ cfg = ProviderConfig(
     name="local",
     base_url=os.environ["LOCAL_MODEL_BASE_URL"],
     model=os.environ["LOCAL_MODEL_NAME"],
+    max_tokens=1000,  # matches worker.py's real classifier cap -- see ProviderConfig.max_tokens
 )
 classify = build_classifier(cfg)
 

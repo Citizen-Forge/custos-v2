@@ -64,13 +64,19 @@ POLL_INTERVAL_SECONDS = int(os.environ.get("WORKER_POLL_INTERVAL", "5"))
 DEFAULT_SEAT_ID = "worker"
 
 
-def _chain_from_env(env_prefix: str, default_base_url: str, default_model: str) -> list[ProviderConfig]:
+def _chain_from_env(env_prefix: str, default_base_url: str, default_model: str, max_tokens: int | None = None) -> list[ProviderConfig]:
+    # env var (if set) overrides the caller's default, same precedence as
+    # every other *_MODEL_* setting here.
+    env_max_tokens = os.environ.get(f"{env_prefix}_MAX_TOKENS")
+    resolved_max_tokens = int(env_max_tokens) if env_max_tokens else max_tokens
+
     chain = [
         ProviderConfig(
             name=f"{env_prefix.lower()}-primary",
             base_url=os.environ.get(f"{env_prefix}_MODEL_BASE_URL", default_base_url),
             model=os.environ.get(f"{env_prefix}_MODEL_NAME", default_model),
             api_key=os.environ.get(f"{env_prefix}_MODEL_API_KEY"),
+            max_tokens=resolved_max_tokens,
         )
     ]
     fallback_base_url = os.environ.get(f"{env_prefix}_FALLBACK_BASE_URL")
@@ -82,6 +88,7 @@ def _chain_from_env(env_prefix: str, default_base_url: str, default_model: str) 
                 model=os.environ.get(f"{env_prefix}_FALLBACK_MODEL_NAME", "gemini-2.0-flash"),
                 api_key=os.environ.get(f"{env_prefix}_FALLBACK_API_KEY"),
                 concurrency_limit=int(os.environ.get(f"{env_prefix}_FALLBACK_CONCURRENCY", "4")),
+                max_tokens=resolved_max_tokens,
             )
         )
     return chain
@@ -100,8 +107,15 @@ def _routing_table_from_env() -> RoutingTable:
     local_model = os.environ.get("LOCAL_MODEL_NAME", "qwen2.5:7b-instruct")
     return RoutingTable(
         {
-            DEFAULT_SEAT_ID: _chain_from_env("LOCAL", local_base_url, local_model),
-            "classifier": _chain_from_env("CLASSIFIER", local_base_url, local_model),
+            # Worker turns can legitimately need to write a lot (a diff, a
+            # long explanation) -- generous but still bounded, since even
+            # a "generous" cap beats no cap at all (see ProviderConfig's
+            # max_tokens docstring for what unbounded actually cost us).
+            DEFAULT_SEAT_ID: _chain_from_env("LOCAL", local_base_url, local_model, max_tokens=8000),
+            # The classifier answers one short JSON verdict on EVERY
+            # non-trivial tool call -- the highest-frequency call in the
+            # whole system, so keep this tight specifically.
+            "classifier": _chain_from_env("CLASSIFIER", local_base_url, local_model, max_tokens=1000),
         },
         default_role=DEFAULT_SEAT_ID,
     )

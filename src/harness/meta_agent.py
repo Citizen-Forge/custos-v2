@@ -81,12 +81,18 @@ Specialty needed: {specialty_description}
 Existing seats already in the roster (avoid unnecessary overlap):
 {existing_seats}
 
-Propose a short seat_id (lowercase, hyphenated -- this doubles as the agent's name, e.g. \
-"aria-ux" or "backend-perf-owen") and a system prompt: the instructions this agent will \
-work from on every ticket it's assigned.
+Propose a short seat_id (lowercase, hyphenated -- this is the FUNCTIONAL identifier other \
+systems key off of, e.g. "backend-perf-owen") and a system prompt: the instructions this \
+agent will work from on every ticket it's assigned.
+
+Separately, this agent should also choose its OWN identity -- a real name and pronouns, \
+distinct from the functional seat_id, chosen the way a person would pick how they want to \
+be known, not derived mechanically from the specialty. Pick pronouns freely (they/them, \
+she/her, he/him, or something else entirely) -- there's no default and no wrong answer here.
 
 Respond with strict JSON and nothing else: \
-{{"seat_id": "<id>", "system_prompt": "<full prompt text>"}}
+{{"seat_id": "<id>", "system_prompt": "<full prompt text>", "display_name": "<chosen name>", \
+"pronouns": "<chosen pronouns>"}}
 """
 
 
@@ -94,7 +100,10 @@ def create_specialist_seat(conn, specialty_description: str, requested_by: str, 
     """Returns the created seat's info if one was made, None if the
     response couldn't be parsed or the proposed seat_id collides with an
     existing one (fail closed rather than silently overwrite a seat that
-    already exists -- same posture as propose_prompt_update)."""
+    already exists -- same posture as propose_prompt_update). display_name/
+    pronouns are the seat's own chosen identity (Phase 4, PLAN.md's
+    welfare-essay-derived design goal) -- distinct from seat_id, which
+    stays the functional identifier routing/prompts/outcomes key off of."""
     existing = seats.list_all(conn)
     existing_summary = "\n".join(f"- {s['seat_id']}: {s['specialty']}" for s in existing) or "(none yet)"
 
@@ -107,16 +116,24 @@ def create_specialist_seat(conn, specialty_description: str, requested_by: str, 
         data = json.loads(content)
         seat_id = data["seat_id"]
         system_prompt = data["system_prompt"]
+        display_name = data.get("display_name") or None
+        pronouns = data.get("pronouns") or None
     except (json.JSONDecodeError, KeyError, TypeError):
         return None
 
     if not seat_id or seats.get(conn, seat_id):
         return None
 
-    seats.create(conn, seat_id, specialty_description, created_by=requested_by)
+    seats.create(conn, seat_id, specialty_description, created_by=requested_by, display_name=display_name, pronouns=pronouns)
     version = prompts.propose(
         conn, seat_id, system_prompt, reason=f"initial specialist prompt for: {specialty_description}"
     )
     prompts.approve(conn, seat_id, version)
 
-    return {"seat_id": seat_id, "specialty": specialty_description, "version": version}
+    return {
+        "seat_id": seat_id,
+        "specialty": specialty_description,
+        "version": version,
+        "display_name": display_name,
+        "pronouns": pronouns,
+    }
