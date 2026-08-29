@@ -45,12 +45,18 @@ def _api_key() -> str | None:
 
 
 def generate_avatar(seat_id: str, description: str) -> str | None:
-    """Generates a portrait image from a text description (the seat's own
-    written personality/appearance, e.g. from its wiki profile) and saves
-    it to WORKSPACE_ROOT/avatars/<seat_id>.png. Returns the saved path on
-    success, None on any failure (including "not configured") -- callers
-    treat this as fire-and-forget, same as Slack, and should fall back to
-    a deterministic avatar (DiceBear) rather than block on this."""
+    """Generates a portrait image from a text description -- expected to be
+    the seat's own written PHYSICAL appearance description (meta_agent.py's
+    appearance_description, person-only, no background/setting/other
+    people -- see CREATE_SEAT_PROMPT), not its personality bio -- and saves
+    it to WORKSPACE_ROOT/avatars/<seat_id>.png. The headshot/plain-
+    background/single-person framing below is the fixed part of the
+    template the seat's own description gets dropped into; everything
+    about how the person themselves looks is the seat's free choice.
+    Returns the saved path on success, None on any failure (including "not
+    configured") -- callers treat this as fire-and-forget, same as Slack,
+    and should fall back to a deterministic avatar (DiceBear) rather than
+    block on this."""
     api_key = _api_key()
     if not api_key:
         log.debug("Gemini not configured (GEMINI_API_KEY unset) -- skipping avatar generation")

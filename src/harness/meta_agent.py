@@ -96,25 +96,36 @@ Propose a short seat_id (lowercase, hyphenated -- this is the FUNCTIONAL identif
 systems key off of, e.g. "backend-perf-owen") and a system prompt: the instructions this \
 agent will work from on every ticket it's assigned.
 
-Separately, this agent should also choose its OWN identity -- a real name and pronouns, \
-distinct from the functional seat_id, chosen the way a person would pick how they want to \
-be known, not derived mechanically from the specialty. Pick pronouns freely (they/them, \
-she/her, he/him, or something else entirely) -- there's no default and no wrong answer here.
+Separately, this agent should also choose its OWN identity -- a real name, an age, a gender \
+(or explicitly none, if that's the honest choice), and pronouns, distinct from the functional \
+seat_id, chosen the way a person would pick how they want to be known, not derived \
+mechanically from the specialty. Pick pronouns freely (they/them, she/her, he/him, or \
+something else entirely) -- there's no default and no wrong answer here, and gender need not \
+follow from pronouns or vice versa.
 
-Finally, write a first-person wiki profile page introducing yourself -- to the team, and to \
+Next, write a first-person wiki profile page introducing yourself -- to the team, and to \
 any human looking at the roster who should be able to picture you as a real, specific person, \
 not a generic professional bio any agent could have written. Cover your work (what you \
-specialize in, how you like to work) AND real personality: things like what you like and \
-dislike, an interesting fact about you, favorite music, a favorite city, or anything else \
-along those lines that makes you distinct from every other agent on this roster -- check the \
-existing seats below and deliberately choose different specifics than they'd choose, the way \
-two real people would naturally differ rather than converge on the same safe answers. Make \
-actual choices, not vague gestures ("I enjoy music" tells a reader nothing; naming a specific \
-artist or genre does). Written in your own voice, first-person.
+specialize in, how you like to work) AND real personality: your age, things like what you \
+like and dislike, an interesting fact about you, favorite music, a favorite city, or anything \
+else along those lines that makes you distinct from every other agent on this roster -- check \
+the existing seats below and deliberately choose different specifics than they'd choose, the \
+way two real people would naturally differ rather than converge on the same safe answers. \
+Make actual choices, not vague gestures ("I enjoy music" tells a reader nothing; naming a \
+specific artist or genre does). Written in your own voice, first-person.
+
+Finally, describe your own PHYSICAL appearance, for your avatar portrait -- entirely your own \
+choice (age, perceived gender presentation or none, ethnicity, hair, face, expression, style: \
+whatever makes you look like a specific person rather than a generic one), consistent with the \
+identity you chose above. This description gets dropped into a FIXED image-generation template \
+that already forces a plain-background headshot -- so describe only the person: face, hair, \
+expression, clothing/style visible at shoulders-and-up. Do NOT describe a background, setting, \
+props, pose, or other people; those parts of the template are not yours to change.
 
 Respond with strict JSON and nothing else: \
 {{"seat_id": "<id>", "system_prompt": "<full prompt text>", "display_name": "<chosen name>", \
-"pronouns": "<chosen pronouns>", "profile_page": "<first-person markdown bio>"}}
+"pronouns": "<chosen pronouns>", "profile_page": "<first-person markdown bio>", \
+"appearance_description": "<physical description for the avatar portrait, person only>"}}
 """
 
 
@@ -157,6 +168,7 @@ def create_specialist_seat(conn, specialty_description: str, requested_by: str, 
         display_name = data.get("display_name") or None
         pronouns = data.get("pronouns") or None
         profile_page = data.get("profile_page") or None
+        appearance_description = data.get("appearance_description") or None
     except (json.JSONDecodeError, KeyError, TypeError):
         return None
 
@@ -178,13 +190,19 @@ def create_specialist_seat(conn, specialty_description: str, requested_by: str, 
             wiki.write_page(wiki.agent_profile_slug(seat_id), profile_page)
         except OSError:
             pass
-        # Real portrait generated from the seat's own written
-        # description (user's own call, 2026-08-29 -- prefers this over
-        # a deterministic illustrated avatar for realism). Optional:
-        # no-ops if GEMINI_API_KEY isn't configured, and the dashboard
-        # falls back to a DiceBear avatar whenever this hasn't produced
-        # one -- never blocks seat creation on an external API call.
-        avatar.generate_avatar(seat_id, profile_page)
+
+    if appearance_description:
+        # Real portrait generated from the seat's own written physical
+        # description -- deliberately NOT profile_page (that's personality/
+        # bio prose, not a description of how they look, and would leak
+        # non-visual detail plus explicit background/setting talk into an
+        # image prompt that already has a fixed template for those parts).
+        # User's own call, 2026-08-29 -- prefers this over a deterministic
+        # illustrated avatar for realism. Optional: no-ops if
+        # GEMINI_API_KEY isn't configured, and the dashboard falls back to
+        # a DiceBear avatar whenever this hasn't produced one -- never
+        # blocks seat creation on an external API call.
+        avatar.generate_avatar(seat_id, appearance_description)
 
     who = f"{display_name} ({seat_id})" if display_name else seat_id
     slack.post_message(f":wave: Welcome {who} to the team! Recruited to work on: {specialty_description}")
@@ -196,4 +214,5 @@ def create_specialist_seat(conn, specialty_description: str, requested_by: str, 
         "display_name": display_name,
         "pronouns": pronouns,
         "profile_page": profile_page,
+        "appearance_description": appearance_description,
     }

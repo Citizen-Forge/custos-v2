@@ -11,6 +11,7 @@ matching classifier.py's posture on the same kind of failure.
 import json
 import os
 import uuid
+from unittest.mock import patch
 
 import psycopg
 
@@ -90,10 +91,12 @@ def test_create_specialist_seat_goes_active_immediately_no_approval_needed():
                 "display_name": "Rowan",
                 "pronouns": "they/them",
                 "profile_page": "Hi, I'm Rowan! I specialize in X.",
+                "appearance_description": "curly red hair, round glasses, warm smile",
             }
         )
     )
-    result = create_specialist_seat(conn, "specializes in X", requested_by="product_owner", model=model)
+    with patch("harness.meta_agent.avatar.generate_avatar") as mock_generate:
+        result = create_specialist_seat(conn, "specializes in X", requested_by="product_owner", model=model)
 
     assert result == {
         "seat_id": seat_id,
@@ -102,6 +105,7 @@ def test_create_specialist_seat_goes_active_immediately_no_approval_needed():
         "display_name": "Rowan",
         "pronouns": "they/them",
         "profile_page": "Hi, I'm Rowan! I specialize in X.",
+        "appearance_description": "curly red hair, round glasses, warm smile",
     }
     created = seats.get(conn, seat_id)
     assert created is not None
@@ -119,6 +123,31 @@ def test_create_specialist_seat_goes_active_immediately_no_approval_needed():
     # active immediately -- nothing existing to protect with a pending step
     assert prompts.get_active(conn, seat_id) == "you specialize in X"
     assert prompts.pending(conn, seat_id) == []
+    # the avatar prompt gets the PHYSICAL description, not the personality
+    # bio -- profile_page and appearance_description deliberately diverge
+    # in this test so a mix-up would fail loudly
+    mock_generate.assert_called_once_with(seat_id, "curly red hair, round glasses, warm smile")
+
+
+def test_create_specialist_seat_skips_avatar_generation_without_appearance_description():
+    conn = _conn()
+    seat_id = f"test-seat-{uuid.uuid4().hex[:8]}"
+
+    model = FakeModel(
+        json.dumps(
+            {
+                "seat_id": seat_id,
+                "system_prompt": "you specialize in X",
+                "display_name": "Rowan",
+                "profile_page": "Hi, I'm Rowan!",
+            }
+        )
+    )
+    with patch("harness.meta_agent.avatar.generate_avatar") as mock_generate:
+        result = create_specialist_seat(conn, "specializes in X", requested_by="product_owner", model=model)
+
+    assert result["appearance_description"] is None
+    mock_generate.assert_not_called()
 
 
 def test_create_specialist_seat_prompt_includes_existing_profiles_for_differentiation():
