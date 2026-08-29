@@ -67,6 +67,11 @@
   }
   .item:last-child { border-bottom: none; }
   .item .id { color: var(--accent); font-family: monospace; font-size: 0.8rem; }
+  .seat-head { display: flex; align-items: center; gap: 0.6rem; }
+  .avatar {
+    width: 36px; height: 36px; border-radius: 50%;
+    background: var(--border); flex-shrink: 0;
+  }
   .item .title { font-weight: 500; }
   .item .desc { color: var(--muted); font-size: 0.82rem; margin-top: 0.15rem; }
   .item .notes { color: var(--danger); font-size: 0.82rem; margin-top: 0.15rem; }
@@ -180,6 +185,19 @@ function ticketItem(t) {
     <div class="desc">${escapeHtml(t.description || "")}</div>
     ${notes}
   </div>`;
+}
+
+function avatarUrl(seed) {
+  // DiceBear's public, documented HTTP API -- deterministic per seed
+  // (a given seat_id always renders the same face), no backend compute,
+  // no GPU. Deliberately NOT a scraped "this-person-does-not-exist"
+  // style site (no documented API, automated access risks
+  // rate-limiting/blocking) and NOT a locally-run GAN (StyleGAN3 is
+  // GPU-optimized; CPU inference would be slow and would compete with
+  // the Qwen inference server for the same constrained hardware this
+  // whole project has been tuned around). "personas" is an illustrated
+  // portrait style, not photorealistic -- a real tradeoff, see PLAN.md.
+  return `https://api.dicebear.com/9.x/personas/svg?seed=${encodeURIComponent(seed)}`;
 }
 
 function formatDuration(totalSeconds) {
@@ -326,7 +344,10 @@ async function refreshSeats() {
     const container = document.getElementById("seats-list");
     container.innerHTML = items.length
       ? items.map(s => `<div class="item">
-          <span class="id">${s.display_name ? `${escapeHtml(s.display_name)} <span style="opacity:0.6;font-weight:normal">(${escapeHtml(s.seat_id)}${s.pronouns ? `, ${escapeHtml(s.pronouns)}` : ""})</span>` : escapeHtml(s.seat_id)}</span>
+          <div class="seat-head">
+            <img class="avatar" src="${avatarUrl(s.seat_id)}" alt="" loading="lazy">
+            <span class="id">${s.display_name ? `${escapeHtml(s.display_name)} <span style="opacity:0.6;font-weight:normal">(${escapeHtml(s.seat_id)}${s.pronouns ? `, ${escapeHtml(s.pronouns)}` : ""})</span>` : escapeHtml(s.seat_id)}</span>
+          </div>
           <div class="desc">${escapeHtml(s.specialty)}</div>
           <div class="stat-row" style="margin-top:0.3rem">
             <div class="stat"><b>${s.outcomes.closed}</b>closed</div>
