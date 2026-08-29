@@ -292,13 +292,17 @@ async function refreshSeats() {
     const container = document.getElementById("seats-list");
     container.innerHTML = items.length
       ? items.map(s => `<div class="item">
-          <span class="id">${escapeHtml(s.seat_id)}</span>
+          <span class="id">${s.display_name ? `${escapeHtml(s.display_name)} <span style="opacity:0.6;font-weight:normal">(${escapeHtml(s.seat_id)}${s.pronouns ? `, ${escapeHtml(s.pronouns)}` : ""})</span>` : escapeHtml(s.seat_id)}</span>
           <div class="desc">${escapeHtml(s.specialty)}</div>
           <div class="stat-row" style="margin-top:0.3rem">
             <div class="stat"><b>${s.outcomes.closed}</b>closed</div>
             <div class="stat"><b>${s.outcomes.refused}</b>refused</div>
             <div class="stat"><b>${s.outcomes.still_open}</b>open</div>
           </div>
+          ${s.verification.verified_total > 0 ? `<div class="stat-row">
+            <div class="stat"><b>${s.verification.passed}</b>verified pass</div>
+            <div class="stat"><b>${s.verification.failed}</b>verified fail</div>
+          </div>` : ""}
         </div>`).join("")
       : `<div class="empty">no seats yet -- the product-owner creates these as work demands</div>`;
   } catch (e) {

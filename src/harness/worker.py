@@ -47,7 +47,7 @@ import time
 import psycopg
 from langgraph.checkpoint.postgres import PostgresSaver
 
-from . import beads, prompts
+from . import beads, prompts, seats, slack
 from .classifier import build_classifier_from_model
 from .graph import build_graph_from_model
 from .providers import ProviderConfig
@@ -157,6 +157,12 @@ def run(
     with psycopg.connect(conn_string, autocommit=True) as prompt_conn:
         prompts.init_table(prompt_conn)
         system_prompt = prompts.get_active(prompt_conn, seat_id)
+        seats.init_table(prompt_conn)
+        seat_record = seats.get(prompt_conn, seat_id)
+        # Looked up once per worker process startup, not per ticket -- a
+        # seat's chosen name doesn't change mid-process, and posting to
+        # Slack (see below) shouldn't cost a DB round trip on every claim.
+        who = seat_record["display_name"] if seat_record and seat_record.get("display_name") else seat_id
 
     with PostgresSaver.from_conn_string(conn_string) as checkpointer:
         checkpointer.setup()
@@ -179,6 +185,7 @@ def run(
                     graph.invoke(None, config)
                 else:
                     log.info("starting thread %s", thread_id)
+                    slack.post_message(f":rocket: {who} is starting work on {thread_id}: {issue['title']}")
                     context = beads.prime()
                     prompt = (
                         f"{context}\n\n---\n\nTicket: {issue['title']}\n\n"

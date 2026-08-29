@@ -1,15 +1,19 @@
 """
-Standalone entrypoint for the product-owner's triage pass. Deliberately
-NOT part of any single seat's ticket worker loop -- a different kind of
-process, like scripts/run_meta_agent.py. Meant to run periodically
-(cron/schedule, not built here yet), each run doing one triage session
-over whatever's currently unassigned.
+Standalone entrypoint for the product-owner. Deliberately NOT part of any
+single seat's ticket worker loop -- a different kind of process, like
+scripts/run_meta_agent.py. Meant to run periodically (cron/schedule, not
+built here yet), each run doing one session -- triage by default, or
+idea decomposition (a rough idea -> an epic + concrete subtasks, Phase 3)
+if PRODUCT_OWNER_BRIEF is set.
 
     docker compose run --rm harness python scripts/run_product_owner.py
+    # or, for idea decomposition instead of triage:
+    docker compose run --rm -e PRODUCT_OWNER_BRIEF="..." harness python scripts/run_product_owner.py
 
 Env: PRODUCT_OWNER_MODEL_BASE_URL/NAME/API_KEY (defaults to the same
 local model as LOCAL_MODEL_*, though PLAN.md's original intent is a
-frontier model here once one's configured).
+frontier model here once one's configured), PRODUCT_OWNER_BRIEF (optional,
+overrides the default "triage the queue" instruction).
 """
 
 import os
@@ -53,6 +57,7 @@ def main() -> None:
     conn_string = os.environ["DATABASE_URL"]
     routing = _routing_table_from_env()
     gate = ConcurrencyGate()
+    brief = os.environ.get("PRODUCT_OWNER_BRIEF")
 
     with psycopg.connect(conn_string, autocommit=True) as conn:
         prompts.init_table(conn)
@@ -67,9 +72,9 @@ def main() -> None:
 
         with PostgresSaver.from_conn_string(conn_string) as checkpointer:
             checkpointer.setup()
-            result = run_triage_session(agent_model, tools, checkpointer)
+            result = run_triage_session(agent_model, tools, checkpointer, brief=brief)
 
-    print(f"triage session {result['thread_id']}: {result['final_message']}")
+    print(f"product-owner session {result['thread_id']}: {result['final_message']}")
 
 
 if __name__ == "__main__":

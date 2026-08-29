@@ -78,6 +78,20 @@ def assigned_seat(issue: dict) -> str | None:
     return (issue.get("metadata") or {}).get("assigned_seat")
 
 
+def set_acceptance_criteria(issue_id: str, criteria: str, actor: str = DEFAULT_ACTOR) -> dict:
+    """Same `--set-metadata` mechanism as assign_to_seat -- no second data
+    store needed for this either. A ticket with no acceptance criteria
+    set is simply not a candidate for the verification loop (verifier.py
+    skips it), not an error."""
+    return json.loads(
+        _run(["update", issue_id, "--set-metadata", f"acceptance_criteria={criteria}"], actor=actor)
+    )[0]
+
+
+def acceptance_criteria(issue: dict) -> str | None:
+    return (issue.get("metadata") or {}).get("acceptance_criteria")
+
+
 def unassigned_ready() -> list[dict]:
     """Ready issues with no seat assignment yet -- exactly what the
     product-owner's triage pass looks at."""
@@ -110,10 +124,48 @@ def close(issue_id: str, reason: str | None = None) -> dict:
     return json.loads(_run(args))[0]
 
 
-def create(title: str, description: str, issue_type: str = "task", parent: str | None = None) -> dict:
+def create(
+    title: str,
+    description: str,
+    issue_type: str = "task",
+    parent: str | None = None,
+    acceptance_criteria: str | None = None,
+    priority: int | None = None,
+) -> dict:
     args = ["create", title, "-d", description, "--type", issue_type]
     if parent:
         args += ["--parent", parent]
+    if priority is not None:
+        # bd's own native priority field (0-4, 0=highest) -- checked live
+        # against bd v1.2.2's own --help. Reused as-is for the projects
+        # concept (2026-08-29) rather than inventing a parallel priority
+        # scheme: a "project" is just a top-level Beads issue with this
+        # field set, ordered via `bd list --sort priority`.
+        args += ["--priority", str(priority)]
+    if acceptance_criteria:
+        # bd create has its own --metadata flag (a JSON object string) --
+        # checked live against bd v1.2.2's own --help rather than assumed
+        # (a first draft of this guessed it didn't exist and planned a
+        # wasteful second `bd update` round trip instead). Distinct from
+        # `--set-metadata key=value` (bd update's flag, used by
+        # assign_to_seat/set_acceptance_criteria below) -- this one takes
+        # the whole metadata object as JSON, for create specifically.
+        args += ["--metadata", json.dumps({"acceptance_criteria": acceptance_criteria})]
+    return json.loads(_run(args))
+
+
+def list_top_level(issue_type: str | None = None) -> list[dict]:
+    """Root issues only (`--no-parent`, checked live against bd v1.2.2's
+    own --help) -- the projects concept (2026-08-29) deliberately reuses
+    Beads' native hierarchy rather than a parallel table: a project is a
+    top-level issue, an epic is its child, a story/subtask is the
+    grandchild (create_subtask/add_subtask_to_epic already produce this
+    shape). Sorted by priority (0=highest) so the highest-priority
+    project/epic naturally comes first -- what the product-owner's
+    time-slicing logic reads to decide what to work next."""
+    args = ["list", "--all", "--no-parent", "--sort", "priority"]
+    if issue_type:
+        args += ["--type", issue_type]
     return json.loads(_run(args))
 
 

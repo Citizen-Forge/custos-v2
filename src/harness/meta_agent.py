@@ -22,7 +22,7 @@ Two capabilities, deliberately different risk postures:
 
 import json
 
-from . import outcomes, prompts, seats
+from . import outcomes, prompts, seats, slack, verifications
 
 PROMPT_TEMPLATE = """You are reviewing an AI agent's system prompt based on its recent \
 track record, and proposing an improved version if one is warranted.
@@ -30,13 +30,20 @@ track record, and proposing an improved version if one is warranted.
 Current system prompt for role "{role}":
 {current_prompt}
 
-Recent outcomes for this role (from its work-tracking history):
+Recent outcomes for this role (from its work-tracking history -- closed/refused/still-open \
+counts, and refusal reasons if any):
 {outcomes_summary}
 
-If the current prompt already looks reasonable given these outcomes, respond with the \
-SAME prompt text unchanged and explain why no change is needed. Otherwise propose a \
-revised prompt that addresses a real pattern in the outcomes above -- not a speculative \
-rewrite.
+Acceptance-criteria verification results for this role (a SEPARATE agent's real pass/fail \
+judgment on tickets that had explicit criteria -- this is the strongest quality signal \
+available, stronger than "was it refused," since a ticket can close successfully and still \
+fail its actual criteria):
+{verification_summary}
+
+If the current prompt already looks reasonable given this evidence, respond with the SAME \
+prompt text unchanged and explain why no change is needed. Otherwise propose a revised \
+prompt that addresses a REAL pattern in the evidence above -- point at specific failure \
+reasoning if verification failures exist, don't speculate beyond what the evidence shows.
 
 Respond with strict JSON and nothing else: \
 {{"revised_prompt": "<full prompt text>", "reasoning": "<one or two sentences>"}}
@@ -50,10 +57,14 @@ def propose_prompt_update(conn, role: str, model) -> dict | None:
     silently becomes a proposal)."""
     current = prompts.get_active(conn, role) or "(no system prompt set yet)"
     summary = outcomes.summary(role)
+    verification_summary = verifications.summary(conn, role)
 
     response = model.invoke(
         PROMPT_TEMPLATE.format(
-            role=role, current_prompt=current, outcomes_summary=json.dumps(summary, default=str)
+            role=role,
+            current_prompt=current,
+            outcomes_summary=json.dumps(summary, default=str),
+            verification_summary=json.dumps(verification_summary, default=str),
         )
     )
     content = getattr(response, "content", response)
@@ -129,6 +140,9 @@ def create_specialist_seat(conn, specialty_description: str, requested_by: str, 
         conn, seat_id, system_prompt, reason=f"initial specialist prompt for: {specialty_description}"
     )
     prompts.approve(conn, seat_id, version)
+
+    who = f"{display_name} ({seat_id})" if display_name else seat_id
+    slack.post_message(f":wave: Welcome {who} to the team! Recruited to work on: {specialty_description}")
 
     return {
         "seat_id": seat_id,

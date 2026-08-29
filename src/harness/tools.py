@@ -8,7 +8,7 @@ from typing import Annotated
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
-from . import beads, permissions
+from . import beads, permissions, slack
 from .config import WORKSPACE_ROOT
 from .state import HarnessState
 
@@ -98,6 +98,18 @@ def refuse_ticket(reason: str, state: Annotated[HarnessState, InjectedState]) ->
 
 
 @tool
+def scan_team_channel() -> str:
+    """Check recent team-channel activity (Slack, if configured) for context another agent
+    or a human may have left -- worth checking early on a ticket in case there's a relevant
+    heads-up, decision, or in-progress conversation you'd otherwise miss. Returns nothing
+    (not an error) if no team channel is configured."""
+    messages = slack.recent_messages()
+    if not messages:
+        return "no team channel configured, or nothing recent"
+    return "\n".join(messages)
+
+
+@tool
 def write_handoff_note(note: str, state: Annotated[HarnessState, InjectedState]) -> str:
     """Record a note for whoever (or whatever future session of yourself)
     picks this ticket up next -- what's done, what's left, anything
@@ -113,6 +125,7 @@ ALL_TOOLS = [
     write_file,
     remember_fact,
     search_related_work,
+    scan_team_channel,
     create_subtask,
     refuse_ticket,
     write_handoff_note,

@@ -19,6 +19,7 @@ import psycopg
 from harness.meta_agent import propose_prompt_update
 from harness.prompts import init_table
 from harness.providers import ProviderConfig, build_chat_model
+from harness.verifications import init_table as init_verifications_table
 
 
 def main() -> None:
@@ -41,6 +42,7 @@ def main() -> None:
 
     with psycopg.connect(conn_string, autocommit=True) as conn:
         init_table(conn)
+        init_verifications_table(conn)
         result = propose_prompt_update(conn, role, model)
 
     if result:

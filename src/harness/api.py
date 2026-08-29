@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import beads, outcomes, prompts, seats, tool_proposals
+from . import beads, outcomes, prompts, seats, tool_proposals, verifications
 
 
 class RespondBody(BaseModel):
@@ -56,6 +56,7 @@ def _prompt_conn():
 def _seats_conn():
     conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
     seats.init_table(conn)
+    verifications.init_table(conn)
     return conn
 
 
@@ -139,6 +140,7 @@ def list_seats():
         roster = seats.list_all(conn)
         for s in roster:
             s["outcomes"] = outcomes.summary(s["seat_id"])
+            s["verification"] = verifications.summary(conn, s["seat_id"])
         return roster
     finally:
         conn.close()

@@ -14,7 +14,7 @@ import uuid
 
 import psycopg
 
-from harness import prompts, seats
+from harness import prompts, seats, verifications
 from harness.meta_agent import create_specialist_seat, propose_prompt_update
 
 
@@ -22,6 +22,7 @@ def _conn():
     conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
     prompts.init_table(conn)
     seats.init_table(conn)
+    verifications.init_table(conn)
     return conn
 
 

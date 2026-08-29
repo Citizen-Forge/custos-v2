@@ -33,10 +33,12 @@ def main() -> None:
         model=os.environ.get("REVIEWER_MODEL_NAME", os.environ.get("LOCAL_MODEL_NAME", "qwen2.5:7b-instruct")),
         api_key=os.environ.get("REVIEWER_MODEL_API_KEY"),
         # Caught live 2026-08-29: an uncapped reviewer call generated 5000+
-        # tokens (~10 min) for what should be a short verdict. Generous
-        # enough for real reasoning over a proposal's source code, still
-        # bounded -- see ProviderConfig.max_tokens.
-        max_tokens=int(os.environ.get("REVIEWER_MAX_TOKENS", "3000")),
+        # tokens (~10 min) and STILL hadn't reached its JSON verdict when
+        # killed -- a first attempt at 3000 confirmed this model's own
+        # reasoning alone can blow past that with zero actual output.
+        # Bounded, but generous enough that reasoning has real room to
+        # finish -- see ProviderConfig.max_tokens.
+        max_tokens=int(os.environ.get("REVIEWER_MAX_TOKENS", "10000")),
     )
     model = build_chat_model(provider_cfg)
 

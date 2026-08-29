@@ -133,6 +133,7 @@ def test_seats_endpoint_includes_outcomes():
     entry = next(s for s in roster if s["seat_id"] == seat_id)
     assert entry["specialty"] == "test specialty"
     assert "closed" in entry["outcomes"]
+    assert entry["verification"]["verified_total"] == 0  # nothing verified yet, not an error
 
 
 def test_tool_proposals_endpoint_filters_by_status_and_approve_works():
