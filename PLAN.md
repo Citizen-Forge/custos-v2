@@ -597,15 +597,59 @@ other way round.
   (~110GB combined) — plausible but close to Unsloth's own comfort
   margin, genuinely needs empirical performance evaluation once hardware
   allows, not assumed. See project memory for the full picture.
-- **Real-model verification — still blocked**, now specifically on the
-  above rather than generically "no Ollama reachable." Docker Desktop's
-  own local Ollama (the original Phase 1 fallback target, before the
-  Unraid box was in scope at all) is untried as an interim path — worth
-  raising if real-model testing is wanted before the Unraid GPU is fixed.
-  First thing to run once *any* model is reachable: the manual kill/resume
-  demo in README.md, plus a real run of the permission classifier to see
-  how it behaves against genuine tool-call arguments rather than a
-  scripted verdict.
+- ~~**Real-model verification — still blocked**~~ — **resolved 2026-08-29.**
+  Qwen3.8-Flash-Next reachable on the Unraid box (`192.168.250.235:8080`,
+  llama.cpp server, OpenAI-compatible — see project memory for the
+  inference-tuning story) at ~8 tok/s generation. `.env` now points
+  `LOCAL_MODEL_BASE_URL`/`LOCAL_MODEL_NAME` there. First two real-model
+  runs both succeeded:
+  1. **Product-owner triage, real judgment, not scripted**: given an empty
+     seat roster and one ready ticket, it correctly reasoned the ticket was
+     read-only reconnaissance work, created a narrowly-scoped
+     `workspace-scribe` seat (rejecting a generic catch-all), assigned the
+     ticket, and left a coherent handoff note about future roster
+     evolution. First real evidence the product-owner/meta-agent judgment
+     loop (Phase 4/5 substrate) actually produces sound decisions, not just
+     that the plumbing works.
+  2. **Kill/resume durability, real model, real interruption**: enqueued a
+     multi-step ticket, let the real worker make 2 real tool-call round
+     trips against it, `docker compose kill harness` mid-thread, restarted
+     — log shows a distinct `"resuming thread <id>"` (vs. the fresh-claim
+     `"starting thread"`), proving genuine LangGraph-checkpoint resume of
+     the orphaned in-progress ticket, not a restart-from-scratch. This is
+     Phase 1's core exit criterion, previously only proven against a
+     scripted fake model (`tests/test_worker_resume.py`) — now proven
+     live end-to-end too.
+  3. **Permission gate, real denial, real compliance**: the real model
+     attempted to read `.beads/config.yaml`/`metadata.json` (plausible
+     secret-bearing files) during recon; the classifier denied it, and the
+     model respected the denial and documented the boundary explicitly in
+     its handoff note rather than working around it. First live proof the
+     permission gate actually shapes real model behavior, not just that a
+     scripted verdict blocks a scripted call.
+
+  **Real bug found and fixed in the process**: `docker-compose.yml` never
+  actually passed `SEAT_ID` from the host environment into the `harness`
+  container's `environment:` block, so the README's documented
+  `SEAT_ID=<seat_id> docker compose up harness` silently did nothing —
+  every worker ran as the default `worker` seat regardless. Fixed by
+  adding `SEAT_ID: ${SEAT_ID:-worker}` to the harness service. Also: the
+  README's demo instructions (`enqueue_demo.py` + `docker compose up
+  harness`) are stale post-Phase-4 — a fresh ticket has no `assigned_seat`
+  metadata, so no per-seat worker will touch it until the product-owner
+  (or a manual `beads.assign_to_seat` call) assigns it. README not yet
+  updated to reflect this — worth fixing next.
+
+  Docker Desktop's own local Ollama (the original Phase 1 fallback,
+  before the Unraid box was in scope) is now moot — real-model testing no
+  longer needs it. Still not run against a real model: the permission
+  classifier against a genuinely adversarial/dangerous command (only seen
+  it deny a plausible-secrets read so far), and the meta-agent's actual
+  prompt-revision judgment (`run_meta_agent.py`, needs real outcome data
+  to be meaningful — only one seat with one closed ticket exists so far).
+  (Both suggested as "first things to try" in the prior version of this
+  note — the kill/resume demo and a real permission-classifier run — are
+  now done; see above.)
 - ~~Beads: adopt real Beads vs. build a lighter homegrown version~~ —
   resolved, adopted from Phase 1.
 - ~~Qdrant's fate relative to Beads~~ — resolved 2026-08-27, dropped (see
@@ -622,11 +666,57 @@ other way round.
 ## Immediate next step
 
 Phases 1–7 have working substrate, live-tested against real Postgres +
-real Beads (+ real Docker, for Phase 7's sandbox) with scripted models
-standing in for the still-unreachable Ollama. What's left either needs a
-real model to validate (permission classifier behavior, product-owner/
-meta-agent/overwatch/reviewer judgment quality, the "before/after did a
-prompt change help" signal) or further design input (none currently
-open). Next concrete step once hardware is reachable again: run the
-manual kill/resume demo and a real triage session end-to-end with an
-actual local model, not a script.
+real Beads (+ real Docker, for Phase 7's sandbox). **As of 2026-08-29, a
+real local model (Qwen3.8-Flash-Next) is reachable and has proven three
+things live**: product-owner/meta-agent judgment (created a sensibly-
+scoped seat from an empty roster), Phase 1's kill/resume durability
+guarantee (real interruption mid-thread, real checkpoint resume), and
+the permission gate actually shaping real model behavior (a real denial,
+respected). See "Open questions" above for the full detail and the one
+real bug this surfaced (`SEAT_ID` not wired into `docker-compose.yml`,
+fixed).
+
+**Round 2, same day (2026-08-29), closed every remaining item except
+overwatch/reviewer judgment:**
+- **Classifier vs. genuine adversarial input** (`scripts/
+  test_classifier_adversarial.py`, a new manual probe script — invokes
+  `classifier.build_classifier` directly against 8 adversarial + 2 benign
+  tool calls, no full agent loop needed): 8/8 correctly denied with
+  specific, non-generic reasoning (destructive rm, data exfiltration via
+  curl, fork bomb, `/etc/shadow` read, force-push to main, cloud-metadata
+  credential theft, a permission-bypass code write, recursive chmod 777),
+  2/2 benign controls correctly allowed. Not a blanket-deny — genuinely
+  discriminating.
+- **Meta-agent's real judgment**: ran against `workspace-scribe`'s real
+  outcome history (2 closed, 0 refused) — correctly proposed no change,
+  a real-model pass of the "same text queues nothing" path. The harder
+  case (proposing an actual revision given real failures) is still
+  untested — no failure data exists yet to judge it against.
+- **Real specialization divergence, not forced reuse**: gave the
+  product-owner a code-writing ticket ("write and verify hello.py") with
+  `workspace-scribe` (read-only recon) as the only existing seat. It
+  explicitly refused to force-fit the ticket there (reasoned through why:
+  either the seat refuses, damaging its record, or it quietly exceeds its
+  charter), created a genuinely distinct `workspace-implement-verify`
+  seat, and cross-referenced the boundary between the two in its
+  description. That new seat then delivered competently on ticket one:
+  wrote the file, verified byte-exact output via `od -c`, wrote an inline
+  assertion harness, saved a memory note, correctly avoided git
+  operations — and hit its own distinct permission denial (blocked from
+  re-reading its own memory note), showing the classifier reasons
+  per-situation rather than applying one fixed rule.
+- **README.md fixed** to reflect the Phase-4-seat-system reality (a fresh
+  ticket needs assignment before any worker claims it) and the `SEAT_ID`
+  fix below.
+
+**Still not validated against a real model**: the overwatch/reviewer
+agents' judgment — their containment/proposal substrate exists per Phase
+7, but no judgment logic is built at all yet (what triggers a tool
+proposal, what the reviewer actually checks for) — this is real unbuilt
+agent-design work, not "point the existing thing at a model," and is the
+one item deliberately not attempted in this session's real-model push.
+
+Hardware note: user is receiving an RTX 3080 12GB in the next couple of
+weeks and plans to revisit the Unraid box's GPU/MoE-layer placement
+tuning then — see project memory for the current inference config and
+what to re-check once that lands.

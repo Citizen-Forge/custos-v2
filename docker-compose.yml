@@ -25,6 +25,7 @@ services:
       LOCAL_MODEL_BASE_URL: ${LOCAL_MODEL_BASE_URL:-http://host.docker.internal:11434/v1}
       LOCAL_MODEL_NAME: ${LOCAL_MODEL_NAME:-qwen2.5:7b-instruct}
       HARNESS_WORKSPACE: /workspace
+      SEAT_ID: ${SEAT_ID:-worker}
     volumes:
       - ./src:/app/src:ro
       - ./tests:/app/tests:ro

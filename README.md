@@ -9,8 +9,11 @@ first, this README is just "how to run what exists so far."
 ## Status
 
 Phases 1–7 have working substrate, live-tested against real Postgres +
-real Beads (+ real Docker, for the Phase 7 sandbox) with scripted fake
-models standing in for the still-unreachable Ollama. Work is now assigned
+real Beads (+ real Docker, for the Phase 7 sandbox). As of 2026-08-29 a
+real local model is reachable too, and the core mechanisms (product-owner
+judgment, kill/resume durability, the permission gate) are proven live
+against it, not just scripted fakes — see PLAN.md's "Open questions" for
+the full writeup. Work is now assigned
 to specific named agent **seats** by a product-owner agent, not claimed
 generically by one worker — see PLAN.md's Phase 4 "Emergent seat system"
 and the "Seats" section below. See PLAN.md for the detailed status of
@@ -34,23 +37,41 @@ same store the actual services use) and fixed.
 docker compose up -d postgres
 docker compose run --rm harness pytest -v
 
-# create a real ticket and let the default "worker" seat pick it up
+# create a real ticket
 docker compose run --rm harness python scripts/enqueue_demo.py \
     "demo ticket" "list the files in the workspace"
+```
+
+**A freshly enqueued ticket has no seat assigned yet** — since the Phase 4
+seat system landed, a worker only claims tickets explicitly assigned to
+its own seat (`ready_for_seat`), never just "any ready ticket." Assign it
+one of two ways before `docker compose up harness` will pick it up:
+
+```bash
+# realistic path: let the product-owner triage it (creates a specialist
+# seat if nothing existing fits, its own judgment call)
+docker compose run --rm harness python scripts/run_product_owner.py
+
+# OR bootstrap path: assign it directly to the default "worker" seat
+docker compose run --rm harness python -c "
+from harness import beads
+beads.ensure_initialized()
+beads.assign_to_seat('<ticket-id-from-enqueue_demo-output>', 'worker')
+"
+
 docker compose up harness
 ```
 
 `docker compose up harness` runs the `worker` seat (`DEFAULT_SEAT_ID`) by
-default — set `SEAT_ID=<seat_id>` to run a worker process for a
-specialist seat the product-owner has created instead. `LOCAL_MODEL_*`
-env vars are the shared model chain every seat falls back to unless it's
-explicitly registered its own (`routing.py`'s `default_role`) — defaults
-to `http://host.docker.internal:11434/v1`, a host-machine Ollama.
-Override in `.env` (copy from `.env.example`) to point at a different
-OpenAI-compatible endpoint. No local model is reachable in this
-environment yet, so end-to-end LLM behavior is still unverified against a
-real model — the test suite proves the mechanisms themselves using
-scripted fake models instead.
+default — set `SEAT_ID=<seat_id>` (now correctly wired through
+docker-compose.yml as of 2026-08-29; previously silently ignored — a real
+bug, see PLAN.md) to run a worker process for a specialist seat the
+product-owner has created instead. `LOCAL_MODEL_*` env vars are the
+shared model chain every seat falls back to unless it's explicitly
+registered its own (`routing.py`'s `default_role`) — defaults to
+`http://host.docker.internal:11434/v1`, a host-machine Ollama. Override in
+`.env` (copy from `.env.example`) to point at a different OpenAI-compatible
+endpoint — e.g. a llama.cpp/vLLM server on another machine on the LAN.
 
 ## Seats and the product-owner
 
@@ -126,9 +147,17 @@ review them, aren't built yet — this is the substrate they'll need.
 
 ## Proving the durability guarantee manually (with a real model)
 
+Verified live 2026-08-29 against a real model, not just described here —
+see PLAN.md's "Open questions" for the actual log evidence.
+
 1. `docker compose run --rm harness python scripts/enqueue_demo.py "<title>" "<prompt requiring a couple tool calls>"`
-2. `docker compose up harness` and let it start working.
-3. `docker compose kill harness` partway through.
-4. `docker compose up harness` again — it should pick the same ticket back
-   up from its last checkpoint (via `bd list --status=in_progress`, since
-   `bd ready` won't show it anymore), not restart from scratch.
+2. Assign it to a seat (see "Running it" above — a fresh ticket has no
+   seat by default).
+3. `docker compose up harness` and let it start working — watch for
+   `starting thread <id>` in the logs.
+4. `docker compose kill harness` partway through (once you've seen at
+   least one real tool-call round trip in the logs).
+5. `docker compose up harness` again — look for `resuming thread <id>` in
+   the logs (a distinct message from the fresh-claim `starting thread`,
+   confirming it picked the same ticket back up from its last checkpoint
+   via `bd list --status=in_progress`, not a restart from scratch).
