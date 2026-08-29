@@ -720,3 +720,95 @@ Hardware note: user is receiving an RTX 3080 12GB in the next couple of
 weeks and plans to revisit the Unraid box's GPU/MoE-layer placement
 tuning then — see project memory for the current inference config and
 what to re-check once that lands.
+
+## 2026-08-29 continuation — architecture expansion + overwatch/reviewer judgment built
+
+User asked to work continuously through every open item, with several
+new architecture decisions folded in live rather than deferred. Full
+detail in commit messages (`git log`); this is the structured summary.
+
+**Overwatch/reviewer judgment built** (the one item flagged above as
+not attempted): `src/harness/overwatch.py` (proposes tools from real
+capability-gap evidence or an explicit brief) and `src/harness/
+reviewer.py` (forms a real allow/deny verdict on a proposal's source +
+sandbox evidence). Real design bug caught by the test suite, not
+assumed safe: `propose_tool` initially called `sandbox.run_sandboxed`
+directly from `overwatch.py`, which runs in the `harness` service —
+exactly the privilege boundary Phase 7 exists to prevent. Split into
+propose (harness, no Docker) + `scripts/run_sandbox_for_proposals.py`
+(sandbox-runner only). Full lifecycle proven live: a real proposal went
+pending → sandboxed → reviewed (`allow`, with genuinely nuanced
+reasoning distinguishing "sandbox couldn't exercise this" from "code is
+unsafe") → approved.
+
+**New architecture decisions (user's own calls), all implemented:**
+- **Projects**: reuses Beads' native hierarchy (project → epic → story
+  via `--parent`/`--priority`) rather than a parallel table. ONE
+  product-owner + ONE shared seat pool across every project — this
+  harness's real single-concurrency constraint makes per-project agent
+  rosters (v1's model) pure overhead. Product-owner time-slices toward
+  the highest-priority project.
+- **Acceptance-criteria verification loop** (`src/harness/verifier.py`
+  + `verifications.py`) replaces the originally-planned "Laurels"
+  human-feedback surface — user's call: automated pass/fail against a
+  ticket's own stated criteria fits this project better than human
+  ratings, and it gives meta_agent.py real quality signal beyond
+  closed/refused counts.
+- **Self-chosen agent identity**: `seats.display_name`/`pronouns`,
+  chosen by the model itself in the same JSON response that creates the
+  seat.
+- **Slack activity feed** (`src/harness/slack.py`): seat welcomes,
+  ticket-start announcements, `scan_team_channel` tool. Checked live
+  first whether Beads already covers this — `bd comment`/`comments` are
+  per-issue, wrong shape. **Not live-verified against a real Slack
+  workspace** — no credentials available this session.
+- **Project wiki** (`src/harness/wiki.py`): file-based under
+  `WORKSPACE_ROOT/wiki/`, reuses the existing workspace-boundary safety
+  check. Same "check Beads first" answer — no wiki concept there
+  either. Agent profile pages (`agents/<seat_id>`) now get written as
+  part of seat creation.
+- **Model-selection infrastructure** (`settings.py` cost slider,
+  `model_registry.py` provider list with cost tiers): deliberately
+  scaffolding, not wired to dynamic per-call routing — only a local
+  provider is configured today, so deeper routing logic would be
+  unverifiable.
+
+**Real bugs caught and fixed live:**
+- No `max_tokens` cap anywhere — a reviewer call generated 5000+ tokens
+  (~10 min) with zero output; the model's own reasoning alone blows
+  past naive caps. Added `ProviderConfig.max_tokens`, tuned per role
+  (reviewer needs 10000; others 4000-8000; classifier 1000).
+- `sandbox-runner`'s compose service never mounted `./scripts`.
+- **Long-running containers silently run stale code.** `api`/`harness`
+  had been running 10-20+ hours; bind-mounted file edits land on disk
+  but an already-running Python process never re-imports them. Several
+  features didn't take effect live until `docker compose restart api
+  harness` — check this first if something "isn't working" live but
+  passes tests.
+
+**Real-model validation, same session**: a product-owner session given
+a code-writing/design idea correctly refused to force-fit it onto an
+unrelated seat, created a new `api-contract-writer` seat (chose the
+name "Maren", she/her, with a coherent first-person wiki profile),
+decomposed a real project into a priority-ranked epic with 4
+dependency-sequenced stories, and declined to fabricate structure for
+an unrelated placeholder ticket. One story's own text told the future
+implementer to "admit failure rather than claim a clean run it didn't
+do" — spontaneous consistency with the project's own anti-fabrication
+ethos.
+
+**Speed note**: `unraid-build` (the Unraid box) runs this project's test
+suite ~5x faster than the Windows dev machine once the latter is under
+sustained load from a long session (91s vs ~480s, both measured). Use
+`tar` (excluding `.git`/`__pycache__`/`workspace`/`sandbox-scratch`/
+`.pytest_cache`) to a throwaway `/mnt/cache/custos-v2-test` there for
+fast iteration; keep the real git repo and live deployment on Windows.
+
+**Still open**: overwatch/reviewer's judgment quality is proven once
+(one tool, one review) but not stress-tested against a bad-faith or
+genuinely broken proposal; the meta-agent's harder case (real failure
+data, not just successes) was pending a real failing ticket at the time
+of this note; Phase 6 UI doesn't yet reflect the project/epic/story
+hierarchy or the new wiki/settings endpoints; nothing is scheduled
+(product-owner/meta-agent/overwatch/verifier are all still manual `docker
+compose run` invocations); no API auth.

@@ -154,6 +154,15 @@ def create(
     return json.loads(_run(args))
 
 
+def children_of(issue_id: str) -> list[dict]:
+    """Direct children of an issue (`--parent`, checked live against bd
+    v1.2.2's own --help) -- what the board UI walks to render a
+    project's epics, and each epic's stories, without needing a second
+    data store to track the tree shape (Beads' own hierarchy already is
+    the tree)."""
+    return json.loads(_run(["list", "--all", "--parent", issue_id, "--sort", "priority"]))
+
+
 def list_top_level(issue_type: str | None = None) -> list[dict]:
     """Root issues only (`--no-parent`, checked live against bd v1.2.2's
     own --help) -- the projects concept (2026-08-29) deliberately reuses

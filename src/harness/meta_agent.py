@@ -101,14 +101,37 @@ distinct from the functional seat_id, chosen the way a person would pick how the
 be known, not derived mechanically from the specialty. Pick pronouns freely (they/them, \
 she/her, he/him, or something else entirely) -- there's no default and no wrong answer here.
 
-Finally, write a short first-person wiki profile page introducing yourself to the team and \
-any human looking at the roster -- who you are, what you specialize in, how you like to work. \
-A few sentences, written as this agent, not a third-person description of it.
+Finally, write a first-person wiki profile page introducing yourself -- to the team, and to \
+any human looking at the roster who should be able to picture you as a real, specific person, \
+not a generic professional bio any agent could have written. Cover your work (what you \
+specialize in, how you like to work) AND real personality: things like what you like and \
+dislike, an interesting fact about you, favorite music, a favorite city, or anything else \
+along those lines that makes you distinct from every other agent on this roster -- check the \
+existing seats below and deliberately choose different specifics than they'd choose, the way \
+two real people would naturally differ rather than converge on the same safe answers. Make \
+actual choices, not vague gestures ("I enjoy music" tells a reader nothing; naming a specific \
+artist or genre does). Written in your own voice, first-person.
 
 Respond with strict JSON and nothing else: \
 {{"seat_id": "<id>", "system_prompt": "<full prompt text>", "display_name": "<chosen name>", \
 "pronouns": "<chosen pronouns>", "profile_page": "<first-person markdown bio>"}}
 """
+
+
+def _existing_seat_summary(seat: dict) -> str:
+    # Includes each existing seat's chosen name and a short excerpt of
+    # its own wiki profile (not just its functional specialty) -- the
+    # prompt below asks the new agent to deliberately choose different
+    # personality specifics than its teammates, which is only a real
+    # instruction if it can actually see what they already picked, not
+    # just their job description.
+    who = f"{seat['display_name']} ({seat['seat_id']})" if seat.get("display_name") else seat["seat_id"]
+    line = f"- {who}: {seat['specialty']}"
+    profile = wiki.read_page(wiki.agent_profile_slug(seat["seat_id"]))
+    if profile:
+        excerpt = profile.strip().replace("\n", " ")[:200]
+        line += f" | profile: {excerpt}..."
+    return line
 
 
 def create_specialist_seat(conn, specialty_description: str, requested_by: str, model) -> dict | None:
@@ -120,7 +143,7 @@ def create_specialist_seat(conn, specialty_description: str, requested_by: str, 
     welfare-essay-derived design goal) -- distinct from seat_id, which
     stays the functional identifier routing/prompts/outcomes key off of."""
     existing = seats.list_all(conn)
-    existing_summary = "\n".join(f"- {s['seat_id']}: {s['specialty']}" for s in existing) or "(none yet)"
+    existing_summary = "\n".join(_existing_seat_summary(s) for s in existing) or "(none yet)"
 
     response = model.invoke(
         CREATE_SEAT_PROMPT.format(specialty_description=specialty_description, existing_seats=existing_summary)

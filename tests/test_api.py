@@ -177,6 +177,21 @@ def test_outcomes_endpoint():
     assert data["closed"] == 1
 
 
+def test_projects_endpoint_returns_the_full_tree():
+    beads.ensure_initialized()
+    project = beads.create("api-test project", "goal", issue_type="epic", priority=1)
+    epic = beads.create("api-test epic", "epic goal", issue_type="epic", parent=project["id"])
+    beads.create("api-test story", "story goal", parent=epic["id"])
+
+    tree = client.get("/projects").json()
+
+    found = next(p for p in tree if p["id"] == project["id"])
+    assert found["priority"] == 1
+    found_epic = next(e for e in found["epics"] if e["id"] == epic["id"])
+    assert len(found_epic["stories"]) == 1
+    assert found_epic["stories"][0]["title"] == "api-test story"
+
+
 def test_wiki_list_and_get_endpoints():
     from harness import wiki
 

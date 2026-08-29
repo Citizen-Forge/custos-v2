@@ -121,6 +121,43 @@ def test_create_specialist_seat_goes_active_immediately_no_approval_needed():
     assert prompts.pending(conn, seat_id) == []
 
 
+def test_create_specialist_seat_prompt_includes_existing_profiles_for_differentiation():
+    # The prompt asks a new agent to pick different personality specifics
+    # than its teammates -- only a real instruction if it can actually
+    # see what they picked, not just their job title.
+    conn = _conn()
+    existing_seat_id = f"test-seat-{uuid.uuid4().hex[:8]}"
+    seats.create(conn, existing_seat_id, "existing specialty", created_by="test", display_name="Juno")
+    wiki.write_page(wiki.agent_profile_slug(existing_seat_id), "I love jazz and living in Lisbon.")
+
+    captured = {}
+
+    class CapturingModel:
+        def invoke(self, prompt):
+            captured["prompt"] = prompt
+            return type(
+                "Response",
+                (),
+                {
+                    "content": json.dumps(
+                        {
+                            "seat_id": f"new-seat-{uuid.uuid4().hex[:8]}",
+                            "system_prompt": "x",
+                            "display_name": "Someone",
+                            "pronouns": "they/them",
+                            "profile_page": "bio",
+                        }
+                    )
+                },
+            )()
+
+    create_specialist_seat(conn, "new specialty", requested_by="product_owner", model=CapturingModel())
+
+    assert "Juno" in captured["prompt"]
+    assert "jazz" in captured["prompt"]
+    assert "Lisbon" in captured["prompt"]
+
+
 def test_create_specialist_seat_without_identity_fields_stores_null_not_a_placeholder():
     # A response that omits display_name/pronouns (e.g. an older prompt
     # version, or a model that just didn't include them) shouldn't fail

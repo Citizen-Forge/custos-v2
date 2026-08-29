@@ -97,6 +97,27 @@
   .stat { color: var(--muted); }
   .stat b { color: var(--text); font-size: 1.1rem; display: block; }
   #status { font-size: 0.75rem; color: var(--muted); }
+  .board-section { grid-column: 1 / -1; }
+  .project { border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; margin-bottom: 0.75rem; }
+  .project:last-child { margin-bottom: 0; }
+  .project-head { display: flex; align-items: baseline; gap: 0.5rem; }
+  .project-head .title { font-weight: 600; font-size: 0.95rem; }
+  .priority-badge {
+    font-size: 0.7rem; padding: 0.05rem 0.4rem; border-radius: 999px;
+    background: var(--border); color: var(--muted);
+  }
+  .priority-badge.p0, .priority-badge.p1 { background: var(--accent); color: white; }
+  .epic { margin: 0.5rem 0 0 1rem; padding-left: 0.75rem; border-left: 2px solid var(--border); }
+  .epic-title { font-weight: 500; font-size: 0.87rem; }
+  .story-row {
+    display: flex; align-items: baseline; gap: 0.5rem; margin: 0.3rem 0 0 1rem;
+    font-size: 0.85rem; color: var(--muted);
+  }
+  .story-status { font-family: monospace; font-size: 0.8rem; }
+  .story-status.closed { color: var(--ok); }
+  .story-status.in_progress { color: var(--accent); }
+  .story-status.open { color: var(--muted); }
+  .story-seat { font-size: 0.75rem; opacity: 0.8; }
 </style>
 </head>
 <body>
@@ -106,6 +127,10 @@
   <span id="status" style="margin-left:auto"></span>
 </header>
 <main>
+  <section class="board-section">
+    <h2>Projects <span class="count" id="projects-count">0</span></h2>
+    <div id="projects-list"></div>
+  </section>
   <section>
     <h2>Seats <span class="count" id="seats-count">0</span></h2>
     <div id="seats-list"></div>
@@ -310,8 +335,54 @@ async function refreshSeats() {
   }
 }
 
+const STORY_STATUS_GLYPH = { open: "○", in_progress: "◐", closed: "●" };
+
+function storyRow(story) {
+  const status = story.status || "open";
+  const glyph = STORY_STATUS_GLYPH[status] || "○";
+  const seat = (story.metadata && story.metadata.assigned_seat) || null;
+  return `<div class="story-row">
+    <span class="story-status ${status}">${glyph}</span>
+    <span class="id">${story.id}</span>
+    <span>${escapeHtml(story.title)}</span>
+    ${seat ? `<span class="story-seat">→ ${escapeHtml(seat)}</span>` : ""}
+  </div>`;
+}
+
+function projectCard(project) {
+  const epics = (project.epics || []).map(epic => `
+    <div class="epic">
+      <div class="epic-title">${epic.id} — ${escapeHtml(epic.title)}</div>
+      ${(epic.stories || []).map(storyRow).join("") || `<div class="story-row"><span class="empty">no stories yet</span></div>`}
+    </div>
+  `).join("") || `<div class="empty" style="margin-left:1rem">no epics yet</div>`;
+
+  return `<div class="project">
+    <div class="project-head">
+      <span class="priority-badge p${project.priority}">P${project.priority}</span>
+      <span class="title">${project.id} — ${escapeHtml(project.title)}</span>
+    </div>
+    <div class="desc">${escapeHtml(project.description || "")}</div>
+    ${epics}
+  </div>`;
+}
+
+async function refreshProjects() {
+  try {
+    const items = await fetchJSON("/projects");
+    document.getElementById("projects-count").textContent = items.length;
+    const container = document.getElementById("projects-list");
+    container.innerHTML = items.length
+      ? items.map(projectCard).join("")
+      : `<div class="empty">no projects yet -- the product-owner creates these from ideas</div>`;
+  } catch (e) {
+    document.getElementById("projects-list").innerHTML = `<div class="empty">error: ${e.message}</div>`;
+  }
+}
+
 async function refreshAll() {
   await Promise.all([
+    refreshProjects(),
     refreshSeats(),
     refreshTickets("ready", "ready-list", "ready-count"),
     refreshTickets("in_progress", "in-progress-list", "in-progress-count"),

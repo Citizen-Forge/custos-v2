@@ -86,6 +86,23 @@ def list_tickets(status: str = "ready"):
     raise HTTPException(400, f"unknown status {status!r}, expected ready|in_progress|human")
 
 
+@app.get("/projects")
+def list_projects():
+    """The full project -> epic -> story tree for the board UI. Walks
+    Beads' own hierarchy live (no cached/parallel structure to drift out
+    of sync) -- fine at today's scale (a handful of projects/epics), not
+    optimized for hundreds."""
+    projects = beads.list_top_level()
+    tree = []
+    for project in projects:
+        epics = beads.children_of(project["id"])
+        for epic in epics:
+            epic["stories"] = beads.children_of(epic["id"])
+        project["epics"] = epics
+        tree.append(project)
+    return tree
+
+
 @app.get("/tickets/{issue_id}")
 def get_ticket(issue_id: str):
     try:
