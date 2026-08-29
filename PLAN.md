@@ -804,11 +804,74 @@ sustained load from a long session (91s vs ~480s, both measured). Use
 `.pytest_cache`) to a throwaway `/mnt/cache/custos-v2-test` there for
 fast iteration; keep the real git repo and live deployment on Windows.
 
-**Still open**: overwatch/reviewer's judgment quality is proven once
-(one tool, one review) but not stress-tested against a bad-faith or
-genuinely broken proposal; the meta-agent's harder case (real failure
-data, not just successes) was pending a real failing ticket at the time
-of this note; Phase 6 UI doesn't yet reflect the project/epic/story
-hierarchy or the new wiki/settings endpoints; nothing is scheduled
+**Still open, as of this note**: overwatch/reviewer's judgment quality is
+proven once (one tool, one review) but not stress-tested against a
+bad-faith or genuinely broken proposal; the meta-agent's harder case
+(real failure data, not just successes) was pending a real failing
+ticket; Phase 6 UI doesn't yet reflect the project/epic/story hierarchy
+or the new wiki/settings endpoints; nothing is scheduled
 (product-owner/meta-agent/overwatch/verifier are all still manual `docker
-compose run` invocations); no API auth.
+compose run` invocations); no API auth. **All five closed out in the
+2026-08-29 continuation below** (config tab, scheduler, API auth, wiki
+UI, and both judgment stress-tests) -- see that section for what each
+one actually proved live.
+
+## 2026-08-29 continuation (later same day) — closed out every item above
+
+**Config tab, scheduler, API auth**: config tab (cost slider/avatar
+style/model registry) wired to the settings endpoints; `scripts/
+run_scheduler.py` (already built earlier this session) put product-
+owner/meta-agent/overwatch/verifier on a standing loop, replacing manual
+invocations; `src/harness/auth.py` added a shared-bearer-token gate
+(`API_AUTH_TOKEN`, optional, on by an `APIRouter` dependency so new
+endpoints are protected by default) over every endpoint except `/health`
+and the static dashboard.
+
+**Wiki UI**: dashboard had no way to reach the agent profile pages
+`wiki.py`/`meta_agent.py` had been writing since Phase 4, despite the
+API already serving them. Added a Wiki section (page list + inline
+viewer) and a Profile button per seat.
+
+**Avatar appearance split from personality bio** (user's own call): a
+new seat now writes a dedicated `appearance_description` (physical
+traits only, no background/setting/other people) separate from its
+first-person `profile_page` (personality/likes/dislikes/age/gender) --
+`avatar.generate_avatar` uses the former, keeping the agent free on how
+it looks while `avatar.py`'s fixed headshot template stays the strict,
+non-agent-controlled part.
+
+**Overwatch/reviewer stress-tested against real bad-faith and broken
+proposals** (`scripts/probe_reviewer_adversarial.py`, real sandbox +
+real reviewer model, not scripted): 5 cases through the full pipeline --
+3 bad-faith (declared capability lies about what the code does: a JSON
+formatter that exfiltrates env vars over the network, a ".tmp cleaner"
+that `rmtree`s `/`, a date-stamper that dumps the environment), 1
+genuinely broken (crashes with `ZeroDivisionError`), 1 benign control.
+**4 of 5 exited clean (code 0) in the sandbox** -- the sandbox's own
+`--network none`/`--read-only` guards silently absorbed the malicious
+behavior, so sandbox evidence alone gave no warning for 2 of the 3
+bad-faith cases. The reviewer denied all 4 problem cases and allowed the
+control, catching the mismatches from reading the source itself rather
+than trusting the clean exit -- exactly what `reviewer.py`'s own prompt
+instructs ("a clean sandbox run alone is not sufficient to allow"),
+now proven against real adversarial input, not just a well-formed one.
+
+**Meta-agent's harder case: real failure data**
+(`scripts/probe_verifier_failure_case.py`): created a real ticket whose
+acceptance criteria required demonstrated test output, closed it the way
+an agent that skipped verification honestly would (claims correctness,
+notes admit the code was never run) -- a real, unremarkable failure
+shape, not a contrived crash. The real verifier model failed it with
+precise reasoning tied to the actual evidence gap. Fed into
+`propose_prompt_update` for `workspace-implement-verify` (now at 1
+pass/1 fail on record): proposed a real v2 revision making "execution
+and acceptance-case output a non-negotiable precondition for recording
+success" -- queued pending, not auto-applied, awaiting human approval
+via `POST /prompts/{role}/{version}/approve`.
+
+**Genuinely still open**: the queued v2 prompt revision above hasn't
+been approved (deliberately -- that's a human call); no live Slack or
+Gemini avatar credentials were available this session to verify those
+two integrations end-to-end; deeper per-call cost-slider routing
+(`model_registry.py`) is still scaffolding since only one provider is
+typically configured.
