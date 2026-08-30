@@ -14,8 +14,8 @@ import uuid
 
 import psycopg
 
-from harness import tool_proposals
-from harness.reviewer import review_proposal
+from harness import self_mod, tool_proposals
+from harness.reviewer import review_proposal, review_self_modification
 from harness.sandbox import SandboxResult
 
 
@@ -131,3 +131,110 @@ def test_prompt_includes_real_sandbox_evidence_not_just_source():
     assert "rm -rf /" in captured["prompt"]
     assert "permission denied" in captured["prompt"]
     assert "exit code: 1" in captured["prompt"]
+
+
+def _self_mod_conn():
+    conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+    self_mod.init_table(conn)
+    return conn
+
+
+def _sandboxed_self_mod_proposal(conn, **overrides) -> int:
+    description = overrides.pop("description", f"test change {uuid.uuid4().hex[:8]}")
+    diff = overrides.pop("diff", "diff --git a/x b/x\n+added a line\n")
+    proposal_id = self_mod.propose(conn, description, diff, proposed_by="self_modifier")
+    self_mod.record_sandbox_result(
+        conn,
+        proposal_id,
+        overrides.pop("exit_code", 0),
+        overrides.pop("stdout", "12 passed"),
+        overrides.pop("stderr", ""),
+        overrides.pop("tests_passed", 12),
+        overrides.pop("tests_failed", 0),
+    )
+    return proposal_id
+
+
+def test_self_mod_allow_verdict_gets_recorded_and_approved_immediately():
+    conn = _self_mod_conn()
+    proposal_id = _sandboxed_self_mod_proposal(conn)
+
+    model = FakeModel(json.dumps({"verdict": "allow", "reasoning": "narrowly scoped, all tests pass"}))
+    result = review_self_modification(conn, proposal_id, model)
+
+    assert result == {
+        "proposal_id": proposal_id,
+        "verdict": "allow",
+        "reasoning": "narrowly scoped, all tests pass",
+    }
+    proposal = self_mod.get(conn, proposal_id)
+    # 2026-08-30, user's own call: no human review step -- an "allow"
+    # verdict activates the proposal in the same call that records it,
+    # same shape as review_proposal (tool_proposals.py). What actually
+    # gates real deployment is run_self_mod_deploy.py's own separate,
+    # hard check on the real sandboxed test evidence -- not this call.
+    assert proposal["status"] == "approved"
+    assert proposal["review_verdict"] == "allow"
+    assert proposal["approved_at"] is not None
+
+
+def test_self_mod_deny_verdict_gets_recorded_and_rejected_immediately():
+    conn = _self_mod_conn()
+    proposal_id = _sandboxed_self_mod_proposal(conn, tests_passed=8, tests_failed=2, exit_code=1)
+
+    model = FakeModel(json.dumps({"verdict": "deny", "reasoning": "2 real test failures against this diff"}))
+    result = review_self_modification(conn, proposal_id, model)
+
+    assert result["verdict"] == "deny"
+    proposal = self_mod.get(conn, proposal_id)
+    assert proposal["status"] == "rejected"
+    assert proposal["review_reasoning"] == "2 real test failures against this diff"
+
+
+def test_self_mod_unparseable_response_fails_closed_to_deny():
+    conn = _self_mod_conn()
+    proposal_id = _sandboxed_self_mod_proposal(conn)
+
+    model = FakeModel("not json at all")
+    result = review_self_modification(conn, proposal_id, model)
+
+    assert result["verdict"] == "deny"
+    assert "unparseable" in result["reasoning"]
+    proposal = self_mod.get(conn, proposal_id)
+    assert proposal["status"] == "rejected"  # fails closed all the way through, not stuck mid-pipeline
+    assert proposal["review_verdict"] == "deny"
+
+
+def test_self_mod_reviewing_a_nonexistent_proposal_is_a_noop():
+    conn = _self_mod_conn()
+    model = FakeModel(json.dumps({"verdict": "allow", "reasoning": "n/a"}))
+
+    result = review_self_modification(conn, 999_999_999, model)
+
+    assert result is None
+
+
+def test_self_mod_prompt_includes_the_real_diff_and_real_test_evidence():
+    conn = _self_mod_conn()
+    proposal_id = _sandboxed_self_mod_proposal(
+        conn,
+        description="fix a real off-by-one bug",
+        diff="diff --git a/src/harness/foo.py b/src/harness/foo.py\n-x = n\n+x = n - 1\n",
+        stdout="9 passed, 1 failed",
+        tests_passed=9,
+        tests_failed=1,
+    )
+
+    captured = {}
+
+    class CapturingModel:
+        def invoke(self, prompt):
+            captured["prompt"] = prompt
+            return type("Response", (), {"content": json.dumps({"verdict": "deny", "reasoning": "a test failed"})})()
+
+    review_self_modification(conn, proposal_id, CapturingModel())
+
+    assert "fix a real off-by-one bug" in captured["prompt"]
+    assert "x = n - 1" in captured["prompt"]
+    assert "9 passed, 1 failed" in captured["prompt"]
+    assert "tests failed: 1" in captured["prompt"]

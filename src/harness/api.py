@@ -38,7 +38,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import avatar, beads, model_registry, outcomes, prompts, seats, settings, tool_proposals, verifications, wiki
+from . import avatar, beads, model_registry, outcomes, prompts, seats, self_mod, settings, tool_proposals, verifications, wiki
 from .auth import require_auth
 
 
@@ -112,6 +112,12 @@ def _seats_conn():
 def _tool_proposals_conn():
     conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
     tool_proposals.init_table(conn)
+    return conn
+
+
+def _self_mod_conn():
+    conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+    self_mod.init_table(conn)
     return conn
 
 
@@ -374,6 +380,49 @@ def reject_tool_proposal(proposal_id: int, body: DismissBody = DismissBody()):
     try:
         tool_proposals.reject(conn, proposal_id, body.reason)
         return tool_proposals.get(conn, proposal_id)
+    finally:
+        conn.close()
+
+
+@router.get("/self-mod-proposals")
+def list_self_mod_proposals(status: str = "approved"):
+    """Default to `approved`: the reviewer's own verdict already
+    approves/rejects a self-modification proposal (2026-08-30, no human
+    review step -- see reviewer.review_self_modification's docstring),
+    so this is what's about to be deployed (or already was), not a
+    human decision queue. `reviewed` is still a valid filter for audit
+    purposes -- every proposal passes through it on the way to
+    approved/rejected."""
+    conn = _self_mod_conn()
+    try:
+        return self_mod.list_by_status(conn, status)
+    finally:
+        conn.close()
+
+
+@router.post("/self-mod-proposals/{proposal_id}/approve")
+def approve_self_mod_proposal(proposal_id: int):
+    """Manual override: reviewer.review_self_modification already calls
+    this itself for an "allow" verdict, so a proposal is normally
+    already approved by the time a human sees it here. This exists to
+    override a "deny" verdict -- run_self_mod_deploy.py still won't
+    touch anything for a proposal that isn't 'approved' AND doesn't have
+    a clean sandboxed test run (see that script), so calling this alone
+    still doesn't deploy anything by itself."""
+    conn = _self_mod_conn()
+    try:
+        self_mod.approve(conn, proposal_id)
+        return self_mod.get(conn, proposal_id)
+    finally:
+        conn.close()
+
+
+@router.post("/self-mod-proposals/{proposal_id}/reject")
+def reject_self_mod_proposal(proposal_id: int, body: DismissBody = DismissBody()):
+    conn = _self_mod_conn()
+    try:
+        self_mod.reject(conn, proposal_id, body.reason)
+        return self_mod.get(conn, proposal_id)
     finally:
         conn.close()
 

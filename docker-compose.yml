@@ -59,6 +59,16 @@ services:
       - ./tests:/app/tests:ro
       - ./scripts:/app/scripts:ro
       - ./workspace:/workspace
+      # self_modifier.py's own writable checkout (Phase 7's self-
+      # modification agent, added 2026-08-30) -- a Docker-managed named
+      # volume, deliberately NOT a second bind mount of ./src: mounting
+      # the same host directory twice (once :ro, once :rw) would point
+      # both at the identical files, silently reopening the exact
+      # read-write control-plane gap this project already found and
+      # fixed once (see self_mod.py's module docstring). A named volume
+      # has no host path to collide with -- it's a real, physically
+      # separate copy, seeded by self_modifier.sync_checkout_from_live.
+      - self_mod_checkout:/self-mod-checkout
     command: ["python", "-m", "harness.worker"]
 
   api:
@@ -153,14 +163,33 @@ services:
       DATABASE_URL: postgresql://custos:custos@postgres:5432/custos_harness
       SANDBOX_SCRATCH_CONTAINER_PATH: /sandbox-scratch
       SANDBOX_SCRATCH_HOST_PATH: ${PWD}/sandbox-scratch
+      # Host-visible path to the real repo root, for the same Docker-
+      # out-of-Docker reason SANDBOX_SCRATCH_HOST_PATH already exists:
+      # run_self_mod_deploy.py's own `docker compose up --build` call
+      # is resolved by the HOST daemon against the HOST filesystem, not
+      # this container's `/repo-src` view of it.
+      REPO_HOST_PATH: ${PWD}
     volumes:
       - ./src:/app/src:ro
       - ./tests:/app/tests:ro
       - ./scripts:/app/scripts:ro
       - ./sandbox-scratch:/sandbox-scratch
+      # Read-write mount of the WHOLE repo (Phase 7's self-modification
+      # pipeline, added 2026-08-30). run_self_mod_sandbox.py only ever
+      # COPIES this to an ephemeral scratch dir before applying a diff
+      # -- ':ro' would have been enough for that alone. It's read-write
+      # because run_self_mod_deploy.py is the one piece of code in this
+      # entire project trusted to write to the real tree (git apply +
+      # commit) once a proposal is approved -- deliberately still never
+      # exposed as anything an agent tool can reach: this mount exists
+      # only in sandbox-runner, which no agent-invokable tool anywhere
+      # in this codebase can trigger (only `docker compose --profile
+      # sandbox run`, issued directly on the host).
+      - .:/repo-src
       - /var/run/docker.sock:/var/run/docker.sock
     profiles:
       - sandbox
 
 volumes:
   pgdata:
+  self_mod_checkout:

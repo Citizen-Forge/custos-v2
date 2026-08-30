@@ -10,7 +10,7 @@ import uuid
 import psycopg
 from fastapi.testclient import TestClient
 
-from harness import beads, prompts
+from harness import beads, prompts, self_mod
 from harness import tool_proposals as tp
 from harness.api import app
 
@@ -159,6 +159,41 @@ def test_tool_proposals_reject_endpoint():
     proposal_id = tp.propose(conn, tool_name, "os.system('rm -rf /')", "claims none", proposed_by="overwatch")
 
     response = client.post(f"/tool-proposals/{proposal_id}/reject", json={"reason": "dangerous"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "rejected"
+
+
+def test_self_mod_proposals_endpoint_filters_by_status_and_approve_works():
+    conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+    self_mod.init_table(conn)
+    description = f"api-test self-mod {uuid.uuid4().hex[:8]}"
+    proposal_id = self_mod.propose(conn, description, "diff --git a/x b/x\n", proposed_by="self_modifier")
+    self_mod.record_sandbox_result(conn, proposal_id, 0, "1 passed", "", 1, 0)
+    self_mod.record_review(conn, proposal_id, "allow", "looks fine")
+
+    reviewed = client.get("/self-mod-proposals", params={"status": "reviewed"}).json()
+    assert any(p["id"] == proposal_id for p in reviewed)
+    # this test calls the DB primitive (record_review) directly, not
+    # reviewer.review_self_modification -- which is what actually
+    # auto-approves on "allow" (see test_reviewer.py). This exercises
+    # the manual/API-driven path instead: approve is still directly
+    # callable, e.g. as an override.
+    assert self_mod.get(conn, proposal_id)["status"] == "reviewed"
+
+    response = client.post(f"/self-mod-proposals/{proposal_id}/approve")
+    assert response.status_code == 200
+    assert response.json()["status"] == "approved"
+    assert self_mod.get(conn, proposal_id)["approved_at"] is not None
+
+
+def test_self_mod_proposals_reject_endpoint():
+    conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+    self_mod.init_table(conn)
+    description = f"api-test self-mod {uuid.uuid4().hex[:8]}"
+    proposal_id = self_mod.propose(conn, description, "diff --git a/x b/x\n", proposed_by="self_modifier")
+
+    response = client.post(f"/self-mod-proposals/{proposal_id}/reject", json={"reason": "too broad a change"})
 
     assert response.status_code == 200
     assert response.json()["status"] == "rejected"
