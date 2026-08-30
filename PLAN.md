@@ -902,11 +902,38 @@ instruction to remove both tabs from the dashboard.
   approve` to bring it in line with what the new code path would have
   done automatically.
 
+**Real bug found by the new board UI, fixed same session**: `GET
+/projects` called `beads.list_top_level()` with no filter, so every
+top-level issue rendered as a bare "project" -- including one-off task
+tickets never meant to be projects (test/validation debris predating the
+projects concept). The old nested-outline view buried this; the new
+kanban board rendered these as empty cards with no epics/stories,
+impossible to miss. Fixed by filtering on `issue_type="epic"` (what
+`product_owner.create_project` always uses) -- live result went from 7
+items down to the 1 real project. Also cleaned up the debris itself:
+closed `workspace-ye5` (open, unassigned, sitting in the real Ready
+queue where the worker/scheduler could have picked it up and wasted a
+cycle on it) and brought the 5 adversarial-probe tool proposals from
+`scripts/probe_reviewer_adversarial.py` to the terminal status the new
+auto-approve/reject policy would have given them (4 rejected, 1
+approved, matching their already-recorded verdicts).
+
 **Genuinely still open**: no live Slack or Gemini avatar credentials
-were available this session to verify those two integrations end-to-end;
-deeper per-call cost-slider routing (`model_registry.py`) is still
-scaffolding since only one provider is typically configured; tool
-*activation* itself (loading an approved proposal into a real seat's
-toolset) was never built -- approve/reject is still the end of the
-modeled lifecycle, not a trigger for anything, so the reviewer's verdict
-has no real teeth yet regardless of who acts on it.
+were available this session to verify those two integrations end-to-end.
+Deeper per-call cost-slider routing (`model_registry.py`) stays
+scaffolding -- this one isn't a gap so much as the user's own prior
+explicit call: unverifiable with only one real provider configured,
+revisit once a second one exists. Tool *activation* itself (loading an
+approved proposal into a real seat's toolset) was never built, and
+turns out to be a genuinely large undertaking, not a small wiring gap:
+the one real approved tool (`line_count`, id 1) takes CLI args and reads
+real workspace files, but `sandbox.py`'s model today runs
+`python candidate.py` with zero argv and nothing mounted but the script
+itself -- there's no calling convention for a live agent to pass
+arguments in or get a real file safely exposed to the sandboxed
+process, and building one means extending exactly the Docker-socket
+privilege boundary this project has been most careful about all
+session (see Phase 7's "who holds the Docker socket" framing above).
+Deliberately not attempted under time pressure -- flagged for a real
+design pass, same posture as everything else in this project that's
+substrate-before-judgment or scaffolding-before-routing.
