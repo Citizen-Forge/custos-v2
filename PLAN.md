@@ -923,17 +923,31 @@ were available this session to verify those two integrations end-to-end.
 Deeper per-call cost-slider routing (`model_registry.py`) stays
 scaffolding -- this one isn't a gap so much as the user's own prior
 explicit call: unverifiable with only one real provider configured,
-revisit once a second one exists. Tool *activation* itself (loading an
-approved proposal into a real seat's toolset) was never built, and
-turns out to be a genuinely large undertaking, not a small wiring gap:
-the one real approved tool (`line_count`, id 1) takes CLI args and reads
-real workspace files, but `sandbox.py`'s model today runs
-`python candidate.py` with zero argv and nothing mounted but the script
-itself -- there's no calling convention for a live agent to pass
-arguments in or get a real file safely exposed to the sandboxed
-process, and building one means extending exactly the Docker-socket
-privilege boundary this project has been most careful about all
-session (see Phase 7's "who holds the Docker socket" framing above).
-Deliberately not attempted under time pressure -- flagged for a real
-design pass, same posture as everything else in this project that's
-substrate-before-judgment or scaffolding-before-routing.
+revisit once a second one exists.
+
+**Tool activation: built, same session, after all.** Initially scoped
+as too large to attempt under time pressure (see the paragraph this
+replaces, preserved in git history) -- the one real approved tool
+(`line_count`) takes CLI args and reads real workspace files, but
+`sandbox.py`'s model runs `python candidate.py` with zero argv and
+nothing mounted but the script itself, and extending that looked like
+it required reaching into the Docker-socket privilege boundary. The
+user's own reminder resolved it: this project's security model was
+always meant to be two-layer, MECHANICAL (sandbox.py's container) *and*
+LLM-driven (classifier.py's real-time per-call gate) -- and the
+mechanical layer is a pre-trust, proposal-review-time concern only.
+Once a proposal is `approved`, it's the same trust tier as any built-in
+tool; `shell_exec` already runs real, unsandboxed subprocess commands
+gated only by the classifier's real-time judgment, and classifier.py's
+prompt is already generic over `(tool_name, tool_args)` -- an activated
+tool gets that gate for free, zero classifier changes needed.
+`src/harness/dynamic_tools.py`: materializes an approved proposal's
+source to disk once, wraps it as a real subprocess-invoking tool
+(matching every proposal's own CLI-script shape), wired into
+`worker.py` alongside the built-in toolset. Live-verified against the
+real `line_count` proposal against a real workspace file (`avg.py`,
+235 lines) -- correct output, not just a passing test. 7 new tests,
+144 passed/5 skipped overall. One real bug caught by the tests: a
+parameter literally named `args` collides with pydantic's own
+field-naming and silently mangles to `v__args` mid-call -- renamed to
+`cli_args`.
