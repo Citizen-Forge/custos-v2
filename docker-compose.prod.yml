@@ -14,9 +14,25 @@
 # v1's dashboard and every other self-hosted app on this box already
 # work -- a real LAN identity, not a host-published port). Docker's
 # macvlan driver does not support published ports on a macvlan-attached
-# container, so its `ports: 8000:8000` publish is dropped here the same
-# way postgres's is below -- api is reachable at its own br0 IP:8000
-# directly instead of through the box's host IP.
+# container -- confirmed empirically here, not just from the documented
+# rule: with `ports: 8000:8000` left in place, `docker ps` shows the
+# port mapping silently vanish once br0 is attached, no error, just
+# gone. api is reachable at its own br0 IP:8000 for real LAN clients.
+#
+# But the interface-agent sidecar (2026-08-30) runs as a plain process
+# on the Unraid HOST itself, not inside a container -- and per this
+# box's own macvlan rule, the host can't reliably reach a macvlan
+# child's IP either (confirmed live: `curl 192.168.250.238:8000` from
+# the Unraid host itself timed out, the exact symptom the rule
+# predicts). Standard Docker bridge networks don't have that
+# restriction -- the host can reach a bridge-attached container's IP
+# directly (confirmed live too) -- so api also gets a STATIC IP on
+# `default` (`172.31.0.0/16`, matching this project's actual
+# auto-assigned subnet, picked outside the low range Compose hands out
+# dynamically to avoid ever colliding with harness/postgres/scheduler's
+# own auto-assigned addresses) purely so the sidecar has a stable
+# address to reach it at that survives a container recreation, unlike
+# the default network's normal per-recreation dynamic IP.
 #
 # postgres's host port publish is dropped in this overlay: nothing
 # outside the compose network needs to reach it directly in a real
@@ -52,9 +68,15 @@ services:
   api:
     ports: !reset []
     networks:
+      default:
+        ipv4_address: 172.31.0.100
       br0:
         ipv4_address: 192.168.250.238
 
 networks:
   br0:
     external: true
+  default:
+    ipam:
+      config:
+        - subnet: 172.31.0.0/16
