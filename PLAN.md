@@ -447,7 +447,7 @@ a freshly wiped Postgres volume after a full test run.
   — today those are env vars (`.env.example`), no admin UI to edit them
   live like v1 had.
 
-### Phase 7 — Overwatch: self-modifying code — containment substrate built, judgment not started
+### Phase 7 — Overwatch: self-modifying code — containment, judgment, and self-modification of the harness's own source all built and live-proven (2026-08-30, see dated section near the end of this file)
 
 Design conversation, resolved: containment and review are complementary,
 not alternatives. A hardened sandbox is what holds even if the review
@@ -570,13 +570,14 @@ this — containment is a Docker/OS property, not a model judgment call:**
   no longer required for the verdict to take effect; `approve`/`reject`
   now exist as an override path, not the only path.
 
-**Not built yet, deliberately:** the overwatch agent's own judgment (what
-tool is needed, whether to propose one) and the reviewer agent's actual
-judgment (right now `record_review` just records whatever verdict it's
-given — no model forms that verdict yet) — same reasoning as the
-product-owner and meta-agent: judgment needs a real model to be
-meaningful, and this session builds substrate ahead of judgment, not the
-other way round.
+**Overwatch/reviewer judgment, and self-modification of the harness's own
+source: both since built** — see the 2026-08-29 and 2026-08-30 dated
+sections near the end of this file. Tool-proposal judgment (what tool is
+needed, whether to propose one, the reviewer's allow/deny verdict) landed
+2026-08-29; the harness modifying `src/harness/*` itself — the actual
+control-plane boundary this phase's three-zones design walls off — landed
+2026-08-30, live-proven end to end against a real (if intentionally
+trivial) diff.
 
 ## Open questions (not blocking Phase 1, but will block later phases)
 
@@ -951,3 +952,78 @@ real `line_count` proposal against a real workspace file (`avg.py`,
 parameter literally named `args` collides with pydantic's own
 field-naming and silently mangles to `v__args` mid-call -- renamed to
 `cli_args`.
+
+## 2026-08-30 — Self-modification of the harness's own source: built and live-proven end to end
+
+Phase 7's control-plane boundary ("no agent, including overwatch, ever
+writes here directly" to `src/harness/*`) now has its actual counterpart:
+a full propose -> sandbox -> review -> deploy lifecycle for changes to the
+harness's own source, `src/harness/self_mod.py` +
+`scripts/run_self_modifier.py` / `run_self_mod_sandbox.py` /
+`run_self_mod_reviewer.py` / `run_self_mod_deploy.py`.
+
+**Same two-layer shape as tool proposals, one deliberate difference in
+where write-access lives:** the self-modifier agent only ever writes to a
+separate, isolated checkout (never `/app/src`, which stays read-only for
+the live system per the existing Phase 7 fix); the *only* code with write
+access to the real tree is `run_self_mod_deploy.py`'s own trusted
+orchestration, never an agent tool and never something a proposal's diff
+content can reach beyond being the patch that gets applied.
+
+**No human gate, user's own explicit call, same session this was
+built:** unlike the original tool-proposal design, an `allow` verdict
+from `reviewer.review_self_modification` immediately approves the
+proposal and `run_self_mod_deploy.py` immediately deploys it -- no
+human reviews this before it takes effect. Git history is the actual
+safety net (a bad "allow" is a `git revert` away); `approve`/`reject`
+stay reachable directly via the API as a manual override path, same as
+every other proposal system in this project, but nothing waits on it.
+This is deliberately not the *only* mechanical gate, though:
+`run_self_mod_deploy.py` enforces its own hard, non-LLM-dependent
+precondition (`_has_clean_sandbox_result`) -- a proposal whose sandboxed
+run had any real test failure, or never completed, never reaches
+deployment regardless of review verdict.
+
+**Docker-out-of-Docker, hit live a second time, same underlying cause as
+Phase 7's original sandbox.py gotcha but a different shape:** building a
+real, testable image and running a real isolated Postgres against it
+needs the build context read by whichever process invokes `docker`
+(container-local), while any bind-mounted volume gets resolved by the
+*daemon* against a host-visible path -- one `cwd` can't satisfy both for
+a multi-service setup, so `docker compose` itself can't be trusted across
+this boundary here. Fixed by dropping to raw `docker build`/`run`/
+`network` calls in both `run_self_mod_sandbox.py` (ephemeral scratch
+copy, throwaway network + Postgres, torn down after) and
+`run_self_mod_deploy.py`'s own final re-test against the real tree --
+needing no runtime volumes at all, since the built image already bakes
+in everything via the Dockerfile's own `COPY` commands. The real
+service rebuild still needs actual Compose (it has to recreate the *real*
+project's containers) -- split in two: `docker build` with an explicit
+container-local context path, then `docker compose --project-directory
+REPO_HOST_PATH up -d` with no `--build` flag, so Compose never has to
+locally read a build context it can't reach.
+
+**Live-proven end to end, 2026-08-30, real proposal #1 (a one-line
+docstring addition to `self_mod.get()`):**
+1. Sandboxed in a real isolated Docker build + throwaway Postgres:
+   171 passed, 0 failed, exit 0.
+2. Reviewed by the real local model: `allow`, correctly reasoning the
+   diff was documentation-only and the full suite passed cleanly.
+3. Deployed: diff applied to the real tree, re-tested there for drift
+   (171 passed, 5 skipped -- a second, independent confirmation, not
+   just trusting the sandboxed result), committed (`15692a7`).
+
+**Real bug found live during the deploy step, not assumed away:**
+`run_self_mod_deploy.py`'s final `docker compose up -d` fell through to
+plain `docker --help` inside `sandbox-runner` -- the Dockerfile only ever
+copied `/usr/local/bin/docker` from the `docker:27-cli` base image, never
+its compose plugin, so `docker compose` had no subcommand to dispatch to.
+The plugin actually lives under
+`/usr/local/libexec/docker/cli-plugins/docker-compose` in that base image
+(checked live inside it, not the more commonly-documented `lib/` path --
+an easy wrong guess, caught by actually inspecting the image rather than
+assuming). Fixed by copying that path too; confirmed with `docker compose
+version` resolving correctly inside a rebuilt `sandbox-runner` container.
+The commit itself was never at risk -- `run_self_mod_deploy.py`'s own
+design already treats a failed rebuild as "commit stands, human finishes
+the rebuild manually," exactly the degraded-but-safe path it hit here.
