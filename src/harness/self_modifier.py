@@ -37,7 +37,7 @@ from langchain_core.tools import tool
 
 from . import self_mod
 from .graph import build_graph_from_model
-from .permissions import check_within_workspace
+from .permissions import PermissionDenied, check_within_workspace
 
 ROLE = "self_modifier"
 
@@ -86,29 +86,35 @@ def build_tools(conn):
             if status.stdout.strip():
                 return "checkout has uncommitted changes -- propose_self_modification or discard them before re-syncing"
 
-        os.makedirs(CHECKOUT_ROOT, exist_ok=True)
-        for name in LIVE_SOURCE_DIRS:
-            src = os.path.join(LIVE_SOURCE_ROOT, name)
-            dst = os.path.join(CHECKOUT_ROOT, name)
-            if os.path.isdir(dst):
-                shutil.rmtree(dst)
-            if os.path.isdir(src):
-                shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        try:
+            os.makedirs(CHECKOUT_ROOT, exist_ok=True)
+            for name in LIVE_SOURCE_DIRS:
+                src = os.path.join(LIVE_SOURCE_ROOT, name)
+                dst = os.path.join(CHECKOUT_ROOT, name)
+                if os.path.isdir(dst):
+                    shutil.rmtree(dst)
+                if os.path.isdir(src):
+                    shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 
-        if not os.path.isdir(git_dir):
-            subprocess.run(["git", "init", "-q"], cwd=CHECKOUT_ROOT, check=True)
-        subprocess.run(["git", "add", "-A"], cwd=CHECKOUT_ROOT, check=True)
-        result = subprocess.run(
-            ["git", "commit", "-q", "-m", "baseline sync from live source", "--allow-empty"],
-            cwd=CHECKOUT_ROOT,
-            check=True,
-        )
+            if not os.path.isdir(git_dir):
+                subprocess.run(["git", "init", "-q"], cwd=CHECKOUT_ROOT, check=True)
+            subprocess.run(["git", "add", "-A"], cwd=CHECKOUT_ROOT, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "baseline sync from live source", "--allow-empty"],
+                cwd=CHECKOUT_ROOT,
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as e:
+            return f"error syncing checkout: {e}"
         return "checkout synced to current live source (src/, tests/, scripts/)"
 
     @tool
     def list_checkout_files(subdir: str = "") -> str:
         """List files under a directory in your checkout (e.g. "src/harness")."""
-        path = _checkout_path(subdir)
+        try:
+            path = _checkout_path(subdir)
+        except PermissionDenied as e:
+            return f"error: {e}"
         if not os.path.isdir(path):
             return f"no such directory: {subdir!r}"
         entries = []
@@ -120,20 +126,30 @@ def build_tools(conn):
     @tool
     def read_checkout_file(path: str) -> str:
         """Read a file from your checkout, relative to its root."""
-        resolved = _checkout_path(path)
-        with open(resolved, "r", encoding="utf-8") as f:
-            return f.read()
+        try:
+            resolved = _checkout_path(path)
+            with open(resolved, "r", encoding="utf-8") as f:
+                return f.read()
+        except PermissionDenied as e:
+            return f"error: {e}"
+        except OSError as e:
+            return f"error reading {path!r}: {e}"
 
     @tool
     def write_checkout_file(path: str, content: str) -> str:
         """Write a file in your checkout, relative to its root -- creates
         new files or overwrites existing ones. Never touches the real
         running source; this is your own isolated copy."""
-        resolved = _checkout_path(path)
-        os.makedirs(os.path.dirname(resolved), exist_ok=True)
-        with open(resolved, "w", encoding="utf-8") as f:
-            f.write(content)
-        return f"wrote {len(content)} bytes to {path}"
+        try:
+            resolved = _checkout_path(path)
+            os.makedirs(os.path.dirname(resolved), exist_ok=True)
+            with open(resolved, "w", encoding="utf-8") as f:
+                f.write(content)
+            return f"wrote {len(content)} bytes to {path}"
+        except PermissionDenied as e:
+            return f"error: {e}"
+        except OSError as e:
+            return f"error writing {path!r}: {e}"
 
     @tool
     def propose_self_modification(description: str) -> str:

@@ -86,10 +86,11 @@ def record_sandbox_result(
 
 
 def record_review(conn, proposal_id: int, verdict: str, reasoning: str) -> None:
-    """Unlike reviewer.review_proposal (tool_proposals.py), this never
-    auto-approves on an "allow" verdict -- see module docstring for why
-    self-modification keeps the human-approval step mandatory rather
-    than advisory."""
+    """Just records the verdict/reasoning -- reviewer.review_self_modification
+    is what acts on it (calling approve()/reject() itself right after),
+    same as tool_proposals.py's review_proposal. See module docstring for
+    why self-modification's "allow" takes effect immediately rather than
+    waiting on a human approval step."""
     conn.execute(
         "UPDATE self_mod_proposals SET review_verdict=%s, review_reasoning=%s, status='reviewed' WHERE id=%s",
         (verdict, reasoning, proposal_id),

@@ -15,7 +15,6 @@ import uuid
 import psycopg
 
 from harness import self_mod, self_modifier
-from harness.permissions import PermissionDenied
 from harness.self_modifier import build_tools
 
 
@@ -86,16 +85,15 @@ def test_write_checkout_file_rejects_path_escaping_the_checkout(monkeypatch, tmp
     tools = build_tools(_conn())
     write = next(t for t in tools if t.name == "write_checkout_file")
 
-    try:
-        write.invoke({"path": "../../etc/passwd", "content": "malicious"})
-        raised = False
-    except PermissionDenied:
-        raised = True
-    except Exception as e:
-        # StructuredTool may wrap the real exception -- accept either
-        # shape as long as it's genuinely the workspace-escape check.
-        raised = "escapes workspace" in str(e)
-    assert raised
+    # Real bug caught live 2026-08-30, not by this test originally: a
+    # first version of this test accepted either a raised exception or
+    # an error string as passing, which is exactly why it didn't catch
+    # that the tool was letting PermissionDenied escape uncaught and
+    # crash a real self-modifier session outright. Fixed to require the
+    # fail-soft behavior every other tool in this codebase already
+    # follows -- never raise, always return a readable error string.
+    result = write.invoke({"path": "../../etc/passwd", "content": "malicious"})
+    assert "escapes workspace" in result
 
 
 def test_propose_self_modification_computes_a_real_diff(monkeypatch, tmp_path):

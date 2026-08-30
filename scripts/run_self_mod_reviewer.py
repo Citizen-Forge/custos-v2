@@ -1,11 +1,14 @@
 """
 Standalone entrypoint for reviewing self-modification proposals. Same
 shape as run_reviewer.py, separate script because the verdict here
-never auto-approves (see reviewer.review_self_modification's
-docstring) -- reviews every proposal currently sitting in `sandboxed`
-status (real diff + real isolated test results attached, no verdict
-yet). Never applies anything; approve/reject stay separate, human-only
-API calls via POST /self-mod-proposals/{id}/approve|reject.
+immediately approves/rejects the proposal itself (see
+reviewer.review_self_modification's docstring) -- reviews every
+proposal currently sitting in `sandboxed` status (real diff + real
+isolated test results attached, no verdict yet). Never applies
+anything itself; that's run_self_mod_deploy.py's job against proposals
+this leaves `approved`. approve/reject stay reachable directly via
+POST /self-mod-proposals/{id}/approve|reject too, as a human override
+path -- not something anything here waits on.
 
     docker compose run --rm harness python scripts/run_self_mod_reviewer.py
 
@@ -48,7 +51,7 @@ def main() -> None:
             result = review_self_modification(conn, proposal["id"], model)
             print(f"#{result['proposal_id']}: {result['verdict']} -- {result['reasoning']}")
 
-    print("all verdicts recorded -- awaiting human approve/reject via the API")
+    print("all verdicts recorded and acted on -- approved proposals await run_self_mod_deploy.py")
 
 
 if __name__ == "__main__":
