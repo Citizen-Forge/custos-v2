@@ -122,6 +122,7 @@ def mark_deployed(conn, proposal_id: int) -> None:
 
 
 def get(conn, proposal_id: int) -> dict | None:
+    """Returns the proposal row as a dict, or None if no proposal with that id exists."""
     row = conn.execute(
         "SELECT id, description, diff, proposed_by, sandbox_stdout, sandbox_stderr, sandbox_exit_code, "
         "sandbox_tests_passed, sandbox_tests_failed, review_verdict, review_reasoning, status, "
