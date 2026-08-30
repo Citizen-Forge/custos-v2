@@ -106,8 +106,20 @@ def list_projects():
     """The full project -> epic -> story tree for the board UI. Walks
     Beads' own hierarchy live (no cached/parallel structure to drift out
     of sync) -- fine at today's scale (a handful of projects/epics), not
-    optimized for hundreds."""
-    projects = beads.list_top_level()
+    optimized for hundreds.
+
+    Real bug found live 2026-08-30: this used to call
+    `beads.list_top_level()` with no filter, which returns EVERY
+    top-level issue -- including plain one-off `task`-type tickets that
+    were never meant to be projects (ad-hoc validation tickets predating
+    the projects concept, or from enqueue_demo.py). `product_owner.
+    create_project` always creates real projects with `issue_type="epic"`
+    (see product_owner.py), so filtering on that excludes stray tasks
+    without excluding any real project -- caught because the new board/
+    roadmap UI (2026-08-29) made stray tickets rendering as bare
+    "projects" with no epics/stories immediately obvious in a way the
+    old nested-outline view didn't."""
+    projects = beads.list_top_level(issue_type="epic")
     tree = []
     for project in projects:
         epics = beads.children_of(project["id"])
