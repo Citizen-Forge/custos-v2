@@ -46,6 +46,14 @@ services:
     # LOCAL_MODEL_BASE_URL is already set to a real LAN IP instead.
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Explicit (rather than the implicit default every service gets for
+    # free) so a deployment overlay can union-merge in an additional
+    # network -- e.g. docker-compose.prod.yml attaching this to a
+    # macvlan network to reach an LLM server that also lives on one --
+    # without replacing this one. Compose merges `networks:` across
+    # files only when the base file already declares the list itself.
+    networks:
+      - default
     volumes:
       - ./src:/app/src:ro
       - ./tests:/app/tests:ro
@@ -114,6 +122,9 @@ services:
       SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-1800}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # See harness's networks comment above -- same reasoning.
+    networks:
+      - default
     volumes:
       - ./src:/app/src:ro
       - ./scripts:/app/scripts:ro

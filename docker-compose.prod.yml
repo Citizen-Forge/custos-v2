@@ -1,0 +1,53 @@
+# Production overlay for deployment onto a box where the configured
+# LLM server is itself a macvlan container (this project's own Unraid
+# box: LOCAL_MODEL_BASE_URL points at a `br0` peer, e.g. a llama.cpp/
+# Ollama server with its own real LAN IP). Per this box's own documented
+# rule: the Docker host and a container on the default bridge network
+# can't reliably reach a macvlan peer's IP -- so harness/scheduler (the
+# two services that actually call the LLM) get attached to br0 too,
+# with their own static IPs, alongside their existing default-network
+# attachment (not instead of it -- they still need `default` to reach
+# postgres). Same pattern already established by irl/job-tracker/
+# belvedere on this box.
+#
+# api is deliberately NOT attached to br0: it never calls the LLM
+# directly (model_registry.py only builds config objects, no network
+# call), and Docker's macvlan driver does not support published ports
+# on a macvlan-attached container -- api needs its `ports: 8000:8000`
+# publish to keep working, so it stays off br0 and reachable at the
+# box's normal host IP:8000 instead.
+#
+# postgres's host port publish is dropped in this overlay: nothing
+# outside the compose network needs to reach it directly in a real
+# deployment (unlike local dev, where 5433 is convenient for
+# host-side `pytest`/scripts) -- every real client here is another
+# service on the same default network, reachable by service name.
+#
+# Deploy with both files together:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Before reusing this on a different box/IP range: check for a free
+# br0 IP first (`docker network inspect br0 --format ...`, then
+# ping-check candidates from a REAL LAN host, never from the Unraid
+# host itself -- macvlan connectivity from the host is unreliable).
+# This box has already lost a picked-but-unverified IP to a race once
+# (a reboot let another container claim it first) -- always re-check
+# live at deploy time, don't trust a previously-recorded free IP.
+
+services:
+  postgres:
+    ports: !reset []
+
+  harness:
+    networks:
+      br0:
+        ipv4_address: 192.168.250.236
+
+  scheduler:
+    networks:
+      br0:
+        ipv4_address: 192.168.250.237
+
+networks:
+  br0:
+    external: true
