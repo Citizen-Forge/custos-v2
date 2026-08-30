@@ -1,12 +1,12 @@
 """
-Realistic agent avatars via Gemini's image generation API. Tested against
-a mocked HTTP layer -- no real API key was available in this environment
-to test against live (see avatar.py's module docstring: the request/
-response shape is checked against Google's own docs directly, not
-guessed, but not proven against a real response). What's proven here:
-every function fails soft (no exception, None return) whether
-unconfigured or on a real API-level failure, and a well-formed response
-gets decoded and saved correctly.
+Realistic agent avatars via Gemini's image generation API. Tested here
+against a mocked HTTP layer (fast, no real API cost/latency per test
+run) -- the mocked response shapes below match what a real call was
+confirmed to return live (see avatar.py's module docstring, fixed
+2026-08-30 after the first live call revealed the original guessed
+shape was wrong). What's proven here: every function fails soft (no
+exception, None return) whether unconfigured or on a real API-level
+failure, and a well-formed response gets decoded and saved correctly.
 """
 
 import base64
@@ -30,23 +30,24 @@ def test_generate_avatar_saves_a_well_formed_response(monkeypatch, tmp_path):
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
     monkeypatch.setattr(avatar, "WORKSPACE_ROOT", str(tmp_path))
 
-    fake_image_bytes = b"not a real png but bytes are bytes for this test"
+    fake_image_bytes = b"not a real jpeg but bytes are bytes for this test"
     fake_b64 = base64.b64encode(fake_image_bytes).decode()
 
     mock_response = MagicMock()
     mock_response.json.return_value = {
-        "output": [{"content": [{"type": "output_image", "data": fake_b64}]}]
+        "steps": [{"type": "model_output", "content": [{"type": "output_image", "data": fake_b64}]}]
     }
 
     with patch("harness.avatar.httpx.post", return_value=mock_response) as mock_post:
         result = avatar.generate_avatar("some-seat", "a friendly person who loves jazz")
 
-    assert result == "avatars/some-seat.png"
+    assert result == "avatars/some-seat.jpg"
     call = mock_post.call_args
     assert call.kwargs["headers"]["x-goog-api-key"] == "fake-key"
-    assert "jazz" in call.kwargs["json"]["input"][0]["content"][0]["text"]
+    assert "jazz" in call.kwargs["json"]["input"][0]["text"]
+    assert call.kwargs["json"]["response_format"]["type"] == "image"
 
-    saved_path = tmp_path / "avatars" / "some-seat.png"
+    saved_path = tmp_path / "avatars" / "some-seat.jpg"
     assert saved_path.read_bytes() == fake_image_bytes
 
 
@@ -55,13 +56,13 @@ def test_generate_avatar_returns_none_when_response_has_no_image(monkeypatch, tm
     monkeypatch.setattr(avatar, "WORKSPACE_ROOT", str(tmp_path))
 
     mock_response = MagicMock()
-    mock_response.json.return_value = {"output": []}
+    mock_response.json.return_value = {"steps": []}
 
     with patch("harness.avatar.httpx.post", return_value=mock_response):
         result = avatar.generate_avatar("some-seat", "a description")
 
     assert result is None
-    assert not (tmp_path / "avatars" / "some-seat.png").exists()
+    assert not (tmp_path / "avatars" / "some-seat.jpg").exists()
 
 
 def test_generate_avatar_returns_none_on_network_failure(monkeypatch, tmp_path):
@@ -85,13 +86,15 @@ def test_avatar_path_returns_real_path_after_generation(monkeypatch, tmp_path):
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
     monkeypatch.setattr(avatar, "WORKSPACE_ROOT", str(tmp_path))
 
-    fake_b64 = base64.b64encode(b"fake png bytes").decode()
+    fake_b64 = base64.b64encode(b"fake jpeg bytes").decode()
     mock_response = MagicMock()
-    mock_response.json.return_value = {"output": [{"content": [{"type": "image", "data": fake_b64}]}]}
+    mock_response.json.return_value = {
+        "steps": [{"type": "model_output", "content": [{"type": "image", "data": fake_b64}]}]
+    }
 
     with patch("harness.avatar.httpx.post", return_value=mock_response):
         avatar.generate_avatar("some-seat", "a description")
 
     path = avatar.avatar_path("some-seat")
     assert path is not None
-    assert path.endswith("some-seat.png")
+    assert path.endswith("some-seat.jpg")

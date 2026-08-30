@@ -269,13 +269,13 @@ def test_avatar_endpoint_serves_a_real_generated_file(monkeypatch, tmp_path):
     monkeypatch.setattr(avatar_module, "WORKSPACE_ROOT", str(tmp_path))
     avatar_dir = tmp_path / "avatars"
     avatar_dir.mkdir()
-    (avatar_dir / "some-seat.png").write_bytes(b"fake png bytes")
+    (avatar_dir / "some-seat.jpg").write_bytes(b"fake jpeg bytes")
 
     response = client.get("/avatars/some-seat")
 
     assert response.status_code == 200
-    assert response.content == b"fake png bytes"
-    assert response.headers["content-type"] == "image/png"
+    assert response.content == b"fake jpeg bytes"
+    assert response.headers["content-type"] == "image/jpeg"
 
 
 def test_wiki_list_and_get_endpoints():

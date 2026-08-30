@@ -290,7 +290,7 @@ def get_avatar(seat_id: str):
     path = avatar.avatar_path(seat_id)
     if path is None:
         raise HTTPException(status_code=404, detail=f"no generated avatar for {seat_id!r}")
-    return FileResponse(path, media_type="image/png")
+    return FileResponse(path, media_type="image/jpeg")
 
 
 @router.get("/settings/cost-slider")
