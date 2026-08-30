@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: custos
       POSTGRES_PASSWORD: custos
@@ -17,15 +18,34 @@ services:
 
   harness:
     build: .
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
+    # Real gap found 2026-08-30: every OTHER .env.example variable
+    # (SLACK_*, GEMINI_*, CLASSIFIER_*, LOCAL_FALLBACK_*, TURN_BUDGET,
+    # every *_MAX_TOKENS override) was documented but never reached any
+    # container, because only vars explicitly named below ever did --
+    # env_file makes the whole of .env reach the container the way its
+    # own docs already implied it would. `required: false` so a fresh
+    # checkout with no .env yet (only .env.example) still starts.
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql://custos:custos@postgres:5432/custos_harness
       LOCAL_MODEL_BASE_URL: ${LOCAL_MODEL_BASE_URL:-http://host.docker.internal:11434/v1}
       LOCAL_MODEL_NAME: ${LOCAL_MODEL_NAME:-qwen2.5:7b-instruct}
       HARNESS_WORKSPACE: /workspace
       SEAT_ID: ${SEAT_ID:-worker}
+    # host.docker.internal resolves automatically on Docker Desktop
+    # (Windows/Mac) but NOT on native Linux Docker (e.g. Unraid) unless
+    # told to -- this makes the fallback above actually work there too,
+    # rather than silently failing to reach an Ollama/llama.cpp server
+    # running on the host itself. A harmless no-op wherever
+    # LOCAL_MODEL_BASE_URL is already set to a real LAN IP instead.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./src:/app/src:ro
       - ./tests:/app/tests:ro
@@ -35,9 +55,19 @@ services:
 
   api:
     build: .
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
+    # See harness's env_file comment above -- this is what makes
+    # API_AUTH_TOKEN (and MODEL_REGISTRY/LOCAL_MODEL_* for the
+    # /settings/model-registry endpoint's accuracy) actually reach this
+    # service. Before this, API_AUTH_TOKEN had no effect no matter what
+    # was in .env -- auth.py's code was correct, nothing carried the
+    # value into the container that enforces it.
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql://custos:custos@postgres:5432/custos_harness
       HARNESS_WORKSPACE: /workspace
@@ -66,15 +96,24 @@ services:
   # that reversal turns out to be wrong for a given deployment.
   scheduler:
     build: .
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
+    # See harness's env_file comment above -- same reasoning, this
+    # service runs the same product-owner/meta-agent/overwatch/verifier
+    # jobs and needs the same SLACK_*/*_MAX_TOKENS/etc coverage.
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql://custos:custos@postgres:5432/custos_harness
       LOCAL_MODEL_BASE_URL: ${LOCAL_MODEL_BASE_URL:-http://host.docker.internal:11434/v1}
       LOCAL_MODEL_NAME: ${LOCAL_MODEL_NAME:-qwen2.5:7b-instruct}
       HARNESS_WORKSPACE: /workspace
       SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-1800}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./src:/app/src:ro
       - ./scripts:/app/scripts:ro
