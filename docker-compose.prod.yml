@@ -10,12 +10,13 @@
 # postgres). Same pattern already established by irl/job-tracker/
 # belvedere on this box.
 #
-# api is deliberately NOT attached to br0: it never calls the LLM
-# directly (model_registry.py only builds config objects, no network
-# call), and Docker's macvlan driver does not support published ports
-# on a macvlan-attached container -- api needs its `ports: 8000:8000`
-# publish to keep working, so it stays off br0 and reachable at the
-# box's normal host IP:8000 instead.
+# api is attached to br0 too (2026-08-30, user's own call: match how
+# v1's dashboard and every other self-hosted app on this box already
+# work -- a real LAN identity, not a host-published port). Docker's
+# macvlan driver does not support published ports on a macvlan-attached
+# container, so its `ports: 8000:8000` publish is dropped here the same
+# way postgres's is below -- api is reachable at its own br0 IP:8000
+# directly instead of through the box's host IP.
 #
 # postgres's host port publish is dropped in this overlay: nothing
 # outside the compose network needs to reach it directly in a real
@@ -47,6 +48,12 @@ services:
     networks:
       br0:
         ipv4_address: 192.168.250.237
+
+  api:
+    ports: !reset []
+    networks:
+      br0:
+        ipv4_address: 192.168.250.238
 
 networks:
   br0:

@@ -79,6 +79,12 @@ services:
     environment:
       DATABASE_URL: postgresql://custos:custos@postgres:5432/custos_harness
       HARNESS_WORKSPACE: /workspace
+    # See harness's networks comment above -- same reasoning: explicit
+    # so a deployment overlay (docker-compose.prod.yml) can union-merge
+    # in a macvlan network without replacing this one, since api still
+    # needs `default` to reach postgres.
+    networks:
+      - default
     volumes:
       - ./src:/app/src:ro
       - ./public:/app/public:ro
