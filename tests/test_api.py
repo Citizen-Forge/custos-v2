@@ -192,6 +192,72 @@ def test_projects_endpoint_returns_the_full_tree():
     assert found_epic["stories"][0]["title"] == "api-test story"
 
 
+def test_create_project_endpoint_creates_a_real_project():
+    beads.ensure_initialized()
+
+    response = client.post(
+        "/projects", json={"name": "api-test new project", "description": "goal", "priority": 2}
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["title"] == "api-test new project"
+    assert data["priority"] == 2
+    assert data["issue_type"] == "epic"
+    # a real row, findable through the same read path -- not just an
+    # echo of what was posted
+    tree = client.get("/projects").json()
+    assert any(p["id"] == data["id"] for p in tree)
+
+
+def test_create_epic_endpoint_creates_a_real_epic_under_a_project():
+    beads.ensure_initialized()
+    project = beads.create("api-test epic-parent project", "goal", issue_type="epic", priority=2)
+
+    response = client.post(
+        f"/projects/{project['id']}/epics", json={"title": "api-test new epic", "description": "epic goal"}
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["title"] == "api-test new epic"
+    tree = client.get("/projects").json()
+    found = next(p for p in tree if p["id"] == project["id"])
+    assert any(e["id"] == data["id"] for e in found["epics"])
+
+
+def test_create_epic_endpoint_404s_for_unknown_project():
+    response = client.post(
+        "/projects/does-not-exist-xyz/epics", json={"title": "x", "description": "x"}
+    )
+    assert response.status_code == 404
+
+
+def test_create_story_endpoint_creates_a_real_story_under_an_epic():
+    beads.ensure_initialized()
+    project = beads.create("api-test story-parent project", "goal", issue_type="epic", priority=2)
+    epic = beads.create("api-test story-parent epic", "epic goal", issue_type="epic", parent=project["id"])
+
+    response = client.post(
+        f"/epics/{epic['id']}/stories", json={"title": "api-test new story", "description": "story goal"}
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["title"] == "api-test new story"
+    tree = client.get("/projects").json()
+    found_project = next(p for p in tree if p["id"] == project["id"])
+    found_epic = next(e for e in found_project["epics"] if e["id"] == epic["id"])
+    assert any(s["id"] == data["id"] for s in found_epic["stories"])
+
+
+def test_create_story_endpoint_404s_for_unknown_epic():
+    response = client.post(
+        "/epics/does-not-exist-xyz/stories", json={"title": "x", "description": "x"}
+    )
+    assert response.status_code == 404
+
+
 def test_avatar_endpoint_404s_when_no_generated_avatar_exists():
     response = client.get("/avatars/never-generated-seat")
     assert response.status_code == 404

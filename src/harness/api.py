@@ -1,10 +1,24 @@
 """
 Minimal HTTP API over the harness's existing state -- Beads tickets,
-pending prompt proposals, per-role outcomes. Read-mostly; the write
-endpoints (approve a pending prompt, respond to/dismiss a human-flagged
-ticket) are deliberately narrow, matching v1's "autonomy off by default"
-posture -- this is an admin surface for a human to inspect and resolve
-things, not a general write API.
+pending prompt proposals, per-role outcomes. Mostly read/narrow-write
+(approve a pending prompt, respond to/dismiss a human-flagged ticket),
+matching v1's "autonomy off by default" posture -- this is an admin
+surface for a human to inspect and resolve things, not a general write
+API.
+
+Exception: POST /projects, /projects/{id}/epics, /epics/{id}/stories
+(added 2026-08-30, for the MCP-based chat interface agent -- see
+PLAN.md). These mirror product_owner.py's create_project/create_epic/
+add_subtask_to_epic tools exactly (same beads.create() calls, same
+issue_type/parent shape) -- until now, creating new project structure
+was only reachable from inside the product-owner's own agent session,
+never from the outside. A human (or an agent acting on a human's
+behalf, e.g. a chat interface) deciding what new work should exist is
+a fundamentally different kind of write than the narrow
+"resolve/approve something already in flight" ones above -- creating
+new backlog is closer to what a human already does by talking to the
+product-owner conversationally than to a privileged action needing a
+tighter gate.
 
 Auth: a shared bearer token via API_AUTH_TOKEN (see auth.py) -- optional,
 same "flagged, not hidden" posture the module docstring used to carry
@@ -42,6 +56,22 @@ class CostSliderBody(BaseModel):
 
 class AvatarStyleBody(BaseModel):
     value: str
+
+
+class CreateProjectBody(BaseModel):
+    name: str
+    description: str
+    priority: int
+
+
+class CreateEpicBody(BaseModel):
+    title: str
+    description: str
+
+
+class CreateStoryBody(BaseModel):
+    title: str
+    description: str
 
 
 @asynccontextmanager
@@ -128,6 +158,37 @@ def list_projects():
         project["epics"] = epics
         tree.append(project)
     return tree
+
+
+@router.post("/projects")
+def create_project(body: CreateProjectBody):
+    """Mirrors product_owner.py's create_project tool exactly (same
+    beads.create() call) -- see this module's docstring for why this is
+    a write endpoint despite the surface's otherwise-narrow posture."""
+    project = beads.create(body.name, body.description, issue_type="epic", priority=body.priority)
+    return project
+
+
+@router.post("/projects/{project_id}/epics")
+def create_epic(project_id: str, body: CreateEpicBody):
+    """Mirrors product_owner.py's create_epic tool. 404s if project_id
+    doesn't exist -- beads.create's own --parent validation surfaces as
+    a BeadsError, same pattern as get_ticket below."""
+    try:
+        epic = beads.create(body.title, body.description, issue_type="epic", parent=project_id)
+    except beads.BeadsError as e:
+        raise HTTPException(404, str(e)) from e
+    return epic
+
+
+@router.post("/epics/{epic_id}/stories")
+def create_story(epic_id: str, body: CreateStoryBody):
+    """Mirrors product_owner.py's add_subtask_to_epic tool."""
+    try:
+        story = beads.create(body.title, body.description, parent=epic_id)
+    except beads.BeadsError as e:
+        raise HTTPException(404, str(e)) from e
+    return story
 
 
 @router.get("/tickets/{issue_id}")
