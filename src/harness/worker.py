@@ -49,6 +49,7 @@ from langgraph.checkpoint.postgres import PostgresSaver
 
 from . import beads, prompts, seats, slack
 from .classifier import build_classifier_from_model
+from .dynamic_tools import build_dynamic_tools
 from .graph import build_graph_from_model
 from .providers import ProviderConfig
 from .routing import ConcurrencyGate, RoutedModel, RoutingTable
@@ -151,9 +152,6 @@ def run(
     beads.ensure_initialized()
     gate = gate or ConcurrencyGate()
 
-    worker_model = RoutedModel(seat_id, routing, gate, tools=ALL_TOOLS)
-    classify = build_classifier_from_model(RoutedModel("classifier", routing, gate))
-
     with psycopg.connect(conn_string, autocommit=True) as prompt_conn:
         prompts.init_table(prompt_conn)
         system_prompt = prompts.get_active(prompt_conn, seat_id)
@@ -163,10 +161,18 @@ def run(
         # seat's chosen name doesn't change mid-process, and posting to
         # Slack (see below) shouldn't cost a DB round trip on every claim.
         who = seat_record["display_name"] if seat_record and seat_record.get("display_name") else seat_id
+        # Same "once per process startup" tradeoff as the seat lookup
+        # above -- a proposal approved after this worker started won't be
+        # available until its next restart (dynamic_tools.py's own
+        # docstring has the detail).
+        tools = ALL_TOOLS + build_dynamic_tools(prompt_conn)
+
+    worker_model = RoutedModel(seat_id, routing, gate, tools=tools)
+    classify = build_classifier_from_model(RoutedModel("classifier", routing, gate))
 
     with PostgresSaver.from_conn_string(conn_string) as checkpointer:
         checkpointer.setup()
-        graph = build_graph_from_model(worker_model, checkpointer, classify=classify, turn_budget=turn_budget)
+        graph = build_graph_from_model(worker_model, checkpointer, tools=tools, classify=classify, turn_budget=turn_budget)
 
         log.info("worker started for seat %r, polling every %ss", seat_id, POLL_INTERVAL_SECONDS)
         while True:
