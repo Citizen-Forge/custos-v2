@@ -414,11 +414,31 @@ def list_running_agents():
     was invisible: the dashboard showed two healthy active seats holding
     queued work while nothing at all was running, and no surface said so.
 
+    Each entry also carries when that agent last took a graph step
+    (`last_activity`) and how long ago (`idle_seconds`), read from the
+    checkpointer's own tables. That is the cheap half of stall detection:
+    no model call, and it separates "thinking slowly" -- normal here, the
+    local models are slow -- from "has taken no step at all", which is the
+    only thing wall-clock time can honestly tell you.
+
     Imported lazily -- the dispatcher pulls in the worker and graph
     stack, which this API process otherwise has no reason to load."""
+    from . import progress
     from .dispatcher import running_agents
 
-    return running_agents()
+    agents = running_agents()
+    if not agents:
+        return []
+
+    with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
+        activity = progress.last_activity(conn, [a["ticket_id"] for a in agents])
+
+    for agent in agents:
+        last_ts = activity.get(agent["ticket_id"])
+        agent["last_activity"] = last_ts
+        idle = progress.idle_seconds(last_ts)
+        agent["idle_seconds"] = round(idle) if idle is not None else None
+    return agents
 
 
 @router.get("/seats")

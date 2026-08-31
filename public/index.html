@@ -182,6 +182,10 @@
     <div id="projects-list"></div>
   </section>
   <section data-tab="agents">
+    <h2>Working Now <span class="count" id="running-count">0</span></h2>
+    <div id="running-list"></div>
+  </section>
+  <section data-tab="agents">
     <h2>Seats <span class="count" id="seats-count">0</span></h2>
     <div id="seats-list"></div>
   </section>
@@ -384,6 +388,37 @@ async function dismissTicket(id) {
   refreshAll();
 }
 
+// Idle time is shown, never used to declare an agent dead: the local
+// models are slow and a long gap is normal. It's here so an agent that
+// has genuinely taken no step is visible, which the old dashboard could
+// not show at all.
+function idleLabel(seconds) {
+  if (seconds === null || seconds === undefined) return "just started";
+  if (seconds < 90) return `${seconds}s ago`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)}m ago`;
+  return `${(seconds / 3600).toFixed(1)}h ago`;
+}
+
+async function refreshRunning() {
+  try {
+    const agents = await fetchJSON("/agents/running");
+    document.getElementById("running-count").textContent = agents.length;
+    document.getElementById("running-list").innerHTML = agents.length
+      ? agents.map(a => {
+          const stale = a.idle_seconds !== null && a.idle_seconds >= 3600;
+          return `<div class="item">
+            <span class="id">${escapeHtml(a.ticket_id)}</span>
+            <span class="title">${escapeHtml(a.title || "")}</span>
+            <div class="desc">${escapeHtml(a.seat_id || "unassigned")}</div>
+            <div class="desc"${stale ? ' style="color:#d97706"' : ""}>last step ${idleLabel(a.idle_seconds)}</div>
+          </div>`;
+        }).join("")
+      : `<div class="empty">no agents working right now</div>`;
+  } catch (e) {
+    document.getElementById("running-list").innerHTML = `<div class="empty">error: ${e.message}</div>`;
+  }
+}
+
 async function refreshSeats() {
   try {
     const items = await fetchJSON("/seats");
@@ -580,7 +615,7 @@ let activeTab = "home";
 // into permanently overlapping requests.
 const TAB_REFRESHERS = {
   home: () => [refreshProjects()],
-  agents: () => [refreshSeats()],
+  agents: () => [refreshRunning(), refreshSeats()],
   wiki: () => [refreshWiki()],
   settings: () => [],
 };
