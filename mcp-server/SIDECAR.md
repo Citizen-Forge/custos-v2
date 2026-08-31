@@ -16,9 +16,20 @@ system.
 2. Register it with Claude Code:
    ```
    claude mcp add --transport stdio custos -- \
-     env CUSTOS_API_URL=http://192.168.100.231:8000 \
+     env CUSTOS_API_URL=http://192.168.250.238:8000 \
      python /path/to/mcp-server/server.py
    ```
+   **On the Unraid deployment, `api` is macvlan-attached to `br0` at its
+   own static LAN IP (`192.168.250.238`, see `docker-compose.prod.yml`)
+   with port publishing explicitly reset to none** -- the Unraid host's
+   own IP (`192.168.100.231`) cannot reach it at all, standard macvlan
+   behavior (a macvlan child is only reachable from other real devices on
+   the physical LAN, never from the Docker host itself). Verified live,
+   not assumed: `curl 192.168.100.231:8000` fails to connect,
+   `curl 192.168.250.238:8000` returns 200. Use the macvlan IP, not the
+   host IP, for any deployment using `docker-compose.prod.yml`'s overlay
+   -- this changed 2026-08-30 (`git log -- docker-compose.prod.yml`) and
+   silently broke any sidecar still pointed at the old host-IP URL.
    Swap in `CUSTOS_API_TOKEN=...` too if the target deployment has
    `API_AUTH_TOKEN` set (see the main project's `.env.example`).
 3. Enable Remote Control on this Claude Code instance so it's reachable
