@@ -54,7 +54,7 @@ import time
 import psycopg
 from langgraph.checkpoint.postgres import PostgresSaver
 
-from . import beads, seats
+from . import beads, seats, toolchain
 from .product_owner import ROLE as PRODUCT_OWNER_ROLE
 from .product_owner import build_tools as build_product_owner_tools
 from .product_owner import run_triage_session
@@ -287,6 +287,18 @@ class Dispatcher:
 
         issue, seat_id = next_assigned_ticket()
         if issue is not None:
+            # Preflight: never start work the environment cannot support.
+            # This exists because of a real failure -- agents were
+            # dispatched onto TypeScript tickets in an image with no Node,
+            # burned hours of inference, and produced work nothing could
+            # build or test. Better to refuse loudly than to look busy.
+            gaps = toolchain.check_ticket(issue["id"])
+            if gaps:
+                log.error(
+                    "not starting %s: project toolchain missing %s",
+                    issue["id"], ", ".join(gaps),
+                )
+                return "blocked on toolchain"
             return "started" if self.start_agent(seat_id, issue) else "could not start"
 
         if not has_unassigned_work():

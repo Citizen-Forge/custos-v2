@@ -404,6 +404,17 @@ def get_outcomes(actor: str):
     return outcomes.summary(actor)
 
 
+@router.get("/toolchain")
+def toolchain_report():
+    """Per project: the commands its work declares it needs, and whether
+    they are actually installed. Exists so a missing toolchain is visible
+    up front rather than discovered in an agent's transcript after it has
+    spent hours producing work nothing could build."""
+    from . import toolchain
+
+    return toolchain.report()
+
+
 @router.get("/agents/running")
 def list_running_agents():
     """Which agents are actually working right now, and on what.

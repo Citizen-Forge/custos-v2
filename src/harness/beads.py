@@ -102,6 +102,15 @@ def acceptance_criteria(issue: dict) -> str | None:
     return (issue.get("metadata") or {}).get("acceptance_criteria")
 
 
+def set_metadata(issue_id: str, key: str, value: str, actor: str = DEFAULT_ACTOR) -> dict:
+    """Set one metadata key -- same `--set-metadata` mechanism
+    assign_to_seat and set_acceptance_criteria already use, generalised so
+    callers don't each need their own wrapper."""
+    return json.loads(
+        _run(["update", issue_id, "--set-metadata", f"{key}={value}"], actor=actor)
+    )[0]
+
+
 def declined_by(issue: dict) -> list[str]:
     """Seats that have already declined this ticket as out-of-speciality."""
     raw = (issue.get("metadata") or {}).get("declined_by") or ""

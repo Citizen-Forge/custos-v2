@@ -22,6 +22,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && git config --system user.email "worker@custos.local" \
     && git config --system user.name "custos-worker"
 
+# Node, for agents working TypeScript projects. Found missing live
+# (2026-08-31) by reading a working agent's own transcript: it ran `node`
+# and `npm` and got "not found". Silent Run is TypeScript and was chosen
+# precisely so agents could build and test headlessly, so without this an
+# agent could write files and verify nothing -- worse than being blocked,
+# because the ticket still looked workable and burned real inference.
+#
+# Baked into the shared image rather than reached through a per-project
+# toolchain container, deliberately: the container route would mean
+# giving a ticket's shell_exec access to the Docker socket, and PLAN.md
+# Phase 7 keeps that to sandbox-runner alone. Unblocking TypeScript is
+# not worth widening that boundary. The cost is that this image accretes
+# a toolchain per language over time -- harness/toolchain.py exists so
+# that at least fails loudly (a project declares what it needs and
+# dispatch refuses work the toolchain can't support) instead of silently
+# producing unverified work the way this gap did.
+ARG NODE_MAJOR=22
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version && npm --version
+
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 
