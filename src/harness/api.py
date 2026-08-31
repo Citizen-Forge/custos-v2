@@ -30,16 +30,20 @@ whenever API_AUTH_TOKEN is set.
 """
 
 import os
+import threading
+import time
+from collections import defaultdict
 from contextlib import asynccontextmanager
 
 import psycopg
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import avatar, beads, model_registry, outcomes, prompts, seats, self_mod, settings, tool_proposals, verifications, wiki
 from .auth import require_auth
+from .config import PROJECT_TREE_TTL
 
 
 class RespondBody(BaseModel):
@@ -67,11 +71,17 @@ class CreateProjectBody(BaseModel):
 class CreateEpicBody(BaseModel):
     title: str
     description: str
+    priority: int | None = None
 
 
 class CreateStoryBody(BaseModel):
     title: str
     description: str
+    priority: int | None = None
+
+
+class PriorityBody(BaseModel):
+    priority: int
 
 
 @asynccontextmanager
@@ -94,6 +104,117 @@ app = FastAPI(title="Custos v2 harness API", lifespan=lifespan)
 router = APIRouter(dependencies=[Depends(require_auth)])
 
 _PUBLIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "public")
+
+
+def _parent_id(issue_id: str) -> str | None:
+    """Beads ids encode the hierarchy: `workspace-9jg` is a project,
+    `workspace-9jg.1` an epic under it, `workspace-9jg.1.1` a story under
+    that. `bd list` returns no parent field of its own (see
+    beads.list_all), so this convention is how the tree gets rebuilt from
+    one flat call instead of one call per node.
+
+    This IS an assumption about bd's id format rather than a documented
+    contract -- tests/test_api.py cross-checks a tree built this way
+    against one built from bd's own --parent walk, so a format change
+    fails loudly there instead of silently rendering an empty board."""
+    return issue_id.rsplit(".", 1)[0] if "." in issue_id else None
+
+
+def _sort_key(issue: dict) -> tuple:
+    """Priority first (0=highest, matching `bd list --sort priority`),
+    then the id read naturally so `.2` precedes `.10` -- a plain string
+    sort puts `.10` first, which visibly mis-ordered the board once
+    epic counts passed 9."""
+    segments = []
+    for segment in issue["id"].split("."):
+        segments.append((0, int(segment)) if segment.isdigit() else (1, segment))
+    return (issue.get("priority", 9), segments)
+
+
+def _tree_from_flat(issues: list[dict]) -> list[dict]:
+    """Build the project -> epic -> story tree from one flat issue list.
+
+    Projects are top-level issues of type `epic` -- the same filter the
+    per-node walk used, and it matters for the same reason documented in
+    list_projects below: plain top-level `task` tickets are not projects
+    and must not render as bare ones."""
+    by_parent: dict[str | None, list[dict]] = defaultdict(list)
+    for issue in issues:
+        by_parent[_parent_id(issue["id"])].append(issue)
+
+    tree = []
+    for project in sorted(by_parent[None], key=_sort_key):
+        if project.get("issue_type") != "epic":
+            continue
+        epics = sorted(by_parent.get(project["id"], []), key=_sort_key)
+        for epic in epics:
+            epic["stories"] = sorted(by_parent.get(epic["id"], []), key=_sort_key)
+        project["epics"] = epics
+        tree.append(project)
+    return tree
+
+
+# Serving the tree straight from `bd` put a ~5s call in the request path
+# of a dashboard polling every 5s, so requests overlapped indefinitely
+# and the board never settled. Stale-while-revalidate instead: a fresh
+# snapshot is returned immediately, a stale one is returned immediately
+# AND refreshed in the background, and only a cold start blocks.
+_tree_load_lock = threading.Lock()
+_tree_state_lock = threading.Lock()
+_tree_state: dict = {"tree": None, "at": 0.0}
+
+
+def _load_project_tree() -> list[dict]:
+    tree = _tree_from_flat(beads.list_all())
+    with _tree_state_lock:
+        _tree_state["tree"] = tree
+        _tree_state["at"] = time.monotonic()
+    return tree
+
+
+def _project_tree() -> tuple[list[dict], float]:
+    """Returns (tree, age_seconds). Age is exposed so a caller can tell
+    how stale the snapshot is rather than having to assume it is live."""
+    with _tree_state_lock:
+        tree, at = _tree_state["tree"], _tree_state["at"]
+    age = time.monotonic() - at
+
+    if tree is not None and age < PROJECT_TREE_TTL:
+        return tree, age
+
+    if tree is None:
+        # Cold start has to block, but only one caller should pay for it.
+        with _tree_load_lock:
+            with _tree_state_lock:
+                if _tree_state["tree"] is not None:
+                    return _tree_state["tree"], 0.0
+            return _load_project_tree(), 0.0
+
+    # Warm but stale: refresh behind the response, never block on it.
+    if _tree_load_lock.acquire(blocking=False):
+        def refresh():
+            try:
+                _load_project_tree()
+            except Exception as e:  # noqa: BLE001 -- a failed refresh must
+                # never kill the thread silently or poison the cache; the
+                # last good tree keeps being served until one succeeds.
+                print(f"project tree refresh failed: {e}")
+            finally:
+                _tree_load_lock.release()
+
+        threading.Thread(target=refresh, daemon=True).start()
+
+    return tree, age
+
+
+def _invalidate_project_tree() -> None:
+    """Drop the cached tree so the next /projects reflects a write
+    immediately. Without this, creating a project through the API and
+    then reloading the board could show the pre-write tree for up to
+    PROJECT_TREE_TTL seconds, which reads as the write having failed."""
+    with _tree_state_lock:
+        _tree_state["tree"] = None
+        _tree_state["at"] = 0.0
 
 
 def _prompt_conn():
@@ -138,7 +259,7 @@ def list_tickets(status: str = "ready"):
 
 
 @router.get("/projects")
-def list_projects():
+def list_projects(response: Response):
     """The full project -> epic -> story tree for the board UI. Walks
     Beads' own hierarchy live (no cached/parallel structure to drift out
     of sync) -- fine at today's scale (a handful of projects/epics), not
@@ -154,16 +275,43 @@ def list_projects():
     without excluding any real project -- caught because the new board/
     roadmap UI (2026-08-29) made stray tickets rendering as bare
     "projects" with no epics/stories immediately obvious in a way the
-    old nested-outline view didn't."""
-    projects = beads.list_top_level(issue_type="epic")
-    tree = []
-    for project in projects:
-        epics = beads.children_of(project["id"])
-        for epic in epics:
-            epic["stories"] = beads.children_of(epic["id"])
-        project["epics"] = epics
-        tree.append(project)
+    old nested-outline view didn't.
+
+    Rewritten 2026-08-31 from an N+1 walk (one `bd` call per project and
+    per epic) to a single `bd list --all` plus in-process tree building.
+    Measured on the real deployment: one bd call is ~5s, and a 2-project
+    /14-epic tree cost ~17 of them -- roughly 85s per response against a
+    dashboard polling every 5s. The tree is rebuilt from the dotted id
+    convention (see _parent_id) because `bd list` carries no parent
+    field, and served through a short-lived cache (see _project_tree) so
+    the bd call sits behind responses rather than inside them.
+
+    The response body is unchanged -- still a plain list -- so existing
+    callers (the dashboard, mcp-server) keep working. Snapshot age is
+    reported in the X-Tree-Age-Seconds header instead of in the body."""
+    tree, age = _project_tree()
+    response.headers["X-Tree-Age-Seconds"] = f"{age:.1f}"
     return tree
+
+
+@router.patch("/issues/{issue_id}/priority")
+def set_issue_priority(issue_id: str, body: PriorityBody):
+    """Change any issue's priority (0-4, 0=highest).
+
+    Filling a real gap: POST /projects could set a priority at creation
+    and nothing else could ever change one, so a backlog could be built
+    through this API but never ordered. Ordering this project's own
+    epics needed `docker exec ... bd update --priority` against the
+    container, which is not something an API-driven caller should have
+    to reach for."""
+    try:
+        updated = beads.update_priority(issue_id, body.priority)
+    except beads.BeadsTimeout as e:
+        raise HTTPException(503, str(e)) from e
+    except beads.BeadsError as e:
+        raise HTTPException(400, str(e)) from e
+    _invalidate_project_tree()
+    return updated
 
 
 @router.post("/projects")
@@ -172,6 +320,7 @@ def create_project(body: CreateProjectBody):
     beads.create() call) -- see this module's docstring for why this is
     a write endpoint despite the surface's otherwise-narrow posture."""
     project = beads.create(body.name, body.description, issue_type="epic", priority=body.priority)
+    _invalidate_project_tree()
     return project
 
 
@@ -181,9 +330,13 @@ def create_epic(project_id: str, body: CreateEpicBody):
     doesn't exist -- beads.create's own --parent validation surfaces as
     a BeadsError, same pattern as get_ticket below."""
     try:
-        epic = beads.create(body.title, body.description, issue_type="epic", parent=project_id)
+        epic = beads.create(
+            body.title, body.description, issue_type="epic",
+            parent=project_id, priority=body.priority,
+        )
     except beads.BeadsError as e:
         raise HTTPException(404, str(e)) from e
+    _invalidate_project_tree()
     return epic
 
 
@@ -191,9 +344,12 @@ def create_epic(project_id: str, body: CreateEpicBody):
 def create_story(epic_id: str, body: CreateStoryBody):
     """Mirrors product_owner.py's add_subtask_to_epic tool."""
     try:
-        story = beads.create(body.title, body.description, parent=epic_id)
+        story = beads.create(
+            body.title, body.description, parent=epic_id, priority=body.priority,
+        )
     except beads.BeadsError as e:
         raise HTTPException(404, str(e)) from e
+    _invalidate_project_tree()
     return story
 
 

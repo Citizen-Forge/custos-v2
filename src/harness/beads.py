@@ -20,21 +20,31 @@ repo's own container, not assumed from docs:
 import json
 import subprocess
 
-from .config import DEFAULT_ACTOR, WORKSPACE_ROOT
+from .config import BD_TIMEOUT, DEFAULT_ACTOR, WORKSPACE_ROOT
 
 
 class BeadsError(Exception):
     pass
 
 
+class BeadsTimeout(BeadsError):
+    """A `bd` call exceeded BD_TIMEOUT. Distinct from BeadsError so
+    callers can tell "the workspace is too slow right now" apart from
+    "bd rejected this command" -- the former is retryable and is what a
+    growing backlog produces, the latter never is."""
+
+
 def _run(args: list[str], actor: str = DEFAULT_ACTOR) -> str:
-    result = subprocess.run(
-        ["bd", *args, "--json", "--actor", actor],
-        cwd=WORKSPACE_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    try:
+        result = subprocess.run(
+            ["bd", *args, "--json", "--actor", actor],
+            cwd=WORKSPACE_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=BD_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise BeadsTimeout(f"`bd {args[0]}` exceeded BD_TIMEOUT ({BD_TIMEOUT}s)") from e
     if result.returncode != 0:
         raise BeadsError(result.stderr.strip() or result.stdout.strip())
     return result.stdout
@@ -176,6 +186,41 @@ def list_top_level(issue_type: str | None = None) -> list[dict]:
     if issue_type:
         args += ["--type", issue_type]
     return json.loads(_run(args))
+
+
+def list_all() -> list[dict]:
+    """Every issue in the workspace, any status, in ONE `bd` call.
+
+    Exists because walking the hierarchy with `children_of` per node is
+    an N+1: api.list_projects used to cost 1 + one call per project +
+    one per epic, and each `bd` invocation was measured at ~5s against a
+    real Dolt-backed workspace -- ~85s for a 14-epic tree, against a
+    dashboard polling every 5s.
+
+    Note `bd list` does NOT return a parent field (verified live against
+    bd v1.2.2: the keys are comment_count, created_at, created_by,
+    dependency_count, dependent_count, description, id, issue_type,
+    owner, priority, status, title, updated_at), so callers rebuild the
+    hierarchy from the dotted id convention instead -- see
+    api._tree_from_flat and the test that guards that assumption."""
+    return json.loads(_run(["list", "--all"]))
+
+
+def update_priority(issue_id: str, priority: int, actor: str = DEFAULT_ACTOR) -> dict:
+    """Set an existing issue's priority (0-4, 0=highest -- bd's own
+    range, per `bd update --help` on v1.2.2).
+
+    `create` could already set a priority, but nothing could change one
+    afterwards, and create_epic/create_story never accepted one at all --
+    so every epic landed at bd's default and a backlog could be built
+    through the API but never ordered. Ordering the harness's own
+    improvement epics required shelling into the container to run `bd
+    update --priority` by hand, which is what prompted this."""
+    if not 0 <= priority <= 4:
+        raise BeadsError(f"priority must be 0-4 (0=highest), got {priority}")
+    return json.loads(
+        _run(["update", issue_id, "--priority", str(priority)], actor=actor)
+    )[0]
 
 
 def search(query: str, status: str = "all", limit: int = 10) -> list[dict]:

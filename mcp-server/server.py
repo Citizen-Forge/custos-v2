@@ -133,17 +133,30 @@ def create_project(name: str, description: str, priority: int) -> str:
 
 
 @mcp.tool()
-def create_epic(project_id: str, title: str, description: str) -> str:
+def create_epic(project_id: str, title: str, description: str, priority: int | None = None) -> str:
     """Create an epic under an existing project (see list_projects/create_project) -- one
-    coherent slice of that project's work. Use once per epic, not per story."""
-    return _call("POST", f"/projects/{project_id}/epics", json={"title": title, "description": description})
+    coherent slice of that project's work. Use once per epic, not per story. priority is
+    0-4 (0=highest); omit it to leave the epic at Beads' default, or set it to say which
+    slice should be worked first."""
+    return _call("POST", f"/projects/{project_id}/epics",
+                 json={"title": title, "description": description, "priority": priority})
 
 
 @mcp.tool()
-def create_story(epic_id: str, title: str, description: str) -> str:
+def create_story(epic_id: str, title: str, description: str, priority: int | None = None) -> str:
     """Add one concrete, individually-workable story under an epic (created via create_epic) --
-    a real task a seat could actually pick up and finish, not a vague restatement of the epic."""
-    return _call("POST", f"/epics/{epic_id}/stories", json={"title": title, "description": description})
+    a real task a seat could actually pick up and finish, not a vague restatement of the epic.
+    priority is 0-4 (0=highest), optional."""
+    return _call("POST", f"/epics/{epic_id}/stories",
+                 json={"title": title, "description": description, "priority": priority})
+
+
+@mcp.tool()
+def set_priority(issue_id: str, priority: int) -> str:
+    """Change the priority of an existing project, epic or story. priority is 0-4
+    (0=highest). Use this to reorder a backlog after it exists -- e.g. when the user says
+    one epic matters more than the rest, so the product-owner sees it first."""
+    return _call("PATCH", f"/issues/{issue_id}/priority", json={"priority": priority})
 
 
 if __name__ == "__main__":
