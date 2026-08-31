@@ -193,7 +193,15 @@ class Dispatcher:
     def _agent_thread(self, seat_id: str, issue: dict) -> None:
         """One agent, one ticket. Whatever happens -- success, refusal,
         decline, crash -- the capacity slot is released in `finally`, so a
-        failing agent can never wedge dispatch at max forever."""
+        failing agent can never wedge dispatch at max forever.
+
+        There is deliberately NO stall/response timeout here (user's call,
+        2026-08-31). This harness runs against slow local inference where a
+        single response can legitimately take a very long time, so an agent
+        holding a ticket for hours is expected behaviour, not a hang -- a
+        timeout would kill real work to solve a problem this deployment
+        does not have. Crashes are the case worth handling, and `finally`
+        handles them. Do not add one back without asking."""
         try:
             with PostgresSaver.from_conn_string(self.conn_string) as checkpointer:
                 checkpointer.setup()
