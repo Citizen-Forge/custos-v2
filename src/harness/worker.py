@@ -142,6 +142,110 @@ def _next_ticket(seat_id: str) -> dict | None:
     return beads.claim(candidates[0]["id"], actor=seat_id)
 
 
+class SeatRuntime:
+    """One seat instantiated as a working agent: its system prompt, tool
+    set, routed model and compiled graph.
+
+    Split out of `run` (2026-08-31) so a seat can be instantiated on
+    demand rather than only at process start. That is what lets the
+    dispatcher put a seat the product-owner just created straight to
+    work, instead of the old shape where a seat with no process simply
+    never ran -- the live failure this refactor exists to fix."""
+
+    def __init__(self, seat_id: str, graph, system_prompt: str | None, who: str):
+        self.seat_id = seat_id
+        self.graph = graph
+        self.system_prompt = system_prompt
+        self.who = who
+
+
+def build_seat_runtime(
+    prompt_conn,
+    checkpointer,
+    routing: RoutingTable,
+    seat_id: str,
+    gate: ConcurrencyGate | None = None,
+    turn_budget: int | None = None,
+) -> SeatRuntime:
+    """Build everything one seat needs to work tickets.
+
+    Deliberately expensive and deliberately reused: this reads the seat's
+    prompt and profile and compiles a graph, so callers should hold the
+    result across tickets rather than rebuilding per ticket.
+
+    Carries forward the same staleness tradeoff the old inline version
+    documented -- a prompt revision or newly approved dynamic tool is
+    picked up when a runtime is rebuilt, not mid-life."""
+    gate = gate or ConcurrencyGate()
+
+    prompts.init_table(prompt_conn)
+    system_prompt = prompts.get_active(prompt_conn, seat_id)
+    seats.init_table(prompt_conn)
+    seat_record = seats.get(prompt_conn, seat_id)
+    who = seat_record["display_name"] if seat_record and seat_record.get("display_name") else seat_id
+    tools = ALL_TOOLS + build_dynamic_tools(prompt_conn)
+
+    worker_model = RoutedModel(seat_id, routing, gate, tools=tools)
+    classify = build_classifier_from_model(RoutedModel("classifier", routing, gate))
+    graph = build_graph_from_model(
+        worker_model, checkpointer, tools=tools, classify=classify, turn_budget=turn_budget
+    )
+    return SeatRuntime(seat_id, graph, system_prompt, who)
+
+
+def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
+    """Advance one ticket as far as it goes this run.
+
+    Returns what happened, so a caller driving many seats can act on it:
+    'closed', 'flagged' (refused to a human), 'released' (declined as
+    out-of-speciality and handed back to the pool) or 'failed'."""
+    thread_id = issue["id"]
+    config = {"configurable": {"thread_id": thread_id}}
+
+    try:
+        state = runtime.graph.get_state(config)
+        if state.values:
+            log.info("resuming thread %s", thread_id)
+            runtime.graph.invoke(None, config)
+        else:
+            log.info("starting thread %s", thread_id)
+            slack.post_message(
+                f":rocket: {runtime.who} is starting work on {thread_id}: {issue['title']}"
+            )
+            context = beads.prime()
+            prompt = (
+                f"{context}\n\n---\n\nTicket: {issue['title']}\n\n"
+                f"{issue.get('description', '')}"
+            )
+            initial_messages = (
+                [("system", runtime.system_prompt)] if runtime.system_prompt else []
+            ) + [("user", prompt)]
+            runtime.graph.invoke(
+                {"messages": initial_messages, "ticket_id": thread_id, "turn_count": 0},
+                config,
+            )
+
+        current = beads.show(thread_id)
+        # refuse_ticket already flagged+annotated the issue -- don't
+        # also close it, that would erase the "needs a human" signal
+        # bd human list depends on.
+        if beads.is_flagged_for_human(current):
+            log.info("thread %s refused, left for human review", thread_id)
+            return "flagged"
+        # decline_ticket releases the ticket by clearing its seat
+        # assignment. Closing it here would record work as done that
+        # nobody actually did.
+        if beads.assigned_seat(current) != runtime.seat_id:
+            log.info("thread %s declined by %r, back in the pool", thread_id, runtime.seat_id)
+            return "released"
+        beads.close(thread_id)
+        log.info("thread %s complete", thread_id)
+        return "closed"
+    except Exception:
+        log.exception("thread %s failed, left in_progress for retry", thread_id)
+        return "failed"
+
+
 def run(
     conn_string: str,
     routing: RoutingTable,
@@ -149,30 +253,17 @@ def run(
     gate: ConcurrencyGate | None = None,
     turn_budget: int | None = None,
 ) -> None:
+    """Single-seat poll loop -- the original entrypoint, kept working.
+    The dispatcher (dispatcher.py) is the multi-seat path."""
     beads.ensure_initialized()
     gate = gate or ConcurrencyGate()
 
-    with psycopg.connect(conn_string, autocommit=True) as prompt_conn:
-        prompts.init_table(prompt_conn)
-        system_prompt = prompts.get_active(prompt_conn, seat_id)
-        seats.init_table(prompt_conn)
-        seat_record = seats.get(prompt_conn, seat_id)
-        # Looked up once per worker process startup, not per ticket -- a
-        # seat's chosen name doesn't change mid-process, and posting to
-        # Slack (see below) shouldn't cost a DB round trip on every claim.
-        who = seat_record["display_name"] if seat_record and seat_record.get("display_name") else seat_id
-        # Same "once per process startup" tradeoff as the seat lookup
-        # above -- a proposal approved after this worker started won't be
-        # available until its next restart (dynamic_tools.py's own
-        # docstring has the detail).
-        tools = ALL_TOOLS + build_dynamic_tools(prompt_conn)
-
-    worker_model = RoutedModel(seat_id, routing, gate, tools=tools)
-    classify = build_classifier_from_model(RoutedModel("classifier", routing, gate))
-
     with PostgresSaver.from_conn_string(conn_string) as checkpointer:
         checkpointer.setup()
-        graph = build_graph_from_model(worker_model, checkpointer, tools=tools, classify=classify, turn_budget=turn_budget)
+        with psycopg.connect(conn_string, autocommit=True) as prompt_conn:
+            runtime = build_seat_runtime(
+                prompt_conn, checkpointer, routing, seat_id, gate, turn_budget
+            )
 
         log.info("worker started for seat %r, polling every %ss", seat_id, POLL_INTERVAL_SECONDS)
         while True:
@@ -180,42 +271,7 @@ def run(
             if issue is None:
                 time.sleep(POLL_INTERVAL_SECONDS)
                 continue
-
-            thread_id = issue["id"]
-            config = {"configurable": {"thread_id": thread_id}}
-
-            try:
-                state = graph.get_state(config)
-                if state.values:
-                    log.info("resuming thread %s", thread_id)
-                    graph.invoke(None, config)
-                else:
-                    log.info("starting thread %s", thread_id)
-                    slack.post_message(f":rocket: {who} is starting work on {thread_id}: {issue['title']}")
-                    context = beads.prime()
-                    prompt = (
-                        f"{context}\n\n---\n\nTicket: {issue['title']}\n\n"
-                        f"{issue.get('description', '')}"
-                    )
-                    initial_messages = (
-                        [("system", system_prompt)] if system_prompt else []
-                    ) + [("user", prompt)]
-                    graph.invoke(
-                        {"messages": initial_messages, "ticket_id": thread_id, "turn_count": 0},
-                        config,
-                    )
-
-                # refuse_ticket already flagged+annotated the issue -- don't
-                # also close it, that would erase the "needs a human" signal
-                # bd human list depends on.
-                current = beads.show(thread_id)
-                if beads.is_flagged_for_human(current):
-                    log.info("thread %s refused, left for human review", thread_id)
-                else:
-                    beads.close(thread_id)
-                    log.info("thread %s complete", thread_id)
-            except Exception:
-                log.exception("thread %s failed, left in_progress for retry", thread_id)
+            work_one_ticket(runtime, issue)
 
 
 if __name__ == "__main__":

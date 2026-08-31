@@ -404,6 +404,23 @@ def get_outcomes(actor: str):
     return outcomes.summary(actor)
 
 
+@router.get("/agents/running")
+def list_running_agents():
+    """Which agents are actually working right now, and on what.
+
+    Derived from Beads rather than from dispatcher process memory, so it
+    is true across a dispatcher restart and readable from this separate
+    API process. Exists because the failure that motivated the dispatcher
+    was invisible: the dashboard showed two healthy active seats holding
+    queued work while nothing at all was running, and no surface said so.
+
+    Imported lazily -- the dispatcher pulls in the worker and graph
+    stack, which this API process otherwise has no reason to load."""
+    from .dispatcher import running_agents
+
+    return running_agents()
+
+
 @router.get("/seats")
 def list_seats():
     conn = _seats_conn()

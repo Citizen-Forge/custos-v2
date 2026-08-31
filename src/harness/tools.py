@@ -98,6 +98,26 @@ def refuse_ticket(reason: str, state: Annotated[HarnessState, InjectedState]) ->
 
 
 @tool
+def decline_ticket(reason: str, state: Annotated[HarnessState, InjectedState]) -> str:
+    """Hand this ticket back because it isn't your speciality -- another
+    specialist should do it. Use this when the work itself is perfectly
+    reasonable and clearly needs doing, but sits outside what you're for.
+
+    Different from refuse_ticket: that one escalates to a human because
+    the work is ambiguous or shouldn't happen at all. This one just says
+    "not me", puts the ticket back in the pool, and lets the
+    product-owner route it to a better-suited agent (or create one).
+    Don't use it to avoid work you could reasonably do."""
+    ticket_id = state["ticket_id"]
+    # The seat holding a ticket is its assigned seat -- read it rather
+    # than threading a seat_id through HarnessState, which is scoped to
+    # one ticket thread and carries no seat identity.
+    seat_id = beads.assigned_seat(beads.show(ticket_id)) or "unknown"
+    beads.release_to_pool(ticket_id, seat_id, reason)
+    return f"declined and returned to the pool: {reason}"
+
+
+@tool
 def scan_team_channel() -> str:
     """Check recent team-channel activity (Slack, if configured) for context another agent
     or a human may have left -- worth checking early on a ticket in case there's a relevant
@@ -160,5 +180,6 @@ ALL_TOOLS = [
     list_wiki_pages,
     create_subtask,
     refuse_ticket,
+    decline_ticket,
     write_handoff_note,
 ]

@@ -102,6 +102,46 @@ def acceptance_criteria(issue: dict) -> str | None:
     return (issue.get("metadata") or {}).get("acceptance_criteria")
 
 
+def declined_by(issue: dict) -> list[str]:
+    """Seats that have already declined this ticket as out-of-speciality."""
+    raw = (issue.get("metadata") or {}).get("declined_by") or ""
+    return [s for s in raw.split(",") if s]
+
+
+def release_to_pool(issue_id: str, seat_id: str, reason: str, actor: str = DEFAULT_ACTOR) -> dict:
+    """Hand a ticket back to the unassigned pool because the seat holding
+    it is the wrong specialist for it.
+
+    Deliberately NOT flag_for_human: that labels the issue `human` and
+    parks it for a person, and worker._next_ticket skips flagged issues
+    on purpose so they're never reclaimed. Routing "wrong specialist"
+    down that path would quietly fill a human's queue with work another
+    agent could pick up.
+
+    Three things have to happen together or the ticket strands: clear the
+    seat assignment (so ready_for_seat stops offering it back to the same
+    seat), reopen it (`bd ready` only ever returns status=open -- see this
+    module's docstring -- so a claimed ticket left in_progress would
+    vanish from the pool entirely), and record the decline so the
+    product-owner doesn't immediately reassign it to a seat that already
+    said no."""
+    declined = declined_by(show(issue_id))
+    if seat_id not in declined:
+        declined.append(seat_id)
+    append_note(issue_id, f"declined by {seat_id}: {reason}", actor=actor)
+    return json.loads(
+        _run(
+            [
+                "update", issue_id,
+                "--unset-metadata", "assigned_seat",
+                "--set-metadata", f"declined_by={','.join(declined)}",
+                "--status", "open",
+            ],
+            actor=actor,
+        )
+    )[0]
+
+
 def unassigned_ready() -> list[dict]:
     """Ready issues with no seat assignment yet -- exactly what the
     product-owner's triage pass looks at."""
