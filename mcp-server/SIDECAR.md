@@ -13,23 +13,36 @@ system.
 1. Install this server's dependencies once, wherever you'll run it:
    `pip install -r mcp-server/requirements.txt` (or run it in a
    container the way `smoke_test.py` does -- see that file's docstring).
-2. Register it with Claude Code:
+2. Register it with Claude Code. Which `CUSTOS_API_URL` to use depends on
+   *where this sidecar itself runs*, verified live against the Unraid
+   deployment's `docker-compose.prod.yml` overlay (`api` is dual-homed:
+   macvlan-attached to `br0` at a static LAN IP with port publishing
+   reset to none, AND pinned to a static IP on the internal default
+   bridge network specifically so host-level processes can still reach
+   it):
+   - **Sidecar runs as a host-level process ON the same box as the
+     deployment** (e.g. directly on the Unraid host, like the current
+     setup): use the internal bridge IP, `http://172.31.0.100:8000`.
+     Neither the box's own LAN IP (`192.168.100.231`) nor the `br0`
+     macvlan IP (below) are reachable from the Docker host itself --
+     that's a hard Docker macvlan limitation (a macvlan child is only
+     reachable from *other* real devices on the physical LAN, never from
+     the host whose daemon created it), confirmed live: from the Unraid
+     host, `curl` to its own LAN IP, the macvlan IP, and even
+     `localhost:8000` all fail to connect; only the bridge IP succeeds.
+   - **Sidecar runs on a different physical device on the same LAN**
+     (a laptop, another box): use the `br0` macvlan IP,
+     `http://192.168.250.238:8000` -- this one **is** reachable from
+     other real LAN devices, just never from the Docker host itself.
    ```
    claude mcp add --transport stdio custos -- \
-     env CUSTOS_API_URL=http://192.168.250.238:8000 \
+     env CUSTOS_API_URL=http://172.31.0.100:8000 \
      python /path/to/mcp-server/server.py
    ```
-   **On the Unraid deployment, `api` is macvlan-attached to `br0` at its
-   own static LAN IP (`192.168.250.238`, see `docker-compose.prod.yml`)
-   with port publishing explicitly reset to none** -- the Unraid host's
-   own IP (`192.168.100.231`) cannot reach it at all, standard macvlan
-   behavior (a macvlan child is only reachable from other real devices on
-   the physical LAN, never from the Docker host itself). Verified live,
-   not assumed: `curl 192.168.100.231:8000` fails to connect,
-   `curl 192.168.250.238:8000` returns 200. Use the macvlan IP, not the
-   host IP, for any deployment using `docker-compose.prod.yml`'s overlay
-   -- this changed 2026-08-30 (`git log -- docker-compose.prod.yml`) and
-   silently broke any sidecar still pointed at the old host-IP URL.
+   These IPs are pinned as static addresses in `docker-compose.prod.yml`,
+   not DHCP-assigned, so they're stable across restarts -- but do re-grep
+   that file if the network config ever changes rather than trusting this
+   doc blindly.
    Swap in `CUSTOS_API_TOKEN=...` too if the target deployment has
    `API_AUTH_TOKEN` set (see the main project's `.env.example`).
 3. Enable Remote Control on this Claude Code instance so it's reachable
