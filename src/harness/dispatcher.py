@@ -114,6 +114,56 @@ def dispatchable(issue: dict) -> bool:
     return issue.get("issue_type") == WORK_ITEM_TYPE
 
 
+# A project can be held out of dispatch with a stated reason, so work
+# that exists and matters but cannot currently be done by an agent stops
+# being handed out. Added after a real 12-hour waste (2026-09-01): every
+# Custos-improvement ticket asks for changes to the harness's own source
+# under /app/src, which agents cannot reach -- permissions.
+# check_within_workspace confines them to /workspace by design -- so an
+# agent spent half a day searching for a file it could never open. The
+# product-owner had no way to know that, and would have kept assigning.
+HOLD_KEY = "dispatch_hold"
+
+
+# Held reasons live on the project, but `bd list` does not return
+# metadata (only `bd show` and `bd ready` do), so resolving them costs a
+# show per project. Cached briefly: dispatch polls every 10s and holds
+# change roughly never.
+_HOLD_TTL = 60.0
+_hold_cache: dict = {"at": -1e9, "held": {}}
+
+
+def held_projects() -> dict[str, str]:
+    """Project id -> hold reason, for every project currently held."""
+    now = time.monotonic()
+    if now - _hold_cache["at"] < _HOLD_TTL:
+        return _hold_cache["held"]
+
+    held = {}
+    for issue in beads.list_all():
+        if "." in issue["id"]:
+            continue
+        try:
+            project = beads.show(issue["id"])
+        except Exception:
+            continue
+        reason = (project.get("metadata") or {}).get(HOLD_KEY)
+        if reason:
+            held[issue["id"]] = reason
+    _hold_cache.update(at=now, held=held)
+    return held
+
+
+def project_hold(ticket_id: str) -> str | None:
+    """The reason this ticket's project is held out of dispatch, if it is.
+
+    Fails open like the toolchain preflight: an unreadable project must
+    not become a reason nothing ever runs."""
+    from . import toolchain
+
+    return held_projects().get(toolchain.project_id_for(ticket_id))
+
+
 def next_assigned_ticket() -> tuple[dict | None, str | None]:
     """A ticket the product-owner has already assigned that can start now.
 
@@ -122,15 +172,22 @@ def next_assigned_ticket() -> tuple[dict | None, str | None]:
     in_progress by a crashed agent never reappears there and would be
     stranded forever if this only looked at the ready pool. Human-flagged
     issues are skipped -- they are parked deliberately, not orphaned."""
+    held = held_projects()
+
+    def _skip(issue):
+        from . import toolchain
+
+        return toolchain.project_id_for(issue["id"]) in held
+
     for issue in beads.in_progress():
-        if not dispatchable(issue) or beads.is_flagged_for_human(issue):
+        if not dispatchable(issue) or beads.is_flagged_for_human(issue) or _skip(issue):
             continue
         seat_id = beads.assigned_seat(issue)
         if seat_id:
             return issue, seat_id
 
     for issue in beads.ready():
-        if not dispatchable(issue):
+        if not dispatchable(issue) or _skip(issue):
             continue
         seat_id = beads.assigned_seat(issue)
         if seat_id:
@@ -139,8 +196,16 @@ def next_assigned_ticket() -> tuple[dict | None, str | None]:
 
 
 def has_unassigned_work() -> bool:
+    """Held projects are excluded so the product-owner is not woken to
+    broker work no agent could start."""
+    from . import toolchain
+
+    held = held_projects()
     return any(
-        dispatchable(i) and beads.assigned_seat(i) is None for i in beads.ready()
+        dispatchable(i)
+        and beads.assigned_seat(i) is None
+        and toolchain.project_id_for(i["id"]) not in held
+        for i in beads.ready()
     )
 
 
@@ -292,6 +357,11 @@ class Dispatcher:
             # dispatched onto TypeScript tickets in an image with no Node,
             # burned hours of inference, and produced work nothing could
             # build or test. Better to refuse loudly than to look busy.
+            hold = project_hold(issue["id"])
+            if hold:
+                log.error("not starting %s: project on dispatch hold -- %s", issue["id"], hold)
+                return "on hold"
+
             gaps = toolchain.check_ticket(issue["id"])
             if gaps:
                 log.error(
