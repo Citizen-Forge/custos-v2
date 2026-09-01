@@ -162,10 +162,17 @@ def build_tools(conn, requesting_model):
         return f"created epic {epic['id']} under {project_id}: {epic['title']}"
 
     @tool
-    def add_subtask_to_epic(epic_id: str, title: str, description: str) -> str:
+    def add_subtask_to_epic(epic_id: str, title: str, description: str,
+                            acceptance_criteria: str = "") -> str:
         """Add one concrete, individually-workable story under an epic (created via
-        create_epic). Call this once per real piece of work the epic decomposes into."""
-        subtask = beads.create(title, description, parent=epic_id)
+        create_epic). Call this once per real piece of work the epic decomposes into.
+
+        ALWAYS give acceptance_criteria: what must be concretely true for this to be done,
+        checkable by someone who didn't do the work. A story without criteria is never
+        verified by anyone (verifier.py skips it), so the working agent's own claim of
+        success becomes the only record that it happened."""
+        subtask = beads.create(title, description, parent=epic_id,
+                               acceptance_criteria=acceptance_criteria or None)
         return f"created subtask {subtask['id']} under {epic_id}: {subtask['title']}"
 
     return [

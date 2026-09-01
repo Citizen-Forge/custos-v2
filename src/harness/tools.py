@@ -98,6 +98,27 @@ def refuse_ticket(reason: str, state: Annotated[HarnessState, InjectedState]) ->
 
 
 @tool
+def complete_ticket(summary: str, state: Annotated[HarnessState, InjectedState]) -> str:
+    """Declare this ticket finished, describing what you actually did and
+    where the work lives -- files written, commands run, how you checked
+    it works.
+
+    You MUST call this before your work counts as complete. A ticket you
+    stop working on without calling this is not closed; it is flagged for
+    a human, because a ticket that ends with nothing recorded is
+    indistinguishable from one where nothing was done.
+
+    Be concrete and honest. This summary is the evidence a separate
+    verifier judges against the ticket's acceptance criteria, so an
+    inflated one fails verification rather than passing quietly. If you
+    could not finish, use refuse_ticket or decline_ticket instead."""
+    ticket_id = state["ticket_id"]
+    beads.set_metadata(ticket_id, "completion_summary", summary[:2000])
+    beads.append_note(ticket_id, f"completed: {summary}")
+    return "completion recorded -- the ticket will close if nothing else intervenes"
+
+
+@tool
 def decline_ticket(reason: str, state: Annotated[HarnessState, InjectedState]) -> str:
     """Hand this ticket back because it isn't your speciality -- another
     specialist should do it. Use this when the work itself is perfectly
@@ -181,5 +202,6 @@ ALL_TOOLS = [
     create_subtask,
     refuse_ticket,
     decline_ticket,
+    complete_ticket,
     write_handoff_note,
 ]

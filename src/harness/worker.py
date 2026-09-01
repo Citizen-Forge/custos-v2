@@ -238,7 +238,29 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
         if beads.assigned_seat(current) != runtime.seat_id:
             log.info("thread %s declined by %r, back in the pool", thread_id, runtime.seat_id)
             return "released"
-        beads.close(thread_id)
+
+        # An agent must explicitly claim completion (complete_ticket) and
+        # say what it did. This used to close unconditionally whenever the
+        # graph finished without refusing, which meant an agent that
+        # talked for a while and stopped was recorded as success.
+        #
+        # That was not hypothetical: on 2026-09-01, four Silent Run and
+        # Custos stories were closed this way with no notes, no summary
+        # and no code anywhere in the workspace -- including "Ship
+        # movement over system-scale distances". A ticket that ends with
+        # nothing recorded is indistinguishable from one where nothing
+        # happened, so it is now flagged for a human instead of closed.
+        summary = (current.get("metadata") or {}).get("completion_summary")
+        if not summary:
+            log.warning("thread %s ended with no completion claim -- flagging", thread_id)
+            beads.flag_for_human(
+                thread_id,
+                "agent stopped without calling complete_ticket -- no record of what, "
+                "if anything, was done",
+            )
+            return "unclaimed"
+
+        beads.close(thread_id, reason=summary[:500])
         log.info("thread %s complete", thread_id)
         return "closed"
     except Exception:

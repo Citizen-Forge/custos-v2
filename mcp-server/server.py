@@ -143,12 +143,19 @@ def create_epic(project_id: str, title: str, description: str, priority: int | N
 
 
 @mcp.tool()
-def create_story(epic_id: str, title: str, description: str, priority: int | None = None) -> str:
+def create_story(epic_id: str, title: str, description: str, priority: int | None = None,
+                 acceptance_criteria: str | None = None) -> str:
     """Add one concrete, individually-workable story under an epic (created via create_epic) --
     a real task a seat could actually pick up and finish, not a vague restatement of the epic.
-    priority is 0-4 (0=highest), optional."""
+    priority is 0-4 (0=highest), optional.
+
+    ALWAYS set acceptance_criteria: state concretely what must be true for this story to be
+    done, in terms someone else could check. Without it the story is never verified by
+    anyone -- verifier.py skips any ticket that has none -- so the agent's own claim of
+    success becomes the only record."""
     return _call("POST", f"/epics/{epic_id}/stories",
-                 json={"title": title, "description": description, "priority": priority})
+                 json={"title": title, "description": description, "priority": priority,
+                       "acceptance_criteria": acceptance_criteria})
 
 
 @mcp.tool()
