@@ -718,7 +718,9 @@ function showTab(name, { persist = true } = {}) {
     try { localStorage.setItem(TAB_STORAGE_KEY, name); } catch (e) { /* private mode */ }
     if (location.hash.slice(1) !== name) history.replaceState(null, "", `#${name}`);
   }
-  refreshAll();
+  // Explicitly for the tab just switched to, so a slow refresh still
+  // running for the previous tab cannot swallow it.
+  refreshAll(name);
 }
 
 function initialTab() {
@@ -733,16 +735,24 @@ function initialTab() {
 
 // A refresh still in flight must never overlap the next tick -- with a
 // slow /projects the old unconditional timer stacked requests forever.
-let refreshInFlight = false;
+//
+// Tracked PER TAB, not globally. A single global flag meant that while
+// any tab's refresh was in flight, switching tabs did nothing at all:
+// showTab calls refreshAll, the guard swallowed it, and the new tab sat
+// empty until the slow call finished. With /seats taking over a minute
+// that made the Wiki tab look permanently broken -- it only ever
+// populated if you happened to reload the page while already on it.
+const refreshing = new Set();
 
-async function refreshAll() {
-  if (refreshInFlight) return;
-  refreshInFlight = true;
+async function refreshAll(tab) {
+  const target = tab || activeTab;
+  if (refreshing.has(target)) return;
+  refreshing.add(target);
   try {
-    await Promise.all((TAB_REFRESHERS[activeTab] || (() => []))());
+    await Promise.all((TAB_REFRESHERS[target] || (() => []))());
     document.getElementById("status").textContent = "updated " + new Date().toLocaleTimeString();
   } finally {
-    refreshInFlight = false;
+    refreshing.delete(target);
   }
 }
 

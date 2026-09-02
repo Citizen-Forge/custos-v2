@@ -212,6 +212,68 @@ def _project_tree() -> tuple[list[dict], float]:
     return tree, age
 
 
+# Same stale-while-revalidate shape as the project tree, for the same
+# reason: /seats costs three `bd` reads (measured 4-15s depending on
+# contention with a running agent), and the Agents tab polls every 5s.
+# Seats and their outcomes change on the timescale of tickets completing,
+# so a short cache costs nothing in freshness.
+_roster_load_lock = threading.Lock()
+_roster_state_lock = threading.Lock()
+_roster_state: dict = {"roster": None, "at": 0.0}
+
+
+def _load_roster() -> list[dict]:
+    conn = _seats_conn()
+    try:
+        roster = seats.list_all(conn)
+        if roster:
+            all_issues = beads.list_all()
+            ready = beads.ready()
+            in_progress = beads.in_progress()
+            for seat in roster:
+                seat["outcomes"] = outcomes.summary(seat["seat_id"], issues=all_issues)
+                seat["verification"] = verifications.summary(conn, seat["seat_id"])
+                seat["queue"] = outcomes.queue_stats(
+                    seat["seat_id"], issues=all_issues, ready=ready, in_progress=in_progress
+                )
+    finally:
+        conn.close()
+    with _roster_state_lock:
+        _roster_state["roster"] = roster
+        _roster_state["at"] = time.monotonic()
+    return roster
+
+
+def _roster() -> tuple[list[dict], float]:
+    with _roster_state_lock:
+        roster, at = _roster_state["roster"], _roster_state["at"]
+    age = time.monotonic() - at
+
+    if roster is not None and age < PROJECT_TREE_TTL:
+        return roster, age
+
+    if roster is None:
+        with _roster_load_lock:
+            with _roster_state_lock:
+                if _roster_state["roster"] is not None:
+                    return _roster_state["roster"], 0.0
+            return _load_roster(), 0.0
+
+    if _roster_load_lock.acquire(blocking=False):
+        def refresh():
+            try:
+                _load_roster()
+            except Exception as e:  # noqa: BLE001 -- keep serving the last
+                # good roster rather than poisoning the cache.
+                print(f"seat roster refresh failed: {e}")
+            finally:
+                _roster_load_lock.release()
+
+        threading.Thread(target=refresh, daemon=True).start()
+
+    return roster, age
+
+
 def _invalidate_project_tree() -> None:
     """Drop the cached tree so the next /projects reflects a write
     immediately. Without this, creating a project through the API and
@@ -459,17 +521,18 @@ def list_running_agents():
 
 
 @router.get("/seats")
-def list_seats():
-    conn = _seats_conn()
-    try:
-        roster = seats.list_all(conn)
-        for s in roster:
-            s["outcomes"] = outcomes.summary(s["seat_id"])
-            s["verification"] = verifications.summary(conn, s["seat_id"])
-            s["queue"] = outcomes.queue_stats(s["seat_id"])
-        return roster
-    finally:
-        conn.close()
+def list_seats(response: Response):
+    """Roster with each seat's outcomes, verification record and queue.
+
+    The three `bd` reads happen ONCE for the whole roster, not per seat.
+    Measured before this: 1.2 minutes to load, because outcomes.summary
+    and outcomes.queue_stats each fetched their own data per seat -- four
+    `bd` subprocess calls per seat, two of them duplicating the same
+    query -- at seconds apiece. Same N+1 shape that made /projects take
+    ~85s (see list_projects)."""
+    roster, age = _roster()
+    response.headers["X-Roster-Age-Seconds"] = f"{age:.1f}"
+    return roster
 
 
 @router.get("/tool-proposals")

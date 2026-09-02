@@ -12,8 +12,19 @@ from datetime import datetime, timezone
 from . import beads
 
 
-def summary(actor: str) -> dict:
-    issues = beads.list_by_assignee(actor)
+def summary(actor: str, issues: list[dict] | None = None) -> dict:
+    """Pass `issues` (every issue, any status) to compute this without a
+    `bd` call of its own.
+
+    Added because /seats was taking over a minute: it called this and
+    queue_stats per seat, and between them they made four `bd` calls each
+    -- two of which fetched the very same list_by_assignee data twice.
+    With a handful of seats that is dozens of subprocess calls at seconds
+    apiece. The caller can now fetch once and share."""
+    if issues is None:
+        issues = beads.list_by_assignee(actor)
+    else:
+        issues = [i for i in issues if i.get("assignee") == actor]
     closed = [i for i in issues if i["status"] == "closed"]
     refused = [i for i in issues if beads.is_flagged_for_human(i)]
     still_open = [
@@ -35,7 +46,12 @@ def _parse_ts(raw: str | None) -> datetime | None:
     return datetime.fromisoformat(raw.replace("Z", "+00:00"))
 
 
-def queue_stats(seat_id: str) -> dict:
+def queue_stats(
+    seat_id: str,
+    issues: list[dict] | None = None,
+    ready: list[dict] | None = None,
+    in_progress: list[dict] | None = None,
+) -> dict:
     """Real empirical timing (added 2026-08-29, PLAN.md's original Phase 6
     gap: "nothing to estimate from without real inference timing data" --
     now there is, from real tickets completed this session). Average
@@ -48,7 +64,10 @@ def queue_stats(seat_id: str) -> dict:
     real, different state from a zero-second wait, and the UI should be
     able to tell them apart rather than showing a misleadingly confident
     number."""
-    issues = beads.list_by_assignee(seat_id)
+    if issues is None:
+        issues = beads.list_by_assignee(seat_id)
+    else:
+        issues = [i for i in issues if i.get("assignee") == seat_id]
     durations = []
     for i in issues:
         if i["status"] != "closed":
@@ -60,9 +79,11 @@ def queue_stats(seat_id: str) -> dict:
 
     avg_seconds = sum(durations) / len(durations) if durations else None
 
-    ready = len(beads.ready_for_seat(seat_id))
+    ready_issues = beads.ready() if ready is None else ready
+    running = beads.in_progress() if in_progress is None else in_progress
+    ready = len([i for i in ready_issues if beads.assigned_seat(i) == seat_id])
     in_progress = len(
-        [i for i in beads.in_progress() if i.get("assignee") == seat_id and not beads.is_flagged_for_human(i)]
+        [i for i in running if i.get("assignee") == seat_id and not beads.is_flagged_for_human(i)]
     )
 
     return {
