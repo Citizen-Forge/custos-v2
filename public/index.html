@@ -156,6 +156,14 @@
     padding: 0.6rem; font-size: 0.85rem;
   }
   .roadmap-card-title { font-weight: 500; }
+  /* Agent profile pages get the seat's portrait. Derived from the slug
+     (agents/<seat_id>, wiki.py's fixed convention) rather than embedded
+     in the page text, so every existing profile gets one without being
+     rewritten and an agent cannot forget to include it. */
+  .wiki-portrait {
+    width: 96px; height: 96px; border-radius: 8px; object-fit: cover;
+    background: var(--border); margin: 0.6rem 0 0.2rem;
+  }
   .progress-bar { background: var(--border); border-radius: 999px; height: 6px; margin: 0.5rem 0 0.35rem; overflow: hidden; }
   .progress-fill { background: var(--accent); height: 100%; }
 </style>
@@ -222,6 +230,7 @@
         <span class="id" id="wiki-viewer-slug"></span>
         <button onclick="closeWikiPage()">Close</button>
       </div>
+      <img id="wiki-viewer-portrait" class="wiki-portrait" alt="" hidden>
       <pre id="wiki-viewer-content" style="white-space:pre-wrap;font-family:inherit;font-size:0.85rem;margin-top:0.5rem"></pre>
     </div>
   </section>
@@ -646,9 +655,28 @@ async function viewWikiPage(slug) {
   if (activeTab !== "wiki") showTab("wiki");
   const viewer = document.getElementById("wiki-viewer");
   const content = document.getElementById("wiki-viewer-content");
+  const portrait = document.getElementById("wiki-viewer-portrait");
   document.getElementById("wiki-viewer-slug").textContent = slug;
   viewer.style.display = "block";
   content.textContent = "loading…";
+
+  // agents/<seat_id> is wiki.py's fixed convention for a seat profile,
+  // so the portrait comes from the slug rather than from the page body.
+  const seatId = slug.startsWith("agents/") ? slug.slice("agents/".length) : null;
+  if (seatId) {
+    portrait.onerror = () => {
+      // Same fallback the seat cards use: no generated portrait (avatar.py
+      // needs GEMINI_API_KEY) is a 404, not an error state.
+      portrait.onerror = null;
+      portrait.src = avatarUrl(seatId);
+    };
+    portrait.src = `/avatars/${encodeURIComponent(seatId)}`;
+    portrait.alt = `portrait of ${seatId}`;
+    portrait.hidden = false;
+  } else {
+    portrait.hidden = true;
+    portrait.removeAttribute("src");
+  }
   try {
     const page = await fetchJSON(`/wiki/${slug.split("/").map(encodeURIComponent).join("/")}`);
     content.textContent = page.content;
