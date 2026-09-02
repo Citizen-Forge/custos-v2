@@ -181,6 +181,10 @@
     <h2>Board <span class="count" id="projects-count">0</span></h2>
     <div id="projects-list"></div>
   </section>
+  <section data-tab="home">
+    <h2>Self-modification: needs your approval <span class="count" id="selfmod-count">0</span></h2>
+    <div id="selfmod-list"></div>
+  </section>
   <section data-tab="agents">
     <h2>Working Now <span class="count" id="running-count">0</span></h2>
     <div id="running-list"></div>
@@ -399,6 +403,59 @@ function idleLabel(seconds) {
   return `${(seconds / 3600).toFixed(1)}h ago`;
 }
 
+// A change to the harness's own source always stops for an explicit
+// yes/no. The reviewing agent's verdict and the sandbox result are shown
+// because they are what the decision is made on -- not because they made
+// it. Lives on Home so it cannot be missed behind a tab.
+async function refreshSelfMod() {
+  try {
+    const items = await fetchJSON("/self-mod-proposals?status=awaiting_human");
+    document.getElementById("selfmod-count").textContent = items.length;
+    document.getElementById("selfmod-list").innerHTML = items.length
+      ? items.map(p => {
+          const failed = p.sandbox_tests_failed;
+          const clean = failed === 0;
+          return `<div class="item">
+            <span class="id">#${p.id}</span>
+            <span class="title">${escapeHtml((p.description || "").slice(0, 160))}</span>
+            <div class="desc">${escapeHtml(p.description || "")}</div>
+            <div class="desc"${clean ? "" : ' style="color:#d97706"'}>
+              sandbox: ${p.sandbox_tests_passed} passed, ${failed} failed (exit ${p.sandbox_exit_code})
+            </div>
+            <div class="desc">reviewer: ${escapeHtml(p.review_verdict || "?")} -- ${escapeHtml((p.review_reasoning || "").slice(0, 300))}</div>
+            ${p.ticket_id ? `<div class="desc">ticket: <span class="id">${escapeHtml(p.ticket_id)}</span></div>` : ""}
+            <details style="margin-top:0.4rem">
+              <summary style="cursor:pointer;font-size:0.85rem;color:var(--muted)">show diff</summary>
+              <pre style="white-space:pre-wrap;font-size:0.75rem;overflow-x:auto">${escapeHtml(p.diff || "")}</pre>
+            </details>
+            <div class="prompt-actions">
+              <button onclick="approveSelfMod(${p.id})">Approve</button>
+              <button onclick="rejectSelfMod(${p.id})">Reject</button>
+            </div>
+          </div>`;
+        }).join("")
+      : `<div class="empty">nothing waiting on you</div>`;
+  } catch (e) {
+    document.getElementById("selfmod-list").innerHTML = `<div class="empty">error: ${e.message}</div>`;
+  }
+}
+
+async function approveSelfMod(id) {
+  if (!window.confirm(`Approve self-modification #${id}? It will be deployed to the running harness.`)) return;
+  await fetchJSON(`/self-mod-proposals/${id}/approve`, { method: "POST" });
+  refreshAll();
+}
+
+async function rejectSelfMod(id) {
+  const reason = window.prompt("Reason for rejecting (optional):") || null;
+  await fetchJSON(`/self-mod-proposals/${id}/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+  refreshAll();
+}
+
 async function refreshRunning() {
   try {
     const agents = await fetchJSON("/agents/running");
@@ -614,7 +671,7 @@ let activeTab = "home";
 // far the most expensive call -- so a large backlog put the dashboard
 // into permanently overlapping requests.
 const TAB_REFRESHERS = {
-  home: () => [refreshProjects()],
+  home: () => [refreshProjects(), refreshSelfMod()],
   agents: () => [refreshRunning(), refreshSeats()],
   wiki: () => [refreshWiki()],
   settings: () => [],

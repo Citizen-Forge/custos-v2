@@ -12,9 +12,16 @@ This service closes that gap without weakening containment. It runs
 inside sandbox-runner, the one service that legitimately holds the Docker
 socket (PLAN.md Phase 7), and polls the proposals table:
 
-    pending   -> sandbox it   (needs Docker: builds an image, runs tests)
-    reviewed  -> nothing; reviewer.py approves or rejects on its verdict
-    approved  -> deploy it    (needs Docker: rebuild + restart services)
+    pending        -> sandbox it (needs Docker: builds an image, runs tests)
+    reviewed       -> reviewer.py records a verdict; a favourable one
+                      parks the proposal at awaiting_human
+    awaiting_human -> nothing happens here. A person approves or rejects
+                      it on the dashboard.
+    approved       -> deploy it (needs Docker: rebuild + restart services)
+
+`approved` is reachable only by a human saying yes (2026-09-01). The
+reviewing agent's verdict and the sandbox evidence inform that decision;
+they no longer make it.
 
 An agent's only interaction is creating a proposal row. It never gains
 Docker access, never invokes these stages directly, and cannot reach the
@@ -29,11 +36,11 @@ Both existing hard gates are preserved exactly:
 - Deployment refuses to run onto a dirty tree, and rolls the applied diff
   back if the final real-tree test run fails.
 
-Two rails exist because nothing here waits for a human:
+Two rails remain, even with a human in the path:
 
-- SELF_MOD_MAX_DEPLOYS_PER_DAY caps how many changes may land unattended
-  in a rolling 24h. A bad change that passes its own tests should not be
-  able to be followed immediately by more built on top of it.
+- SELF_MOD_MAX_DEPLOYS_PER_DAY caps how many changes land in a rolling
+  24h, so a run of quick approvals cannot stack changes faster than
+  anyone can notice one going wrong.
 - SELF_MOD_AUTOPILOT=off disables the loop entirely without redeploying
   anything -- the kill switch for the one loop that can disable the thing
   that would fix it.
@@ -77,6 +84,9 @@ def _deploy_approved(conn) -> bool:
     if not approved:
         return False
 
+    # Everything here was explicitly approved by a person; the cap is a
+    # brake on how fast approvals can stack up, not a substitute for the
+    # decision itself.
     landed = self_mod.deployed_since(conn, 24 * 3600)
     if landed >= MAX_DEPLOYS_PER_DAY:
         log.warning(

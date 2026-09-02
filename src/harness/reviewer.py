@@ -187,7 +187,56 @@ def review_self_modification(conn, proposal_id: int, model) -> dict | None:
 
     self_mod.record_review(conn, proposal_id, verdict, reasoning)
     if verdict == "allow":
-        self_mod.approve(conn, proposal_id)
+        # NOT approved here any more. A favourable review parks the
+        # proposal for a person to say yes or no (2026-09-01, at the
+        # user's request). The reviewer's judgment and the sandbox
+        # evidence are what that person reads; they are no longer the
+        # deployment trigger themselves.
+        self_mod.await_human(conn, proposal_id)
+        _escalate(conn, proposal_id, reasoning)
     else:
         self_mod.reject(conn, proposal_id, reasoning)
     return {"proposal_id": proposal_id, "verdict": verdict, "reasoning": reasoning}
+
+
+def _escalate(conn, proposal_id: int, reasoning: str) -> None:
+    """Tell a human there is a decision waiting, with enough detail to
+    make it without opening the database.
+
+    Fails soft: a Slack outage or a missing ticket must not lose the
+    proposal -- it is parked in the database either way, and the
+    dashboard lists it regardless."""
+    from . import beads, slack
+
+    proposal = self_mod.get(conn, proposal_id)
+    if proposal is None:
+        return
+
+    passed = proposal.get("sandbox_tests_passed")
+    failed = proposal.get("sandbox_tests_failed")
+    summary = (
+        f":robot_face: Self-modification proposal #{proposal_id} needs your yes/no.\n"
+        f"*What it changes:* {(proposal.get('description') or '')[:800]}\n"
+        f"*Sandbox:* {passed} passed, {failed} failed (exit {proposal.get('sandbox_exit_code')})\n"
+        f"*Reviewer says allow:* {reasoning[:400]}\n"
+        f"Approve or reject it on the dashboard's Self-modification panel."
+    )
+    try:
+        slack.post_message(summary)
+    except Exception:
+        pass
+
+    ticket_id = proposal.get("ticket_id")
+    if ticket_id:
+        try:
+            beads.append_note(
+                ticket_id,
+                f"self-modification proposal #{proposal_id} is awaiting human approval. "
+                f"Sandbox: {passed} passed / {failed} failed. Reviewer: {reasoning[:300]}",
+            )
+            beads.flag_for_human(
+                ticket_id,
+                f"proposal #{proposal_id} needs a yes/no before it can be deployed",
+            )
+        except Exception:
+            pass

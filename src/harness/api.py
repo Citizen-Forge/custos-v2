@@ -595,14 +595,15 @@ def reject_tool_proposal(proposal_id: int, body: DismissBody = DismissBody()):
 
 
 @router.get("/self-mod-proposals")
-def list_self_mod_proposals(status: str = "approved"):
-    """Default to `approved`: the reviewer's own verdict already
-    approves/rejects a self-modification proposal (2026-08-30, no human
-    review step -- see reviewer.review_self_modification's docstring),
-    so this is what's about to be deployed (or already was), not a
-    human decision queue. `reviewed` is still a valid filter for audit
-    purposes -- every proposal passes through it on the way to
-    approved/rejected."""
+def list_self_mod_proposals(status: str = "awaiting_human"):
+    """Defaults to the human decision queue.
+
+    Was `approved`, back when the reviewing agent's verdict deployed a
+    change by itself. Since 2026-09-01 a favourable review parks the
+    proposal at `awaiting_human` instead, so this default is now what a
+    person actually has to act on. `approved` (a human said yes, not yet
+    deployed), `reviewed`, `rejected` and `deployed` remain valid filters
+    for audit."""
     conn = _self_mod_conn()
     try:
         return self_mod.list_by_status(conn, status)
@@ -612,13 +613,13 @@ def list_self_mod_proposals(status: str = "approved"):
 
 @router.post("/self-mod-proposals/{proposal_id}/approve")
 def approve_self_mod_proposal(proposal_id: int):
-    """Manual override: reviewer.review_self_modification already calls
-    this itself for an "allow" verdict, so a proposal is normally
-    already approved by the time a human sees it here. This exists to
-    override a "deny" verdict -- run_self_mod_deploy.py still won't
-    touch anything for a proposal that isn't 'approved' AND doesn't have
-    a clean sandboxed test run (see that script), so calling this alone
-    still doesn't deploy anything by itself."""
+    """A human saying yes. This is now the only route to `approved` --
+    the reviewing agent parks a favourable verdict at `awaiting_human`
+    rather than approving it (2026-09-01).
+
+    Approving still does not itself deploy anything: run_self_mod_deploy
+    refuses any proposal without a clean sandboxed test run, so a yes
+    here cannot talk past real test evidence."""
     conn = _self_mod_conn()
     try:
         self_mod.approve(conn, proposal_id)

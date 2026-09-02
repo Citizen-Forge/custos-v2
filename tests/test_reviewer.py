@@ -155,7 +155,7 @@ def _sandboxed_self_mod_proposal(conn, **overrides) -> int:
     return proposal_id
 
 
-def test_self_mod_allow_verdict_gets_recorded_and_approved_immediately():
+def test_self_mod_allow_verdict_awaits_a_human_rather_than_approving():
     conn = _self_mod_conn()
     proposal_id = _sandboxed_self_mod_proposal(conn)
 
@@ -168,14 +168,15 @@ def test_self_mod_allow_verdict_gets_recorded_and_approved_immediately():
         "reasoning": "narrowly scoped, all tests pass",
     }
     proposal = self_mod.get(conn, proposal_id)
-    # 2026-08-30, user's own call: no human review step -- an "allow"
-    # verdict activates the proposal in the same call that records it,
-    # same shape as review_proposal (tool_proposals.py). What actually
-    # gates real deployment is run_self_mod_deploy.py's own separate,
-    # hard check on the real sandboxed test evidence -- not this call.
-    assert proposal["status"] == "approved"
+    # Changed 2026-09-01 at the user's request. This used to approve in
+    # the same call that recorded the verdict (2026-08-30's "no human
+    # review step"). A change to the harness's own source now always
+    # stops for an explicit yes/no, however confident the reviewer was --
+    # the verdict and the sandbox evidence are what the person reads,
+    # not the decision itself.
+    assert proposal["status"] == self_mod.AWAITING_HUMAN
     assert proposal["review_verdict"] == "allow"
-    assert proposal["approved_at"] is not None
+    assert proposal["approved_at"] is None, "only a human may approve"
 
 
 def test_self_mod_deny_verdict_gets_recorded_and_rejected_immediately():
