@@ -14,46 +14,6 @@ from .state import HarnessState
 
 
 @tool
-def shell_exec(command: str) -> str:
-    """Run a shell command in the workspace and return its combined output."""
-    # Gating happens one layer up, in graph.py's permission_gate node --
-    # every call reaches here already allowed (statically-safe fast path
-    # or classifier-approved). No redundant check here: unlike file paths,
-    # there's no workspace-independent hard invariant for shell commands
-    # to enforce, and re-gating on the same static safe-set would silently
-    # break any command the classifier explicitly approved.
-    result = subprocess.run(
-        command,
-        shell=True,
-        cwd=WORKSPACE_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    return (result.stdout or "") + (result.stderr or "")
-
-
-@tool
-def read_file(path: str) -> str:
-    """Read a text file's contents, relative to the workspace root."""
-    permissions.check_within_workspace(path, WORKSPACE_ROOT)
-    resolved = os.path.abspath(os.path.join(WORKSPACE_ROOT, path))
-    with open(resolved, "r", encoding="utf-8") as f:
-        return f.read()
-
-
-@tool
-def write_file(path: str, content: str) -> str:
-    """Write text content to a file, relative to the workspace root."""
-    permissions.check_within_workspace(path, WORKSPACE_ROOT)
-    resolved = os.path.abspath(os.path.join(WORKSPACE_ROOT, path))
-    os.makedirs(os.path.dirname(resolved), exist_ok=True)
-    with open(resolved, "w", encoding="utf-8") as f:
-        f.write(content)
-    return f"wrote {len(content)} bytes to {path}"
-
-
-@tool
 def remember_fact(text: str) -> str:
     """Persist a durable insight via Beads (`bd remember`) so it survives
     across sessions and tickets, not just this conversation."""
@@ -189,10 +149,60 @@ def write_handoff_note(note: str, state: Annotated[HarnessState, InjectedState])
     return "handoff note recorded"
 
 
-ALL_TOOLS = [
-    shell_exec,
-    read_file,
-    write_file,
+def build_workspace_tools(workspace_root: str) -> list:
+    """The three tools that touch the filesystem, bound to one root.
+
+    A factory rather than module-level definitions because the root is
+    now per-ticket: an agent working a Silent Run story must be rooted in
+    Silent Run's workspace, not in a process-wide constant that happens
+    to point at the harness's own store. Closing over the root keeps the
+    binding explicit -- an ambient/contextvar approach would silently
+    fall back to the default root if it ever failed to propagate into a
+    tool-execution thread, and a sandbox boundary should not fail quietly.
+    """
+
+    @tool
+    def shell_exec(command: str) -> str:
+        """Run a shell command in the workspace and return its combined output."""
+        # Gating happens one layer up, in graph.py's permission_gate node --
+        # every call reaches here already allowed (statically-safe fast path
+        # or classifier-approved). No redundant check here: unlike file paths,
+        # there's no workspace-independent hard invariant for shell commands
+        # to enforce, and re-gating on the same static safe-set would silently
+        # break any command the classifier explicitly approved.
+        result = subprocess.run(
+            command,
+            shell=True,
+            cwd=workspace_root,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        return (result.stdout or "") + (result.stderr or "")
+
+    @tool
+    def read_file(path: str) -> str:
+        """Read a text file's contents, relative to the workspace root."""
+        permissions.check_within_workspace(path, workspace_root)
+        resolved = os.path.abspath(os.path.join(workspace_root, path))
+        with open(resolved, "r", encoding="utf-8") as f:
+            return f.read()
+
+    @tool
+    def write_file(path: str, content: str) -> str:
+        """Write text content to a file, relative to the workspace root."""
+        permissions.check_within_workspace(path, workspace_root)
+        resolved = os.path.abspath(os.path.join(workspace_root, path))
+        os.makedirs(os.path.dirname(resolved), exist_ok=True)
+        with open(resolved, "w", encoding="utf-8") as f:
+            f.write(content)
+        return f"wrote {len(content)} bytes to {path}"
+
+    return [shell_exec, read_file, write_file]
+
+
+# Tools that do not touch the project workspace and so need no binding.
+SHARED_TOOLS = [
     remember_fact,
     search_related_work,
     scan_team_channel,
@@ -205,3 +215,13 @@ ALL_TOOLS = [
     complete_ticket,
     write_handoff_note,
 ]
+
+
+def build_agent_tools(workspace_root: str | None = None) -> list:
+    """The full tool set for an agent rooted at `workspace_root`."""
+    return build_workspace_tools(workspace_root or WORKSPACE_ROOT) + SHARED_TOOLS
+
+
+# Default-rooted set, for callers that predate per-project workspaces
+# (graph.build_graph's default, product-owner tests).
+ALL_TOOLS = build_agent_tools()

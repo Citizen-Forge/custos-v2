@@ -54,7 +54,7 @@ import time
 import psycopg
 from langgraph.checkpoint.postgres import PostgresSaver
 
-from . import beads, seats, toolchain
+from . import beads, seats, toolchain, workspaces
 from .product_owner import ROLE as PRODUCT_OWNER_ROLE
 from .product_owner import build_tools as build_product_owner_tools
 from .product_owner import run_triage_session
@@ -123,6 +123,24 @@ def dispatchable(issue: dict) -> bool:
 # agent spent half a day searching for a file it could never open. The
 # product-owner had no way to know that, and would have kept assigning.
 HOLD_KEY = "dispatch_hold"
+
+# A project whose work means changing the harness's own source. Such a
+# ticket can never be done by an ordinary agent -- agents are confined to
+# their project workspace and the harness source is not in it -- so it is
+# routed to the self-modification pipeline instead of being handed to a
+# seat. Set as `target=harness` metadata on the project.
+TARGET_KEY = "target"
+HARNESS_TARGET = "harness"
+
+
+def targets_harness(ticket_id: str) -> bool:
+    from . import toolchain
+
+    try:
+        project = beads.show(toolchain.project_id_for(ticket_id))
+    except Exception:
+        return False
+    return (project.get("metadata") or {}).get(TARGET_KEY) == HARNESS_TARGET
 
 
 # Held reasons live on the project, but `bd list` does not return
@@ -268,11 +286,14 @@ class Dispatcher:
         does not have. Crashes are the case worth handling, and `finally`
         handles them. Do not add one back without asking."""
         try:
+            # Each ticket is worked in its own project's workspace.
+            workspace_root = workspaces.for_ticket(issue["id"])
             with PostgresSaver.from_conn_string(self.conn_string) as checkpointer:
                 checkpointer.setup()
                 with psycopg.connect(self.conn_string, autocommit=True) as conn:
                     runtime = build_seat_runtime(
-                        conn, checkpointer, self.routing, seat_id, self.gate
+                        conn, checkpointer, self.routing, seat_id, self.gate,
+                        workspace_root=workspace_root,
                     )
                 outcome = work_one_ticket(runtime, issue)
             log.info("seat %r finished %s: %s", seat_id, issue["id"], outcome)
@@ -317,6 +338,48 @@ class Dispatcher:
         ).start()
         return True
 
+    def start_self_modification(self, issue: dict, seat_id: str) -> bool:
+        """Work a harness-source ticket by proposing a change to the
+        harness's own source, rather than by editing files in a project
+        workspace.
+
+        The agent still only proposes. The trusted loop in sandbox-runner
+        (run_self_mod_loop.py) sandboxes, and deploys once reviewed --
+        this side never touches Docker, so routing work here grants the
+        agent nothing it did not already have."""
+        with self._lock:
+            if len(self._running) >= self.max_agents or seat_id in self._running:
+                return False
+            self._running[seat_id] = {
+                "ticket_id": issue["id"],
+                "title": issue.get("title"),
+                "started_at": time.time(),
+            }
+        try:
+            beads.claim(issue["id"], actor=seat_id)
+        except Exception:
+            log.exception("could not claim %s", issue["id"])
+            with self._lock:
+                self._running.pop(seat_id, None)
+            return False
+
+        log.info("routing %s to self-modification", issue["id"])
+        threading.Thread(
+            target=self._self_mod_thread, args=(seat_id, issue), daemon=True
+        ).start()
+        return True
+
+    def _self_mod_thread(self, seat_id: str, issue: dict) -> None:
+        from . import self_mod_ticket
+
+        try:
+            self_mod_ticket.work_ticket(self.conn_string, self.routing, self.gate, issue)
+        except Exception:
+            log.exception("self-modification failed for %s", issue["id"])
+        finally:
+            with self._lock:
+                self._running.pop(seat_id, None)
+
     def wake_product_owner(self) -> str | None:
         """One dispatch-only product-owner session: pick a ticket, decide
         existing seat vs new specialist, assign it. Returns its closing
@@ -357,6 +420,11 @@ class Dispatcher:
             # dispatched onto TypeScript tickets in an image with no Node,
             # burned hours of inference, and produced work nothing could
             # build or test. Better to refuse loudly than to look busy.
+            if targets_harness(issue["id"]):
+                # Harness-source work goes through self-modification, not
+                # through a workspace agent that structurally cannot do it.
+                return "self-mod" if self.start_self_modification(issue, seat_id) else "could not start"
+
             hold = project_hold(issue["id"])
             if hold:
                 log.error("not starting %s: project on dispatch hold -- %s", issue["id"], hold)

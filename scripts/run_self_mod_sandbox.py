@@ -194,6 +194,25 @@ def _run_isolated_test(diff: str) -> dict:
         shutil.rmtree(container_dir, ignore_errors=True)
 
 
+def sandbox_proposal(conn, proposal: dict) -> dict:
+    """Sandbox one proposal and record the result.
+
+    Extracted from main() so the unattended loop (run_self_mod_loop.py)
+    can drive this stage without shelling out to this script -- same code
+    path either way, so the manual command and the loop cannot drift."""
+    result = _run_isolated_test(proposal["diff"])
+    self_mod.record_sandbox_result(
+        conn,
+        proposal["id"],
+        result["exit_code"],
+        result["stdout"],
+        result["stderr"],
+        result["tests_passed"],
+        result["tests_failed"],
+    )
+    return result
+
+
 def main() -> None:
     with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
         self_mod.init_table(conn)
@@ -205,16 +224,7 @@ def main() -> None:
 
         for proposal in pending:
             print(f"sandboxing #{proposal['id']}: {proposal['description'][:80]}")
-            result = _run_isolated_test(proposal["diff"])
-            self_mod.record_sandbox_result(
-                conn,
-                proposal["id"],
-                result["exit_code"],
-                result["stdout"],
-                result["stderr"],
-                result["tests_passed"],
-                result["tests_failed"],
-            )
+            result = sandbox_proposal(conn, proposal)
             status = "timed out" if result["exit_code"] == -1 else f"exit {result['exit_code']}"
             print(f"#{proposal['id']}: {status}, passed={result['tests_passed']} failed={result['tests_failed']}")
 

@@ -47,13 +47,13 @@ import time
 import psycopg
 from langgraph.checkpoint.postgres import PostgresSaver
 
-from . import beads, prompts, seats, slack
+from . import beads, prompts, seats, slack, workspaces
 from .classifier import build_classifier_from_model
 from .dynamic_tools import build_dynamic_tools
 from .graph import build_graph_from_model
 from .providers import ProviderConfig
 from .routing import ConcurrencyGate, RoutedModel, RoutingTable
-from .tools import ALL_TOOLS
+from .tools import build_agent_tools
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker")
@@ -166,6 +166,7 @@ def build_seat_runtime(
     seat_id: str,
     gate: ConcurrencyGate | None = None,
     turn_budget: int | None = None,
+    workspace_root: str | None = None,
 ) -> SeatRuntime:
     """Build everything one seat needs to work tickets.
 
@@ -183,7 +184,11 @@ def build_seat_runtime(
     seats.init_table(prompt_conn)
     seat_record = seats.get(prompt_conn, seat_id)
     who = seat_record["display_name"] if seat_record and seat_record.get("display_name") else seat_id
-    tools = ALL_TOOLS + build_dynamic_tools(prompt_conn)
+    # Bound to this ticket's project workspace, not a process-wide root,
+    # so an agent cannot see the harness's issue database or another
+    # project's files. Falls back to the default root for the legacy
+    # single-seat entrypoint, which has no ticket in hand yet.
+    tools = build_agent_tools(workspace_root) + build_dynamic_tools(prompt_conn)
 
     worker_model = RoutedModel(seat_id, routing, gate, tools=tools)
     classify = build_classifier_from_model(RoutedModel("classifier", routing, gate))
@@ -259,6 +264,22 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
                 "if anything, was done",
             )
             return "unclaimed"
+
+        # Commit the ticket's output so its diff is attributable to it
+        # specifically, and record the sha -- that is what the verifier
+        # judges against the acceptance criteria, rather than taking the
+        # agent's description of the work at face value.
+        try:
+            sha = workspaces.commit_all(
+                workspaces.project_id_for(thread_id), f"{thread_id}: {summary[:200]}"
+            )
+            if sha:
+                beads.set_metadata(thread_id, "work_commit", sha)
+                log.info("thread %s committed %s", thread_id, sha[:12])
+            else:
+                log.warning("thread %s claimed completion but changed no files", thread_id)
+        except Exception:
+            log.exception("thread %s: could not commit workspace", thread_id)
 
         beads.close(thread_id, reason=summary[:500])
         log.info("thread %s complete", thread_id)

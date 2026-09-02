@@ -36,8 +36,20 @@ def _is_safe_shell(command: str) -> bool:
 
 
 def _is_within_workspace(path: str, workspace_root: str) -> bool:
-    resolved = os.path.abspath(os.path.join(workspace_root, path))
-    return resolved.startswith(os.path.abspath(workspace_root))
+    """Containment by path components, NOT by string prefix.
+
+    A plain `startswith` was wrong in a way that only bites once
+    workspaces have siblings: from /projects/proj-a the path
+    ../proj-abc/x resolves to /projects/proj-abc/x, which starts with
+    /projects/proj-a and was therefore allowed. With one workspace that
+    was a latent bug (/workspace-evil escaped /workspace); with a
+    workspace per project it would have meant no isolation between
+    projects at all, which is the whole point of having them."""
+    root = os.path.abspath(workspace_root)
+    resolved = os.path.abspath(os.path.join(root, path))
+    if resolved == root:
+        return True
+    return resolved.startswith(root + os.sep)
 
 
 def is_statically_safe(tool_name: str, tool_args: dict, workspace_root: str) -> bool:

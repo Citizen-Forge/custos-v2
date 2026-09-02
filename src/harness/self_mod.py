@@ -60,14 +60,44 @@ def init_table(conn) -> None:
         )
         """
     )
+    # Added 2026-09-01 when self-modification became reachable from a
+    # ticket: without this the work happens somewhere the board cannot
+    # see, and the ticket that asked for it can never be honestly closed.
+    # Separate ALTER because the table already exists on live deployments.
+    conn.execute(
+        "ALTER TABLE self_mod_proposals ADD COLUMN IF NOT EXISTS ticket_id TEXT"
+    )
 
 
-def propose(conn, description: str, diff: str, proposed_by: str) -> int:
+def propose(conn, description: str, diff: str, proposed_by: str, ticket_id: str | None = None) -> int:
     row = conn.execute(
-        "INSERT INTO self_mod_proposals (description, diff, proposed_by) VALUES (%s, %s, %s) RETURNING id",
-        (description, diff, proposed_by),
+        "INSERT INTO self_mod_proposals (description, diff, proposed_by, ticket_id) "
+        "VALUES (%s, %s, %s, %s) RETURNING id",
+        (description, diff, proposed_by, ticket_id),
     ).fetchone()
     return row[0]
+
+
+def for_ticket(conn, ticket_id: str) -> list[dict]:
+    """Proposals raised while working one ticket, newest first."""
+    rows = conn.execute(
+        "SELECT * FROM self_mod_proposals WHERE ticket_id=%s ORDER BY id DESC",
+        (ticket_id,),
+    ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+def deployed_since(conn, seconds: int) -> int:
+    """How many self-modifications have landed in the last `seconds`.
+
+    The rate limit for the unattended loop reads this: with no human in
+    the path, a bad change that passes its own tests could otherwise be
+    followed straight away by another built on top of it."""
+    row = conn.execute(
+        "SELECT count(*) FROM self_mod_proposals WHERE deployed_at > now() - make_interval(secs => %s)",
+        (seconds,),
+    ).fetchone()
+    return row[0] or 0
 
 
 def record_sandbox_result(

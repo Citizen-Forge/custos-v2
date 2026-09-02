@@ -68,6 +68,7 @@ services:
       - ./tests:/app/tests:ro
       - ./scripts:/app/scripts:ro
       - ./workspace:/workspace
+      - ./projects:/projects
       # self_modifier.py's own writable checkout (Phase 7's self-
       # modification agent, added 2026-08-30) -- a Docker-managed named
       # volume, deliberately NOT a second bind mount of ./src: mounting
@@ -113,6 +114,7 @@ services:
       - ./src:/app/src:ro
       - ./public:/app/public:ro
       - ./workspace:/workspace
+      - ./projects:/projects
     ports:
       - "8000:8000"
     command: ["uvicorn", "harness.api:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -159,6 +161,7 @@ services:
       - ./src:/app/src:ro
       - ./scripts:/app/scripts:ro
       - ./workspace:/workspace
+      - ./projects:/projects
     command: ["python", "scripts/run_scheduler.py"]
 
   # PLAN.md Phase 7: the only service that ever mounts the Docker socket.

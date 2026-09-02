@@ -8,3 +8,7 @@ __pycache__/
 venv/
 workspace/
 sandbox-scratch/
+
+# Per-project agent workspaces (product code lives in its own repo per
+# project; see src/harness/workspaces.py). Not part of harness source.
+projects/

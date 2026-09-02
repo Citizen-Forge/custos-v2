@@ -1,6 +1,16 @@
 import os
 
+# The harness's own store: the Beads issue database (.beads), the wiki
+# and generated avatars. Agents are NOT rooted here any more -- see
+# PROJECTS_ROOT and workspaces.py. Keeping the name and default means the
+# live issue database does not have to move.
 WORKSPACE_ROOT = os.environ.get("HARNESS_WORKSPACE", "/workspace")
+
+# Parent directory of per-project workspaces. Each project gets
+# PROJECTS_ROOT/<project_id>, which is the root an agent working that
+# project's ticket sees -- so product code never lands beside the issue
+# database, and one project cannot reach another's files.
+PROJECTS_ROOT = os.environ.get("HARNESS_PROJECTS", "/projects")
 DEFAULT_ACTOR = os.environ.get("BEADS_ACTOR", "custos-worker")
 
 # Per-`bd`-invocation subprocess timeout. Was hardcoded at 60s in
