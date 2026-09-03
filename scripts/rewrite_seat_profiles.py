@@ -56,12 +56,49 @@ Respond with strict JSON and nothing else: {{"profile_page": "<your new page, ma
 """
 
 
+def model_reachable(timeout: int = 15) -> tuple[bool, str]:
+    """Is a model server actually there? Liveness only -- NOT a test
+    generation.
+
+    Learned twice on 2026-09-03. First: with nothing obviously wrong,
+    this script sat for eighty minutes producing no output, because the
+    generation call simply never returned. So a preflight was added.
+    Then the preflight itself was wrong -- it asked for a one-token
+    completion, which queues behind whatever the server is already doing
+    and timed out even though the server was healthy. Measured at the
+    time: 3.66 tok/s prompt, 0.62 tok/s generation, one task taking 532
+    seconds. A busy server is not a down server, and refusing to run
+    against a slow one would be the timeout mistake this project
+    deliberately avoids everywhere else.
+
+    /health answers in milliseconds regardless of load, which is exactly
+    the distinction wanted: nothing listening, versus listening and
+    swamped."""
+    import urllib.request
+
+    base = os.environ.get("LOCAL_MODEL_BASE_URL", "http://host.docker.internal:11434/v1")
+    root = base.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[: -len("/v1")]
+
+    for url in (f"{root}/health", f"{root}/v1/models"):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout):
+                return True, url
+        except Exception as e:
+            last = f"{url}: {type(e).__name__} {e}"
+    return False, last
+
+
 def _provider() -> ProviderConfig:
     return ProviderConfig(
         name="profile-rewrite",
         base_url=os.environ.get("LOCAL_MODEL_BASE_URL", "http://host.docker.internal:11434/v1"),
         model=os.environ.get("LOCAL_MODEL_NAME", "qwen2.5:7b-instruct"),
-        max_tokens=4000,
+        # A profile page is prose, not a document. Kept modest because
+        # generation on this deployment was measured at 0.62 tok/s -- an
+        # unnecessarily large budget is hours of wall clock.
+        max_tokens=1200,
     )
 
 
@@ -109,6 +146,12 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="print, do not write")
     args = parser.parse_args()
 
+    ok, detail = model_reachable()
+    if not ok:
+        log.error("no model server at that address -- %s", detail)
+        log.error("nothing was changed. Start the model server and run this again.")
+        raise SystemExit(1)
+
     model = build_chat_model(_provider())
     with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
         seats.init_table(conn)
@@ -119,7 +162,10 @@ def main() -> None:
         log.error("no matching seat")
         return
 
-    log.info("rewriting %s profile(s)%s", len(targets), " (dry run)" if args.dry_run else "")
+    log.info(
+        "rewriting %s profile(s)%s -- local inference is slow, expect minutes per seat",
+        len(targets), " (dry run)" if args.dry_run else "",
+    )
     for seat in targets:
         others = [o for o in roster if o["seat_id"] != seat["seat_id"]]
         try:
