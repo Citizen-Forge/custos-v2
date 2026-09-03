@@ -287,3 +287,7 @@ see PLAN.md's "Open questions" for the actual log evidence.
    the logs (a distinct message from the fresh-claim `starting thread`,
    confirming it picked the same ticket back up from its last checkpoint
    via `bd list --status=in_progress`, not a restart from scratch).
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE) — free to use, modify and share for any noncommercial purpose.
