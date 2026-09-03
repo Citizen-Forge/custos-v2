@@ -258,6 +258,15 @@ def _deploy_one(conn, proposal: dict) -> None:
     print(f"#{proposal_id}: deployed.")
 
 
+def deploy_proposal(conn, proposal: dict) -> None:
+    """Public name for _deploy_one, so the unattended loop
+    (run_self_mod_loop.py) drives exactly the same deployment path this
+    script does -- including its hard gates: a proposal without a clean
+    sandbox result never deploys, deployment refuses a dirty tree, and a
+    failed final test run rolls the applied diff back."""
+    _deploy_one(conn, proposal)
+
+
 def main() -> None:
     with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
         self_mod.init_table(conn)

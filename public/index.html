@@ -132,11 +132,38 @@
   .swimlane:last-child { margin-bottom: 0; }
   .swimlane-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
   .swimlane-track { display: flex; gap: 0.75rem; overflow-x: auto; padding-bottom: 0.25rem; }
+  nav#tabs {
+    display: flex; gap: 0.25rem; padding: 0 1rem;
+    border-bottom: 1px solid var(--border); margin-bottom: 1rem;
+  }
+  nav#tabs .tab {
+    background: none; border: none; border-bottom: 2px solid transparent;
+    color: var(--muted); padding: 0.6rem 0.9rem; cursor: pointer;
+    font: inherit; font-size: 0.9rem;
+  }
+  nav#tabs .tab:hover { color: inherit; }
+  nav#tabs .tab.active { color: inherit; border-bottom-color: currentColor; }
+  /* Sections carry data-tab and are shown/hidden by it rather than being
+     nested in per-tab containers -- keeps the markup order untouched. */
+  main section[data-tab] { display: none; }
+  main section[data-tab].visible { display: block; }
+  .kanban-col.blocked .kanban-col-head { color: #d97706; }
+  .kanban-card.blocked { border-left: 2px solid #d97706; }
+  .kanban-card-actions { margin-top: 0.4rem; display: flex; gap: 0.3rem; }
+  .kanban-card-actions button { font-size: 0.75rem; padding: 0.15rem 0.4rem; }
   .roadmap-card {
     flex: 0 0 220px; border: 1px solid var(--border); border-radius: 6px;
     padding: 0.6rem; font-size: 0.85rem;
   }
   .roadmap-card-title { font-weight: 500; }
+  /* Agent profile pages get the seat's portrait. Derived from the slug
+     (agents/<seat_id>, wiki.py's fixed convention) rather than embedded
+     in the page text, so every existing profile gets one without being
+     rewritten and an agent cannot forget to include it. */
+  .wiki-portrait {
+    width: 96px; height: 96px; border-radius: 8px; object-fit: cover;
+    background: var(--border); margin: 0.6rem 0 0.2rem;
+  }
   .progress-bar { background: var(--border); border-radius: 999px; height: 6px; margin: 0.5rem 0 0.35rem; overflow: hidden; }
   .progress-fill { background: var(--accent); height: 100%; }
 </style>
@@ -147,32 +174,34 @@
   <span class="sub">harness dashboard</span>
   <span id="status" style="margin-left:auto"></span>
 </header>
+<nav id="tabs">
+  <button class="tab" data-tab="home">Home</button>
+  <button class="tab" data-tab="agents">Agents</button>
+  <button class="tab" data-tab="wiki">Wiki</button>
+  <button class="tab" data-tab="settings">Settings</button>
+</nav>
 <main>
-  <section class="board-section">
+  <section class="board-section" data-tab="home">
     <h2>Roadmap <span class="count" id="roadmap-count">0</span></h2>
     <div id="roadmap-list"></div>
   </section>
-  <section class="board-section">
+  <section class="board-section" data-tab="home">
     <h2>Board <span class="count" id="projects-count">0</span></h2>
     <div id="projects-list"></div>
   </section>
-  <section>
+  <section data-tab="home">
+    <h2>Self-modification: needs your approval <span class="count" id="selfmod-count">0</span></h2>
+    <div id="selfmod-list"></div>
+  </section>
+  <section data-tab="agents">
+    <h2>Working Now <span class="count" id="running-count">0</span></h2>
+    <div id="running-list"></div>
+  </section>
+  <section data-tab="agents">
     <h2>Seats <span class="count" id="seats-count">0</span></h2>
     <div id="seats-list"></div>
   </section>
-  <section>
-    <h2>Ready <span class="count" id="ready-count">0</span></h2>
-    <div id="ready-list"></div>
-  </section>
-  <section>
-    <h2>In Progress <span class="count" id="in-progress-count">0</span></h2>
-    <div id="in-progress-list"></div>
-  </section>
-  <section>
-    <h2>Needs a Human <span class="count" id="human-count">0</span></h2>
-    <div id="human-list"></div>
-  </section>
-  <section>
+  <section data-tab="settings">
     <h2>Settings</h2>
     <div style="margin-bottom:1rem">
       <label style="display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.3rem">
@@ -193,7 +222,7 @@
       <div id="model-registry-list"></div>
     </div>
   </section>
-  <section>
+  <section data-tab="wiki">
     <h2>Wiki <span class="count" id="wiki-count">0</span></h2>
     <div id="wiki-list"></div>
     <div id="wiki-viewer" style="display:none;margin-top:0.75rem;border-top:1px solid var(--border);padding-top:0.75rem">
@@ -201,10 +230,11 @@
         <span class="id" id="wiki-viewer-slug"></span>
         <button onclick="closeWikiPage()">Close</button>
       </div>
+      <img id="wiki-viewer-portrait" class="wiki-portrait" alt="" hidden>
       <pre id="wiki-viewer-content" style="white-space:pre-wrap;font-family:inherit;font-size:0.85rem;margin-top:0.5rem"></pre>
     </div>
   </section>
-  <section>
+  <section data-tab="agents">
     <h2>Outcomes</h2>
     <form class="outcomes" id="outcomes-form">
       <input type="text" id="outcomes-actor" placeholder="actor / role, e.g. worker">
@@ -226,15 +256,6 @@ function el(html) {
   const t = document.createElement("template");
   t.innerHTML = html.trim();
   return t.content.firstChild;
-}
-
-function ticketItem(t) {
-  const notes = t.notes ? `<div class="notes">${escapeHtml(t.notes)}</div>` : "";
-  return `<div class="item">
-    <span class="id">${t.id}</span> <span class="title">${escapeHtml(t.title)}</span>
-    <div class="desc">${escapeHtml(t.description || "")}</div>
-    ${notes}
-  </div>`;
 }
 
 // User's pick (2026-08-29), adjustable live via GET/PUT
@@ -359,19 +380,6 @@ async function fetchJSON(url, opts) {
   return res.json();
 }
 
-function humanTicketItem(t) {
-  const notes = t.notes ? `<div class="notes">${escapeHtml(t.notes)}</div>` : "";
-  return `<div class="item">
-    <span class="id">${t.id}</span> <span class="title">${escapeHtml(t.title)}</span>
-    <div class="desc">${escapeHtml(t.description || "")}</div>
-    ${notes}
-    <div class="prompt-actions">
-      <button onclick="respondToTicket('${t.id}')">Respond</button>
-      <button onclick="dismissTicket('${t.id}')">Dismiss</button>
-    </div>
-  </div>`;
-}
-
 async function respondToTicket(id) {
   const response = window.prompt("Response to send back (closes the ticket):");
   if (!response) return;
@@ -393,16 +401,87 @@ async function dismissTicket(id) {
   refreshAll();
 }
 
-async function refreshTickets(status, listId, countId, renderFn = ticketItem) {
+// Idle time is shown, never used to declare an agent dead: the local
+// models are slow and a long gap is normal. It's here so an agent that
+// has genuinely taken no step is visible, which the old dashboard could
+// not show at all.
+function idleLabel(seconds) {
+  if (seconds === null || seconds === undefined) return "just started";
+  if (seconds < 90) return `${seconds}s ago`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)}m ago`;
+  return `${(seconds / 3600).toFixed(1)}h ago`;
+}
+
+// A change to the harness's own source always stops for an explicit
+// yes/no. The reviewing agent's verdict and the sandbox result are shown
+// because they are what the decision is made on -- not because they made
+// it. Lives on Home so it cannot be missed behind a tab.
+async function refreshSelfMod() {
   try {
-    const items = await fetchJSON(`/tickets?status=${status}`);
-    document.getElementById(countId).textContent = items.length;
-    const container = document.getElementById(listId);
-    container.innerHTML = items.length
-      ? items.map(renderFn).join("")
-      : `<div class="empty">nothing here</div>`;
+    const items = await fetchJSON("/self-mod-proposals?status=awaiting_human");
+    document.getElementById("selfmod-count").textContent = items.length;
+    document.getElementById("selfmod-list").innerHTML = items.length
+      ? items.map(p => {
+          const failed = p.sandbox_tests_failed;
+          const clean = failed === 0;
+          return `<div class="item">
+            <span class="id">#${p.id}</span>
+            <span class="title">${escapeHtml((p.description || "").slice(0, 160))}</span>
+            <div class="desc">${escapeHtml(p.description || "")}</div>
+            <div class="desc"${clean ? "" : ' style="color:#d97706"'}>
+              sandbox: ${p.sandbox_tests_passed} passed, ${failed} failed (exit ${p.sandbox_exit_code})
+            </div>
+            <div class="desc">reviewer: ${escapeHtml(p.review_verdict || "?")} -- ${escapeHtml((p.review_reasoning || "").slice(0, 300))}</div>
+            ${p.ticket_id ? `<div class="desc">ticket: <span class="id">${escapeHtml(p.ticket_id)}</span></div>` : ""}
+            <details style="margin-top:0.4rem">
+              <summary style="cursor:pointer;font-size:0.85rem;color:var(--muted)">show diff</summary>
+              <pre style="white-space:pre-wrap;font-size:0.75rem;overflow-x:auto">${escapeHtml(p.diff || "")}</pre>
+            </details>
+            <div class="prompt-actions">
+              <button onclick="approveSelfMod(${p.id})">Approve</button>
+              <button onclick="rejectSelfMod(${p.id})">Reject</button>
+            </div>
+          </div>`;
+        }).join("")
+      : `<div class="empty">nothing waiting on you</div>`;
   } catch (e) {
-    document.getElementById(listId).innerHTML = `<div class="empty">error: ${e.message}</div>`;
+    document.getElementById("selfmod-list").innerHTML = `<div class="empty">error: ${e.message}</div>`;
+  }
+}
+
+async function approveSelfMod(id) {
+  if (!window.confirm(`Approve self-modification #${id}? It will be deployed to the running harness.`)) return;
+  await fetchJSON(`/self-mod-proposals/${id}/approve`, { method: "POST" });
+  refreshAll();
+}
+
+async function rejectSelfMod(id) {
+  const reason = window.prompt("Reason for rejecting (optional):") || null;
+  await fetchJSON(`/self-mod-proposals/${id}/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+  refreshAll();
+}
+
+async function refreshRunning() {
+  try {
+    const agents = await fetchJSON("/agents/running");
+    document.getElementById("running-count").textContent = agents.length;
+    document.getElementById("running-list").innerHTML = agents.length
+      ? agents.map(a => {
+          const stale = a.idle_seconds !== null && a.idle_seconds >= 3600;
+          return `<div class="item">
+            <span class="id">${escapeHtml(a.ticket_id)}</span>
+            <span class="title">${escapeHtml(a.title || "")}</span>
+            <div class="desc">${escapeHtml(a.seat_id || "unassigned")}</div>
+            <div class="desc"${stale ? ' style="color:#d97706"' : ""}>last step ${idleLabel(a.idle_seconds)}</div>
+          </div>`;
+        }).join("")
+      : `<div class="empty">no agents working right now</div>`;
+  } catch (e) {
+    document.getElementById("running-list").innerHTML = `<div class="empty">error: ${e.message}</div>`;
   }
 }
 
@@ -445,15 +524,37 @@ async function refreshSeats() {
 const KANBAN_COLUMNS = [
   { key: "open", label: "Open" },
   { key: "in_progress", label: "In Progress" },
+  // Replaces the old standalone "Needs a Human" panel. Flagged work
+  // belongs on the default tab: a panel on a non-default tab meant an
+  // operator sitting on Home never saw that the harness was blocked.
+  { key: "blocked", label: "Blocked" },
   { key: "closed", label: "Done" },
 ];
 
+// "human" is a label, not a status (beads.is_flagged_for_human), and
+// `bd list` carries labels in the same payload the board already
+// fetches -- so this column costs no extra call.
+function isBlocked(story) {
+  return (story.labels || []).includes("human");
+}
+
 function kanbanCard(story) {
   const seat = (story.metadata && story.metadata.assigned_seat) || null;
-  return `<div class="kanban-card">
+  const blocked = isBlocked(story);
+  // The old panel offered these; without them a flagged item could be
+  // seen but not resolved from the dashboard.
+  const actions = blocked ? `<div class="kanban-card-actions">
+      <button onclick="respondToTicket('${story.id}')">Respond</button>
+      <button onclick="dismissTicket('${story.id}')">Dismiss</button>
+    </div>` : "";
+  const notes = blocked && story.notes
+    ? `<div class="notes">${escapeHtml(story.notes)}</div>` : "";
+  return `<div class="kanban-card${blocked ? " blocked" : ""}">
     <div class="kanban-card-epic">${escapeHtml(story.epicTitle || "")}</div>
     <div class="kanban-card-title"><span class="id">${story.id}</span> ${escapeHtml(story.title)}</div>
     ${seat ? `<div class="story-seat">→ ${escapeHtml(seat)}</div>` : ""}
+    ${notes}
+    ${actions}
   </div>`;
 }
 
@@ -461,11 +562,16 @@ function projectCard(project) {
   const stories = (project.epics || []).flatMap(epic =>
     (epic.stories || []).map(s => ({ ...s, epicTitle: epic.title }))
   );
-  const byStatus = { open: [], in_progress: [], closed: [] };
-  for (const s of stories) (byStatus[s.status] || byStatus.open).push(s);
+  const byStatus = { open: [], in_progress: [], blocked: [], closed: [] };
+  // Blocked is checked before status: a flagged item is in_progress by
+  // status, and showing it there would hide the fact that it is stuck.
+  for (const s of stories) {
+    if (isBlocked(s)) byStatus.blocked.push(s);
+    else (byStatus[s.status] || byStatus.open).push(s);
+  }
 
   const columns = KANBAN_COLUMNS.map(({ key, label }) => `
-    <div class="kanban-col">
+    <div class="kanban-col${key === "blocked" ? " blocked" : ""}">
       <div class="kanban-col-head">${label} <span>${byStatus[key].length}</span></div>
       ${byStatus[key].map(kanbanCard).join("") || `<div class="empty">—</div>`}
     </div>
@@ -543,11 +649,34 @@ async function refreshWiki() {
 }
 
 async function viewWikiPage(slug) {
+  // Seat cards live on the Agents tab and link into the wiki viewer,
+  // which lives on the Wiki tab -- without switching first the click
+  // would appear to do nothing at all.
+  if (activeTab !== "wiki") showTab("wiki");
   const viewer = document.getElementById("wiki-viewer");
   const content = document.getElementById("wiki-viewer-content");
+  const portrait = document.getElementById("wiki-viewer-portrait");
   document.getElementById("wiki-viewer-slug").textContent = slug;
   viewer.style.display = "block";
   content.textContent = "loading…";
+
+  // agents/<seat_id> is wiki.py's fixed convention for a seat profile,
+  // so the portrait comes from the slug rather than from the page body.
+  const seatId = slug.startsWith("agents/") ? slug.slice("agents/".length) : null;
+  if (seatId) {
+    portrait.onerror = () => {
+      // Same fallback the seat cards use: no generated portrait (avatar.py
+      // needs GEMINI_API_KEY) is a 404, not an error state.
+      portrait.onerror = null;
+      portrait.src = avatarUrl(seatId);
+    };
+    portrait.src = `/avatars/${encodeURIComponent(seatId)}`;
+    portrait.alt = `portrait of ${seatId}`;
+    portrait.hidden = false;
+  } else {
+    portrait.hidden = true;
+    portrait.removeAttribute("src");
+  }
   try {
     const page = await fetchJSON(`/wiki/${slug.split("/").map(encodeURIComponent).join("/")}`);
     content.textContent = page.content;
@@ -561,16 +690,70 @@ function closeWikiPage() {
   document.getElementById("wiki-viewer").style.display = "none";
 }
 
-async function refreshAll() {
-  await Promise.all([
-    refreshProjects(),
-    refreshSeats(),
-    refreshTickets("ready", "ready-list", "ready-count"),
-    refreshTickets("in_progress", "in-progress-list", "in-progress-count"),
-    refreshTickets("human", "human-list", "human-count", humanTicketItem),
-    refreshWiki(),
-  ]);
-  document.getElementById("status").textContent = "updated " + new Date().toLocaleTimeString();
+const TABS = ["home", "agents", "wiki", "settings"];
+const TAB_STORAGE_KEY = "custos_active_tab";
+let activeTab = "home";
+
+// What each tab actually needs fetched. Previously every panel refetched
+// on one 5s timer regardless of what was on screen, and /projects is by
+// far the most expensive call -- so a large backlog put the dashboard
+// into permanently overlapping requests.
+const TAB_REFRESHERS = {
+  home: () => [refreshProjects(), refreshSelfMod()],
+  agents: () => [refreshRunning(), refreshSeats()],
+  wiki: () => [refreshWiki()],
+  settings: () => [],
+};
+
+function showTab(name, { persist = true } = {}) {
+  if (!TABS.includes(name)) name = "home";
+  activeTab = name;
+  for (const section of document.querySelectorAll("main section[data-tab]")) {
+    section.classList.toggle("visible", section.dataset.tab === name);
+  }
+  for (const button of document.querySelectorAll("nav#tabs .tab")) {
+    button.classList.toggle("active", button.dataset.tab === name);
+  }
+  if (persist) {
+    try { localStorage.setItem(TAB_STORAGE_KEY, name); } catch (e) { /* private mode */ }
+    if (location.hash.slice(1) !== name) history.replaceState(null, "", `#${name}`);
+  }
+  // Explicitly for the tab just switched to, so a slow refresh still
+  // running for the previous tab cannot swallow it.
+  refreshAll(name);
+}
+
+function initialTab() {
+  const fromHash = location.hash.slice(1);
+  if (TABS.includes(fromHash)) return fromHash;
+  try {
+    const stored = localStorage.getItem(TAB_STORAGE_KEY);
+    if (TABS.includes(stored)) return stored;
+  } catch (e) { /* private mode */ }
+  return "home";
+}
+
+// A refresh still in flight must never overlap the next tick -- with a
+// slow /projects the old unconditional timer stacked requests forever.
+//
+// Tracked PER TAB, not globally. A single global flag meant that while
+// any tab's refresh was in flight, switching tabs did nothing at all:
+// showTab calls refreshAll, the guard swallowed it, and the new tab sat
+// empty until the slow call finished. With /seats taking over a minute
+// that made the Wiki tab look permanently broken -- it only ever
+// populated if you happened to reload the page while already on it.
+const refreshing = new Set();
+
+async function refreshAll(tab) {
+  const target = tab || activeTab;
+  if (refreshing.has(target)) return;
+  refreshing.add(target);
+  try {
+    await Promise.all((TAB_REFRESHERS[target] || (() => []))());
+    document.getElementById("status").textContent = "updated " + new Date().toLocaleTimeString();
+  } finally {
+    refreshing.delete(target);
+  }
 }
 
 document.getElementById("outcomes-form").addEventListener("submit", async (e) => {
@@ -592,11 +775,16 @@ document.getElementById("outcomes-form").addEventListener("submit", async (e) =>
 });
 
 async function init() {
+  for (const button of document.querySelectorAll("nav#tabs .tab")) {
+    button.addEventListener("click", () => showTab(button.dataset.tab));
+  }
+  window.addEventListener("hashchange", () => showTab(initialTab(), { persist: false }));
+
   // Settings rarely change -- load once before the first render (so
   // avatars use the real style from the start, not a flash of the
   // default) rather than polling them every refresh cycle like tickets.
   await Promise.all([loadAvatarStyle(), loadCostSlider(), refreshModelRegistry()]);
-  await refreshAll();
+  showTab(initialTab());
   setInterval(refreshAll, REFRESH_MS);
 }
 

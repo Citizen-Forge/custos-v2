@@ -42,7 +42,7 @@ import time
 import psycopg
 from langgraph.checkpoint.postgres import PostgresSaver
 
-from harness import beads, prompts, seats, settings, tool_proposals, verifications
+from harness import beads, progress, prompts, seats, settings, slack, tool_proposals, verifications
 from harness.meta_agent import propose_prompt_update
 from harness.overwatch import ROLE as OVERWATCH_ROLE
 from harness.overwatch import build_tools as build_overwatch_tools
@@ -128,11 +128,68 @@ def run_verifier_job(conn_string: str) -> None:
                     log.info("verified %s: %s", issue["id"], result["verdict"])
 
 
+def run_progress_job(conn_string: str) -> None:
+    """Check whether running agents are actually getting anywhere.
+
+    Cadence: this runs on the scheduler's own cycle (default 1800s)
+    rather than carrying a separate hourly timer, because the frequency
+    that matters is progress.STALL_AFTER_SECONDS (default 3600), not how
+    often the check runs. The cheap signal -- newest checkpoint timestamp
+    -- is one indexed query, so running it every cycle costs nothing, and
+    the model is only consulted about an agent that has taken no graph
+    step for an hour. Checking twice an hour while escalating after an
+    hour is strictly better than checking hourly, at the same inference
+    cost.
+
+    Deliberately does NOT flag stalled tickets for human review by
+    default. flag_for_human has a side effect that would be a nasty
+    surprise here: both worker._next_ticket and
+    dispatcher.next_assigned_ticket skip flagged issues, so flagging
+    parks the ticket AND frees the seat -- killing an agent's work on a
+    clock, which is precisely the timeout this design rejects. Set
+    STALL_FLAGS_FOR_HUMAN=true to opt in."""
+    model = build_chat_model(_provider("progress", 2000))
+    beads.ensure_initialized()
+    flag = os.environ.get("STALL_FLAGS_FOR_HUMAN", "").lower() in ("1", "true", "yes")
+
+    with psycopg.connect(conn_string, autocommit=True) as conn:
+        reports = progress.check_running_agents(conn, conn_string, model=model)
+
+    for report in reports:
+        if report["verdict"] == "progressing":
+            log.info(
+                "progress: %s on %s is working (idle %ss)",
+                report["seat_id"], report["ticket_id"], report["idle_seconds"],
+            )
+            continue
+
+        log.warning(
+            "progress: %s on %s looks %s -- %s",
+            report["seat_id"], report["ticket_id"], report["verdict"], report["reasoning"],
+        )
+        slack.post_message(
+            f":hourglass: {report['seat_id']} on {report['ticket_id']} "
+            f"({report['title']}) looks {report['verdict']} -- {report['reasoning']}"
+        )
+        # Record it on the ticket once per verdict, so the board shows it
+        # without appending a note every single cycle.
+        marker = f"progress-check: {report['verdict']}"
+        try:
+            existing = beads.show(report["ticket_id"]).get("notes") or ""
+            if marker not in existing:
+                beads.append_note(report["ticket_id"], f"{marker} -- {report['reasoning']}")
+            if flag:
+                beads.flag_for_human(report["ticket_id"], f"{marker} -- {report['reasoning']}")
+        except Exception:
+            log.exception("could not annotate %s", report["ticket_id"])
+
+
 JOBS = [
     ("product_owner", run_product_owner_job),
     ("overwatch", run_overwatch_job),
     ("meta_agent", run_meta_agent_job),
     ("verifier", run_verifier_job),
+    ("progress", run_progress_job),
 ]
 
 

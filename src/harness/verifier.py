@@ -18,7 +18,7 @@ refused."
 
 import json
 
-from . import beads, verifications
+from . import beads, verifications, workspaces
 
 PROMPT = """You are verifying whether completed work actually meets its stated acceptance \
 criteria. You are a SEPARATE reviewer, not the agent that did the work -- judge honestly \
@@ -31,6 +31,13 @@ Acceptance criteria: {acceptance_criteria}
 How the assigned agent says it was completed (close reason): {close_reason}
 Accumulated notes from the work: {notes}
 
+The actual code change this ticket produced:
+{diff}
+
+Weigh the diff above all else. It is what the ticket actually changed; the close reason and \
+notes are the agent's own account of it and may be generous. If the diff is empty or does not \
+plausibly implement the criteria, that is a fail no matter how confident the description sounds.
+
 Decide pass or fail against the acceptance criteria specifically -- not whether the work is \
 impressive, not whether you'd have done it differently, just whether the stated criteria are \
 actually met based on the evidence given. If the evidence is too thin to tell either way, \
@@ -39,6 +46,21 @@ fail rather than assume -- an unverifiable claim of success is not the same as s
 Respond with strict JSON and nothing else: \
 {{"verdict": "pass"|"fail", "reasoning": "<one or two sentences>"}}
 """
+
+
+def _diff_for(issue: dict) -> str:
+    """The diff this ticket produced, from the commit made on its behalf
+    when it claimed completion (worker.work_one_ticket). Absent for
+    tickets closed before that existed, and for tickets that changed no
+    files at all -- both are meaningful signals to a verifier, so this
+    returns empty rather than raising."""
+    sha = (issue.get("metadata") or {}).get("work_commit")
+    if not sha:
+        return ""
+    try:
+        return workspaces.commit_diff(workspaces.project_id_for(issue["id"]), sha)
+    except Exception:
+        return ""
 
 
 def verify_ticket(conn, issue_id: str, model) -> dict | None:
@@ -67,6 +89,7 @@ def verify_ticket(conn, issue_id: str, model) -> dict | None:
             acceptance_criteria=criteria,
             close_reason=issue.get("close_reason") or "(none recorded)",
             notes=issue.get("notes") or "(none)",
+            diff=_diff_for(issue) or "(no code change recorded for this ticket)",
         )
     )
     content = getattr(response, "content", response)

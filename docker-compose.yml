@@ -37,7 +37,16 @@ services:
       LOCAL_MODEL_BASE_URL: ${LOCAL_MODEL_BASE_URL:-http://host.docker.internal:11434/v1}
       LOCAL_MODEL_NAME: ${LOCAL_MODEL_NAME:-qwen2.5:7b-instruct}
       HARNESS_WORKSPACE: /workspace
+      # SEAT_ID only binds the legacy single-seat worker (`python -m
+      # harness.worker`), which this service no longer runs -- kept so
+      # that entrypoint still works when invoked directly.
       SEAT_ID: ${SEAT_ID:-worker}
+      # How many agents may work at once. Deliberately NOT the same limit
+      # as a provider's concurrency_limit, which caps simultaneous LLM
+      # requests and is already enforced by routing.ConcurrencyGate --
+      # more agents than inference slots is a valid setup, the model
+      # calls just queue on the gate.
+      MAX_RUNNING_AGENTS: ${MAX_RUNNING_AGENTS:-1}
     # host.docker.internal resolves automatically on Docker Desktop
     # (Windows/Mac) but NOT on native Linux Docker (e.g. Unraid) unless
     # told to -- this makes the fallback above actually work there too,
@@ -59,6 +68,7 @@ services:
       - ./tests:/app/tests:ro
       - ./scripts:/app/scripts:ro
       - ./workspace:/workspace
+      - ./projects:/projects
       # self_modifier.py's own writable checkout (Phase 7's self-
       # modification agent, added 2026-08-30) -- a Docker-managed named
       # volume, deliberately NOT a second bind mount of ./src: mounting
@@ -69,7 +79,12 @@ services:
       # has no host path to collide with -- it's a real, physically
       # separate copy, seeded by self_modifier.sync_checkout_from_live.
       - self_mod_checkout:/self-mod-checkout
-    command: ["python", "-m", "harness.worker"]
+    # Was `harness.worker`, which ran exactly one seat (SEAT_ID, default
+    # "worker") and so never ran any seat the product-owner created --
+    # the live bug that motivated the dispatcher. This drives the whole
+    # roster instead: capacity check, product-owner brokers one ticket,
+    # agent instantiated on demand.
+    command: ["python", "-m", "harness.dispatcher"]
 
   api:
     build: .
@@ -99,6 +114,7 @@ services:
       - ./src:/app/src:ro
       - ./public:/app/public:ro
       - ./workspace:/workspace
+      - ./projects:/projects
     ports:
       - "8000:8000"
     command: ["uvicorn", "harness.api:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -145,6 +161,7 @@ services:
       - ./src:/app/src:ro
       - ./scripts:/app/scripts:ro
       - ./workspace:/workspace
+      - ./projects:/projects
     command: ["python", "scripts/run_scheduler.py"]
 
   # PLAN.md Phase 7: the only service that ever mounts the Docker socket.

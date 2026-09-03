@@ -60,14 +60,44 @@ def init_table(conn) -> None:
         )
         """
     )
+    # Added 2026-09-01 when self-modification became reachable from a
+    # ticket: without this the work happens somewhere the board cannot
+    # see, and the ticket that asked for it can never be honestly closed.
+    # Separate ALTER because the table already exists on live deployments.
+    conn.execute(
+        "ALTER TABLE self_mod_proposals ADD COLUMN IF NOT EXISTS ticket_id TEXT"
+    )
 
 
-def propose(conn, description: str, diff: str, proposed_by: str) -> int:
+def propose(conn, description: str, diff: str, proposed_by: str, ticket_id: str | None = None) -> int:
     row = conn.execute(
-        "INSERT INTO self_mod_proposals (description, diff, proposed_by) VALUES (%s, %s, %s) RETURNING id",
-        (description, diff, proposed_by),
+        "INSERT INTO self_mod_proposals (description, diff, proposed_by, ticket_id) "
+        "VALUES (%s, %s, %s, %s) RETURNING id",
+        (description, diff, proposed_by, ticket_id),
     ).fetchone()
     return row[0]
+
+
+def for_ticket(conn, ticket_id: str) -> list[dict]:
+    """Proposals raised while working one ticket, newest first."""
+    rows = conn.execute(
+        f"SELECT {COLUMNS} FROM self_mod_proposals WHERE ticket_id=%s ORDER BY id DESC",
+        (ticket_id,),
+    ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+def deployed_since(conn, seconds: int) -> int:
+    """How many self-modifications have landed in the last `seconds`.
+
+    The rate limit for the unattended loop reads this: with no human in
+    the path, a bad change that passes its own tests could otherwise be
+    followed straight away by another built on top of it."""
+    row = conn.execute(
+        "SELECT count(*) FROM self_mod_proposals WHERE deployed_at > now() - make_interval(secs => %s)",
+        (seconds,),
+    ).fetchone()
+    return row[0] or 0
 
 
 def record_sandbox_result(
@@ -94,6 +124,34 @@ def record_review(conn, proposal_id: int, verdict: str, reasoning: str) -> None:
     conn.execute(
         "UPDATE self_mod_proposals SET review_verdict=%s, review_reasoning=%s, status='reviewed' WHERE id=%s",
         (verdict, reasoning, proposal_id),
+    )
+
+
+# _row_to_dict maps by position, so every query must select the same
+# columns in the same order. Keeping one list here rather than repeating
+# it: ticket_id was added to the table and to _row_to_dict but not to
+# get()'s hand-written SELECT, so it silently read back as None.
+COLUMNS = (
+    "id, description, diff, proposed_by, sandbox_stdout, sandbox_stderr, sandbox_exit_code, "
+    "sandbox_tests_passed, sandbox_tests_failed, review_verdict, review_reasoning, status, "
+    "created_at, approved_at, deployed_at, ticket_id"
+)
+
+
+AWAITING_HUMAN = "awaiting_human"
+
+
+def await_human(conn, proposal_id: int) -> None:
+    """Park a reviewed proposal for a person to approve or reject.
+
+    Self-modification used to deploy on the reviewing agent's own verdict
+    (2026-08-30). Changed 2026-09-01 at the user's request: a change to
+    the harness's own source now always stops here for an explicit
+    yes/no, however confident the reviewer was. The review verdict and
+    the sandbox evidence are still gathered -- they are what the person
+    reads -- but they inform the decision rather than being it."""
+    conn.execute(
+        "UPDATE self_mod_proposals SET status=%s WHERE id=%s", (AWAITING_HUMAN, proposal_id)
     )
 
 
@@ -124,9 +182,7 @@ def mark_deployed(conn, proposal_id: int) -> None:
 def get(conn, proposal_id: int) -> dict | None:
     """Returns the proposal row as a dict, or None if no proposal with that id exists."""
     row = conn.execute(
-        "SELECT id, description, diff, proposed_by, sandbox_stdout, sandbox_stderr, sandbox_exit_code, "
-        "sandbox_tests_passed, sandbox_tests_failed, review_verdict, review_reasoning, status, "
-        "created_at, approved_at, deployed_at FROM self_mod_proposals WHERE id = %s",
+        f"SELECT {COLUMNS} FROM self_mod_proposals WHERE id = %s",
         (proposal_id,),
     ).fetchone()
     return _row_to_dict(row) if row else None
@@ -134,9 +190,7 @@ def get(conn, proposal_id: int) -> dict | None:
 
 def list_by_status(conn, status: str) -> list[dict]:
     rows = conn.execute(
-        "SELECT id, description, diff, proposed_by, sandbox_stdout, sandbox_stderr, sandbox_exit_code, "
-        "sandbox_tests_passed, sandbox_tests_failed, review_verdict, review_reasoning, status, "
-        "created_at, approved_at, deployed_at FROM self_mod_proposals WHERE status = %s ORDER BY created_at",
+        f"SELECT {COLUMNS} FROM self_mod_proposals WHERE status = %s ORDER BY created_at",
         (status,),
     ).fetchall()
     return [_row_to_dict(r) for r in rows]
@@ -159,4 +213,6 @@ def _row_to_dict(row) -> dict:
         "created_at": row[12],
         "approved_at": row[13],
         "deployed_at": row[14],
+        # Last in COLUMNS -- added to the table by ALTER (see init_table).
+        "ticket_id": row[15],
     }

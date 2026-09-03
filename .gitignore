@@ -2,5 +2,13 @@ __pycache__/
 *.pyc
 .env
 .venv/
+# `.venv/` above does not match a plainly-named `venv/` -- mcp-server's
+# own virtualenv (see mcp-server/SIDECAR.md) is created as `venv`, and
+# was showing up as 1514 untracked files.
+venv/
 workspace/
 sandbox-scratch/
+
+# Per-project agent workspaces (product code lives in its own repo per
+# project; see src/harness/workspaces.py). Not part of harness source.
+projects/
