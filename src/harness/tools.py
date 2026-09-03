@@ -13,6 +13,12 @@ from .config import WORKSPACE_ROOT
 from .state import HarnessState
 
 
+def _prompt_conn():
+    import psycopg
+
+    return psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+
+
 @tool
 def remember_fact(text: str) -> str:
     """Persist a durable insight via Beads (`bd remember`) so it survives
@@ -108,6 +114,40 @@ def scan_team_channel() -> str:
     if not messages:
         return "no team channel configured, or nothing recent"
     return "\n".join(messages)
+
+
+@tool
+def post_to_team(message: str) -> str:
+    """Say something to the team channel -- a heads-up, something you hit that others will
+    hit too, a question, or just something you felt like sharing. Reaches the humans and is
+    visible to other agents via scan_team_channel. Not a status report: the board already
+    tracks what got done."""
+    if not slack.post_message(message):
+        return "no team channel configured, so nothing was posted"
+    return "posted to the team channel"
+
+
+@tool
+def suggest_prompt_change(new_prompt: str, reason: str, state: Annotated[HarnessState, InjectedState]) -> str:
+    """Propose a revision to your OWN system prompt -- the standing instructions you work
+    from on every ticket. Use it when something about how you have been told to work got in
+    your way, or when you have learned something that should have been in there.
+
+    Give the full replacement text, not a diff, and say plainly what you changed and why.
+
+    This does not take effect on its own. It is recorded as a pending revision for review --
+    deliberately, since an agent silently rewriting its own standing instructions is a
+    different thing from an agent doing its work."""
+    from . import prompts
+
+    seat_id = beads.assigned_seat(beads.show(state["ticket_id"])) or "unknown"
+    conn = _prompt_conn()
+    try:
+        prompts.init_table(conn)
+        version = prompts.propose(conn, seat_id, new_prompt, reason=reason)
+    finally:
+        conn.close()
+    return f"recorded as pending revision v{version} for {seat_id} -- it will not take effect until reviewed"
 
 
 @tool
@@ -233,6 +273,7 @@ def build_workspace_tools(workspace_root: str) -> list:
 # Tools that do not touch the project workspace and so need no binding.
 SHARED_TOOLS = [
     remember_fact,
+    post_to_team,
     search_related_work,
     scan_team_channel,
     read_wiki_page,

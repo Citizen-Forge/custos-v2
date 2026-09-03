@@ -152,11 +152,15 @@ class SeatRuntime:
     work, instead of the old shape where a seat with no process simply
     never ran -- the live failure this refactor exists to fix."""
 
-    def __init__(self, seat_id: str, graph, system_prompt: str | None, who: str):
+    def __init__(self, seat_id: str, graph, system_prompt: str | None, who: str, model=None):
         self.seat_id = seat_id
         self.graph = graph
         self.system_prompt = system_prompt
         self.who = who
+        # Kept so a caller can build a second graph for the same seat with
+        # a different tool set -- reflection.py does exactly that, giving
+        # the agent expression tools instead of work tools.
+        self.model = model
 
 
 def build_seat_runtime(
@@ -195,7 +199,7 @@ def build_seat_runtime(
     graph = build_graph_from_model(
         worker_model, checkpointer, tools=tools, classify=classify, turn_budget=turn_budget
     )
-    return SeatRuntime(seat_id, graph, system_prompt, who)
+    return SeatRuntime(seat_id, graph, system_prompt, who, model=worker_model)
 
 
 def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:

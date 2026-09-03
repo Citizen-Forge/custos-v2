@@ -54,7 +54,7 @@ import time
 import psycopg
 from langgraph.checkpoint.postgres import PostgresSaver
 
-from . import beads, seats, toolchain, workspaces
+from . import beads, reflection, seats, toolchain, workspaces
 from .product_owner import ROLE as PRODUCT_OWNER_ROLE
 from .product_owner import build_tools as build_product_owner_tools
 from .product_owner import run_triage_session
@@ -309,6 +309,14 @@ class Dispatcher:
                 outcome = work_one_ticket(runtime, issue)
             log.info("seat %r finished %s: %s", seat_id, issue["id"], outcome)
             self._record_outcome(issue["id"], outcome)
+
+            # The agent's own slot, before it goes back to sleep. Held
+            # inside the capacity slot deliberately: it is part of the
+            # cycle, not something squeezed in beside the next ticket.
+            # A failed run does not get one -- there is nothing to
+            # reflect on and the ticket is about to be retried.
+            if outcome != "failed":
+                reflection.reflect(self.conn_string, runtime, issue, outcome)
         except Exception:
             log.exception("seat %r crashed on %s", seat_id, issue["id"])
             self._record_outcome(issue["id"], "failed")

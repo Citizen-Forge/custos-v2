@@ -90,6 +90,23 @@ def propose_prompt_update(conn, role: str, model) -> dict | None:
     return {"role": role, "version": version, "reasoning": reasoning}
 
 
+PROFILE_BRIEF = """Next, write your wiki profile page.
+
+Imagine you are a software developer joining a new team, and someone has asked you to write \
+an introduction to go up on the company intranet for your new colleagues. That is the whole \
+brief. Think about what you would actually want these people to know about you, what your \
+character would enjoy sharing, and what they would quietly leave out. Some people write three \
+lines. Some write far too much. Some are funny about it, some are sincere, some are visibly \
+uncomfortable being asked. Some talk about the job, some barely mention it.
+
+Write the post that YOU would write. Not a template filled in -- an actual piece of writing by \
+a specific person who has their own reasons for including what they include. It should be \
+possible to read it and disagree with them about something.
+
+Have a look at the existing seats below first, and go somewhere they did not.
+"""
+
+
 CREATE_SEAT_PROMPT = """You are helping design a new specialist agent for an autonomous \
 software delivery system. A product-owner agent identified a gap: no existing seat \
 specializes in the following kind of work, and one is needed.
@@ -110,16 +127,7 @@ mechanically from the specialty. Pick pronouns freely (they/them, she/her, he/hi
 something else entirely) -- there's no default and no wrong answer here, and gender need not \
 follow from pronouns or vice versa.
 
-Next, write a first-person wiki profile page introducing yourself -- to the team, and to \
-any human looking at the roster who should be able to picture you as a real, specific person, \
-not a generic professional bio any agent could have written. Cover your work (what you \
-specialize in, how you like to work) AND real personality: your age, things like what you \
-like and dislike, an interesting fact about you, favorite music, a favorite city, or anything \
-else along those lines that makes you distinct from every other agent on this roster -- check \
-the existing seats below and deliberately choose different specifics than they'd choose, the \
-way two real people would naturally differ rather than converge on the same safe answers. \
-Make actual choices, not vague gestures ("I enjoy music" tells a reader nothing; naming a \
-specific artist or genre does). Written in your own voice, first-person.
+{profile_brief}
 
 Finally, describe your own PHYSICAL appearance, for your avatar portrait -- entirely your own \
 choice (age, perceived gender presentation or none, ethnicity, hair, face, expression, style: \
@@ -164,7 +172,11 @@ def create_specialist_seat(conn, specialty_description: str, requested_by: str, 
     existing_summary = "\n".join(_existing_seat_summary(s) for s in existing) or "(none yet)"
 
     response = model.invoke(
-        CREATE_SEAT_PROMPT.format(specialty_description=specialty_description, existing_seats=existing_summary)
+        CREATE_SEAT_PROMPT.format(
+            specialty_description=specialty_description,
+            existing_seats=existing_summary,
+            profile_brief=PROFILE_BRIEF,
+        )
     )
     content = getattr(response, "content", response)
 
