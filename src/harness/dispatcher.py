@@ -66,6 +66,16 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("dispatcher")
 
 MAX_RUNNING_AGENTS = int(os.environ.get("MAX_RUNNING_AGENTS", "1"))
+
+# How many times one ticket may crash before it stops being retried.
+# Without this a ticket that fails deterministically is restarted every
+# cycle forever: on 2026-09-02 a FileNotFoundError inside read_file
+# killed the graph run, and the same ticket was started and failed 2901
+# times overnight, holding the only agent slot the whole time and
+# starving every other ticket. Three attempts is enough to ride out a
+# transient (a model 503, a bd timeout) without burning a night on
+# something that will never succeed.
+MAX_TICKET_FAILURES = int(os.environ.get("MAX_TICKET_FAILURES", "3"))
 POLL_SECONDS = int(os.environ.get("DISPATCH_POLL_INTERVAL", "10"))
 
 # Only these are dispatchable work. Projects and epics are also Beads
@@ -263,6 +273,7 @@ class Dispatcher:
         self.gate = gate or ConcurrencyGate()
         self.max_agents = max_agents
         self._running: dict[str, dict] = {}
+        self._failures: dict[str, int] = {}
         self._lock = threading.Lock()
 
     def capacity(self) -> int:
@@ -297,11 +308,42 @@ class Dispatcher:
                     )
                 outcome = work_one_ticket(runtime, issue)
             log.info("seat %r finished %s: %s", seat_id, issue["id"], outcome)
+            self._record_outcome(issue["id"], outcome)
         except Exception:
             log.exception("seat %r crashed on %s", seat_id, issue["id"])
+            self._record_outcome(issue["id"], "failed")
         finally:
             with self._lock:
                 self._running.pop(seat_id, None)
+
+    def _record_outcome(self, ticket_id: str, outcome: str) -> None:
+        """Count consecutive failures per ticket, and stop retrying one
+        that keeps dying. A ticket that has exhausted its attempts is
+        flagged for a human rather than left to spin -- it is a real
+        problem someone needs to see, and the alternative is a wedged
+        dispatcher."""
+        if outcome != "failed":
+            with self._lock:
+                self._failures.pop(ticket_id, None)
+            return
+
+        with self._lock:
+            count = self._failures.get(ticket_id, 0) + 1
+            self._failures[ticket_id] = count
+
+        if count < MAX_TICKET_FAILURES:
+            log.warning("%s failed (%s/%s)", ticket_id, count, MAX_TICKET_FAILURES)
+            return
+
+        log.error("%s failed %s times -- flagging for a human", ticket_id, count)
+        try:
+            beads.flag_for_human(
+                ticket_id,
+                f"agent run failed {count} times in a row -- see the harness log for the "
+                f"traceback. Not retried further to avoid holding an agent slot.",
+            )
+        except Exception:
+            log.exception("could not flag %s", ticket_id)
 
     def start_agent(self, seat_id: str, issue: dict) -> bool:
         with self._lock:

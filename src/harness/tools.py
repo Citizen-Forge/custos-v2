@@ -183,19 +183,48 @@ def build_workspace_tools(workspace_root: str) -> list:
     @tool
     def read_file(path: str) -> str:
         """Read a text file's contents, relative to the workspace root."""
+        # Containment failures still raise: an escape attempt is a
+        # security event and should be loud. A missing file is not --
+        # it is ordinary, and must come back as something the agent can
+        # read and react to.
+        #
+        # This crashed a run 2901 times in one night (2026-09-02): an
+        # agent read `wiki/agents/<seat>` out of habit from when its root
+        # was /workspace, that path stopped existing under per-project
+        # workspaces, FileNotFoundError propagated out of the tool node
+        # and killed the graph, and the dispatcher restarted the same
+        # ticket forever.
         permissions.check_within_workspace(path, workspace_root)
         resolved = os.path.abspath(os.path.join(workspace_root, path))
-        with open(resolved, "r", encoding="utf-8") as f:
-            return f.read()
+        try:
+            with open(resolved, "r", encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError:
+            hint = ""
+            if path.strip("/").startswith("wiki/"):
+                hint = (
+                    " The wiki is not in your workspace -- use read_wiki_page("
+                    f"{path.strip('/')[len('wiki/'):]!r}) instead."
+                )
+            return f"no such file: {path!r} (relative to your workspace root).{hint}"
+        except IsADirectoryError:
+            return f"{path!r} is a directory, not a file"
+        except OSError as e:
+            return f"could not read {path!r}: {e}"
 
     @tool
     def write_file(path: str, content: str) -> str:
         """Write text content to a file, relative to the workspace root."""
         permissions.check_within_workspace(path, workspace_root)
         resolved = os.path.abspath(os.path.join(workspace_root, path))
-        os.makedirs(os.path.dirname(resolved), exist_ok=True)
-        with open(resolved, "w", encoding="utf-8") as f:
-            f.write(content)
+        try:
+            os.makedirs(os.path.dirname(resolved) or workspace_root, exist_ok=True)
+            with open(resolved, "w", encoding="utf-8") as f:
+                f.write(content)
+        except OSError as e:
+            # Same reasoning as read_file: a failed write is information
+            # for the agent, not a reason to kill the run.
+            return f"could not write {path!r}: {e}"
         return f"wrote {len(content)} bytes to {path}"
 
     return [shell_exec, read_file, write_file]
