@@ -1,5 +1,5 @@
 """
-Tool-call permission layer. Two deliberately separate concerns:
+Tool-call permission layer. Three deliberately separate concerns:
 
 1. `is_statically_safe` -- a fast-path allow-list so obviously-safe calls
    skip the LLM classifier (classifier.py) entirely. Mirrors v1's design:
@@ -15,6 +15,22 @@ Tool-call permission layer. Two deliberately separate concerns:
    overridable on purpose: workspace containment is a sandbox boundary,
    not a task-semantic judgment call, so it doesn't belong to the same
    layer that's reasoning about intent.
+
+3. `is_infrastructure` -- names injected into every project workspace by
+   the harness or its tooling (.git, .beads, .claude, .codex, .agents),
+   not the project's own content. Unlike (2) this is NOT a security
+   boundary and never raises: an agent poking at one of these is
+   ordinary orientation behavior, not an escape attempt, so callers
+   return an explanatory string the agent can read and move on from --
+   same "ordinary, not a security event" treatment read_file already
+   gives a missing file. The actual security boundary for a sensitive
+   file like .claude/settings.json is still the classifier (or workspace
+   containment for an escape); this only keeps an agent from wasting a
+   turn finding that out the hard way. Found live 2026-09-04: an agent
+   listed its workspace, tried to read .claude/settings.json because it
+   was sitting right there in the listing, got denied, and its very next
+   turn came back completely empty -- no text, no tool call, no further
+   progress for hours.
 """
 
 import os
@@ -26,6 +42,8 @@ class PermissionDenied(Exception):
 
 _SAFE_READONLY_VERBS = {"ls", "cat", "pwd", "head", "tail", "grep", "find"}
 _SHELL_OPERATORS = ("|", ">", ">>", "&&", ";", "`", "$(")
+
+HIDDEN_FROM_LISTING = {".git", ".beads", ".claude", ".codex", ".agents"}
 
 
 def _is_safe_shell(command: str) -> bool:
@@ -55,7 +73,7 @@ def _is_within_workspace(path: str, workspace_root: str) -> bool:
 def is_statically_safe(tool_name: str, tool_args: dict, workspace_root: str) -> bool:
     if tool_name == "remember_fact":
         return True  # additive, non-destructive by construction
-    if tool_name == "read_file":
+    if tool_name in ("read_file", "list_directory"):
         return _is_within_workspace(tool_args.get("path", ""), workspace_root)
     if tool_name == "shell_exec":
         return _is_safe_shell(tool_args.get("command", ""))
@@ -65,3 +83,13 @@ def is_statically_safe(tool_name: str, tool_args: dict, workspace_root: str) -> 
 def check_within_workspace(path: str, workspace_root: str) -> None:
     if not _is_within_workspace(path, workspace_root):
         raise PermissionDenied(f"path escapes workspace: {path!r}")
+
+
+def is_infrastructure(path: str) -> bool:
+    """True if any component of `path` names harness/tool infrastructure
+    (see module docstring) rather than the project's own content. Checks
+    every component, not just the first, so a nested reference like
+    `src/../.claude/settings.json` or a deeper `sub/.beads/x` still
+    matches."""
+    parts = path.replace("\\", "/").strip("/").split("/")
+    return any(p in HIDDEN_FROM_LISTING for p in parts)

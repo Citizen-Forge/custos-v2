@@ -235,6 +235,11 @@ def build_workspace_tools(workspace_root: str) -> list:
         # and killed the graph, and the dispatcher restarted the same
         # ticket forever.
         permissions.check_within_workspace(path, workspace_root)
+        if permissions.is_infrastructure(path):
+            return (
+                f"{path!r} is harness/tool infrastructure ({', '.join(sorted(permissions.HIDDEN_FROM_LISTING))}), "
+                "not part of your project -- there's nothing there relevant to your ticket."
+            )
         resolved = os.path.abspath(os.path.join(workspace_root, path))
         try:
             with open(resolved, "r", encoding="utf-8") as f:
@@ -256,6 +261,11 @@ def build_workspace_tools(workspace_root: str) -> list:
     def write_file(path: str, content: str) -> str:
         """Write text content to a file, relative to the workspace root."""
         permissions.check_within_workspace(path, workspace_root)
+        if permissions.is_infrastructure(path):
+            return (
+                f"{path!r} is harness/tool infrastructure ({', '.join(sorted(permissions.HIDDEN_FROM_LISTING))}), "
+                "not part of your project -- nothing there should be written to."
+            )
         resolved = os.path.abspath(os.path.join(workspace_root, path))
         try:
             os.makedirs(os.path.dirname(resolved) or workspace_root, exist_ok=True)
@@ -267,7 +277,37 @@ def build_workspace_tools(workspace_root: str) -> list:
             return f"could not write {path!r}: {e}"
         return f"wrote {len(content)} bytes to {path}"
 
-    return [shell_exec, read_file, write_file]
+    @tool
+    def list_directory(path: str = ".") -> str:
+        """List a directory's contents, relative to the workspace root.
+        Omits harness/tool infrastructure (.git, .beads, .claude, .codex,
+        .agents) -- it isn't your project's own content, and at least one
+        of those (.claude/settings.json) may carry credentials. Use this
+        instead of `ls` to orient yourself, so you don't spend a turn
+        finding out the hard way that something is off-limits."""
+        permissions.check_within_workspace(path, workspace_root)
+        resolved = os.path.abspath(os.path.join(workspace_root, path))
+        try:
+            entries = sorted(os.listdir(resolved))
+        except FileNotFoundError:
+            return f"no such directory: {path!r} (relative to your workspace root)"
+        except NotADirectoryError:
+            return f"{path!r} is a file, not a directory"
+        except OSError as e:
+            return f"could not list {path!r}: {e}"
+
+        visible = [e for e in entries if e not in permissions.HIDDEN_FROM_LISTING]
+        hidden = len(entries) - len(visible)
+        lines = [
+            f"{name}/" if os.path.isdir(os.path.join(resolved, name)) else name
+            for name in visible
+        ] or ["(empty)"]
+        if hidden:
+            noun = "entry" if hidden == 1 else "entries"
+            lines.append(f"({hidden} {noun} hidden -- harness/tool infrastructure, not your project's content)")
+        return "\n".join(lines)
+
+    return [shell_exec, read_file, write_file, list_directory]
 
 
 # Tools that do not touch the project workspace and so need no binding.
