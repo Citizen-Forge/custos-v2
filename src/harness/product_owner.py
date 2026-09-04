@@ -57,6 +57,15 @@ and finish, not vague restatements of the idea. Match the depth of breakdown to 
 actual size -- a small idea might just be one epic with a couple of stories, not three empty \
 tiers for their own sake.
 
+If any story in the breakdown must exist before others can even be attempted -- project \
+scaffolding the whole codebase needs, a shared data model other stories import, an API \
+contract other stories implement against -- create that story first and call add_dependency \
+for every story it blocks, using the real ids both calls just returned. Do NOT just describe \
+the ordering in a story's title or description: dispatch only ever reads `bd ready`, which \
+only reads dependency edges, never prose, so an undeclared prerequisite gets handed out to a \
+seat right alongside everything else -- wasted work against a project that cannot build or \
+test yet.
+
 3. Prioritization: there is deliberately only one shared pool of work capacity across every \
 project (see list_projects for current priorities and any human guidance recorded there). Do \
 NOT spread assignment evenly across all projects -- work the highest-priority project's ready \
@@ -175,6 +184,22 @@ def build_tools(conn, requesting_model):
                                acceptance_criteria=acceptance_criteria or None)
         return f"created subtask {subtask['id']} under {epic_id}: {subtask['title']}"
 
+    @tool
+    def add_dependency(blocked_id: str, blocker_id: str) -> str:
+        """Declare that `blocked_id` cannot start until `blocker_id` is done -- e.g. every
+        other story in a fresh project depends on its scaffolding story, or a story that
+        implements an API depends on the story that defines its contract.
+
+        Call this during breakdown for every real prerequisite you can see, right after
+        creating both ends. Writing "depends on X" into a description does nothing on its
+        own -- only a real dependency edge keeps `bd ready` (what dispatch actually reads)
+        from handing the blocked story to a seat before its prerequisite exists."""
+        try:
+            beads.add_dependency(blocked_id, blocker_id, actor=ROLE)
+        except Exception as e:
+            return f"error: {e}"
+        return f"{blocked_id} now depends on {blocker_id} -- blocked until it closes"
+
     return [
         list_seats,
         list_unassigned_tickets,
@@ -185,6 +210,7 @@ def build_tools(conn, requesting_model):
         create_project,
         create_epic,
         add_subtask_to_epic,
+        add_dependency,
     ]
 
 

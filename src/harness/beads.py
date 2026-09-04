@@ -7,7 +7,8 @@ repo's own container, not assumed from docs:
 - `bd ready`, `bd update --claim`, `bd show`, `bd close`, `bd list` all
   return a JSON *array* even for a single issue -- index [0] when acting
   on one specific id.
-- `bd create` and `bd remember` return a single JSON *object*, no array.
+- `bd create` and `bd remember` return a single JSON *object*, no array;
+  so does `bd dep add`.
 - `bd prime` ignores --json for its main body -- it returns a Markdown
   blob meant to be pasted straight into an agent's context, not parsed --
   used as-is when seeding a new thread's first message.
@@ -109,6 +110,36 @@ def set_metadata(issue_id: str, key: str, value: str, actor: str = DEFAULT_ACTOR
     return json.loads(
         _run(["update", issue_id, "--set-metadata", f"{key}={value}"], actor=actor)
     )[0]
+
+
+def add_dependency(blocked_id: str, blocker_id: str, actor: str = DEFAULT_ACTOR) -> dict:
+    """Record that `blocked_id` cannot be dispatched until `blocker_id`
+    closes -- `bd dep add <blocked> <blocker>`, bd's own phrasing (the
+    first id "depends on" the second).
+
+    This is what makes `bd ready` actually enforce an ordering declared
+    at breakdown time, rather than leaving it as prose in a description
+    that no scan reads. Found live 2026-09-04: a scaffolding ticket's
+    "everything else depends on this" was pure description text with no
+    graph edge behind it, so `bd ready` handed out every downstream
+    story right alongside it -- dispatcher.py's next_unassigned_ticket
+    preemption logic covers the same gap at dispatch time, but a real
+    edge is what stops `bd ready` from ever offering the blocked work in
+    the first place.
+
+    Both ids are checked with `show` first: `bd dep add` does NOT
+    validate that either side exists -- confirmed live 2026-09-04, it
+    silently wired an edge to a nonexistent id and reported "added". An
+    LLM tool call is exactly the caller likely to pass a typo'd or
+    hallucinated id, and an edge to one that can never close would wedge
+    the blocked ticket forever with no obvious cause. `show` already
+    raises BeadsError for a missing id, the same failure shape every
+    other caller here expects."""
+    show(blocked_id)
+    show(blocker_id)
+    return json.loads(
+        _run(["dep", "add", blocked_id, blocker_id], actor=actor)
+    )
 
 
 def declined_by(issue: dict) -> list[str]:

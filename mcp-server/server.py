@@ -159,6 +159,19 @@ def create_story(epic_id: str, title: str, description: str, priority: int | Non
 
 
 @mcp.tool()
+def create_dependency(blocked_id: str, blocker_id: str) -> str:
+    """Declare that blocked_id cannot start until blocker_id is done -- e.g. every other
+    story in a fresh project depends on its scaffolding story, or a story that implements
+    an API depends on the story that defines its contract.
+
+    Call this during breakdown for every real prerequisite you can see, right after
+    creating both ends. Writing "depends on X" into a story's description does nothing on
+    its own -- only a real dependency edge keeps the harness's dispatcher from handing the
+    blocked story to a seat before its prerequisite exists."""
+    return _call("POST", f"/issues/{blocked_id}/dependencies", json={"blocker_id": blocker_id})
+
+
+@mcp.tool()
 def set_priority(issue_id: str, priority: int) -> str:
     """Change the priority of an existing project, epic or story. priority is 0-4
     (0=highest). Use this to reorder a backlog after it exists -- e.g. when the user says

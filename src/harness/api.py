@@ -89,6 +89,10 @@ class PriorityBody(BaseModel):
     priority: int
 
 
+class DependencyBody(BaseModel):
+    blocker_id: str
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Found live: without this, a fresh workspace (no .beads yet) 500s on
@@ -419,6 +423,22 @@ def create_story(epic_id: str, body: CreateStoryBody):
         raise HTTPException(404, str(e)) from e
     _invalidate_project_tree()
     return story
+
+
+@router.post("/issues/{issue_id}/dependencies")
+def add_issue_dependency(issue_id: str, body: DependencyBody):
+    """Mirrors product_owner.py's add_dependency tool: issue_id cannot be
+    dispatched until body.blocker_id closes. This is what makes `bd
+    ready` (what dispatch actually reads) respect an ordering declared at
+    breakdown time -- see beads.add_dependency's docstring. A 400 covers
+    both an unknown id and a cycle; bd's own dep-cycle check surfaces as
+    a BeadsError like any other malformed `bd` call."""
+    try:
+        result = beads.add_dependency(issue_id, body.blocker_id)
+    except beads.BeadsError as e:
+        raise HTTPException(400, str(e)) from e
+    _invalidate_project_tree()
+    return result
 
 
 @router.get("/tickets/{issue_id}")

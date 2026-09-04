@@ -293,6 +293,34 @@ def test_create_story_endpoint_404s_for_unknown_epic():
     assert response.status_code == 404
 
 
+def test_add_dependency_endpoint_blocks_bd_ready_until_the_blocker_closes():
+    beads.ensure_initialized()
+    project = beads.create("api-test dep project", "goal", issue_type="epic", priority=2)
+    epic = beads.create("api-test dep epic", "epic goal", issue_type="epic", parent=project["id"])
+    blocker = beads.create("api-test scaffold", "sets up the repo", parent=epic["id"])
+    blocked = beads.create("api-test downstream", "needs the scaffold", parent=epic["id"])
+
+    response = client.post(
+        f"/issues/{blocked['id']}/dependencies", json={"blocker_id": blocker["id"]}
+    )
+
+    assert response.status_code == 200
+    ready_ids = {i["id"] for i in beads.ready()}
+    assert blocked["id"] not in ready_ids
+    assert blocker["id"] in ready_ids
+
+
+def test_add_dependency_endpoint_404s_for_an_unknown_blocker():
+    beads.ensure_initialized()
+    story = beads.create("api-test dep unknown blocker", "x")
+
+    response = client.post(
+        f"/issues/{story['id']}/dependencies", json={"blocker_id": "does-not-exist-xyz"}
+    )
+
+    assert response.status_code == 400
+
+
 def test_avatar_endpoint_404s_when_no_generated_avatar_exists():
     response = client.get("/avatars/never-generated-seat")
     assert response.status_code == 404

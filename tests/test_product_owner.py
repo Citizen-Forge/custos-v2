@@ -43,7 +43,7 @@ def test_list_seats_tool_includes_outcomes():
     seat_id = f"test-seat-{uuid.uuid4().hex[:8]}"
     seats.create(conn, seat_id, "frontend specialist", created_by="test")
 
-    list_seats, _, _, _, _, _, _, _, _ = build_tools(conn, requesting_model=None)
+    list_seats, _, _, _, _, _, _, _, _, _ = build_tools(conn, requesting_model=None)
     result = list_seats.invoke({})
 
     assert seat_id in result
@@ -55,7 +55,7 @@ def test_list_unassigned_tickets_tool():
     beads.ensure_initialized()
     unassigned = beads.create("needs triage", "x")
 
-    _, list_unassigned, _, _, _, _, _, _, _ = build_tools(_conn(), requesting_model=None)
+    _, list_unassigned, _, _, _, _, _, _, _, _ = build_tools(_conn(), requesting_model=None)
     result = list_unassigned.invoke({})
 
     assert unassigned["id"] in result
@@ -67,7 +67,7 @@ def test_assign_ticket_tool_requires_existing_seat():
     beads.ensure_initialized()
     ticket = beads.create("some work", "x")
 
-    _, _, assign_ticket, _, _, _, _, _, _ = build_tools(conn, requesting_model=None)
+    _, _, assign_ticket, _, _, _, _, _, _, _ = build_tools(conn, requesting_model=None)
     result = assign_ticket.invoke({"issue_id": ticket["id"], "seat_id": "does-not-exist"})
 
     assert "error" in result.lower()
@@ -81,7 +81,7 @@ def test_assign_ticket_tool_assigns_when_seat_exists():
     seats.create(conn, seat_id, "some specialty", created_by="test")
     ticket = beads.create("some work", "x")
 
-    _, _, assign_ticket, _, _, _, _, _, _ = build_tools(conn, requesting_model=None)
+    _, _, assign_ticket, _, _, _, _, _, _, _ = build_tools(conn, requesting_model=None)
     result = assign_ticket.invoke({"issue_id": ticket["id"], "seat_id": seat_id})
 
     assert seat_id in result
@@ -100,7 +100,7 @@ def test_check_model_options_tool_shows_slider_and_eligible_providers(monkeypatc
     # another test elsewhere in the session may have already changed it.
     settings.set_cost_slider(conn, 17)
 
-    _, _, _, _, check_model_options, _, _, _, _ = build_tools(conn, requesting_model=None)
+    _, _, _, _, check_model_options, _, _, _, _, _ = build_tools(conn, requesting_model=None)
     result = check_model_options.invoke({})
 
     assert "cost slider: 17/100" in result
@@ -110,7 +110,7 @@ def test_check_model_options_tool_shows_slider_and_eligible_providers(monkeypatc
 
 def test_list_projects_tool_shows_priority_ordering():
     beads.ensure_initialized()
-    _, _, _, _, _, list_projects, create_project, _, _ = build_tools(_conn(), requesting_model=None)
+    _, _, _, _, _, list_projects, create_project, _, _, _ = build_tools(_conn(), requesting_model=None)
 
     create_project.invoke({"name": "low priority idea", "description": "someday", "priority": 4})
     create_project.invoke({"name": "urgent idea", "description": "now", "priority": 0})
@@ -125,7 +125,7 @@ def test_list_projects_tool_shows_priority_ordering():
 
 def test_create_project_tool_creates_a_top_level_issue_with_priority():
     beads.ensure_initialized()
-    _, _, _, _, _, _, create_project, _, _ = build_tools(_conn(), requesting_model=None)
+    _, _, _, _, _, _, create_project, _, _, _ = build_tools(_conn(), requesting_model=None)
 
     result = create_project.invoke({"name": "new project", "description": "the goal", "priority": 1})
 
@@ -138,7 +138,7 @@ def test_create_project_tool_creates_a_top_level_issue_with_priority():
 
 def test_create_epic_tool_requires_a_project_parent():
     beads.ensure_initialized()
-    _, _, _, _, _, _, create_project, create_epic, _ = build_tools(_conn(), requesting_model=None)
+    _, _, _, _, _, _, create_project, create_epic, _, _ = build_tools(_conn(), requesting_model=None)
 
     project_result = create_project.invoke({"name": "a project", "description": "x", "priority": 2})
     project_id = project_result.split()[2]
@@ -154,7 +154,7 @@ def test_create_epic_tool_requires_a_project_parent():
 
 def test_add_subtask_to_epic_tool_parents_under_the_real_epic():
     beads.ensure_initialized()
-    _, _, _, _, _, _, create_project, create_epic, add_subtask_to_epic = build_tools(_conn(), requesting_model=None)
+    _, _, _, _, _, _, create_project, create_epic, add_subtask_to_epic, _ = build_tools(_conn(), requesting_model=None)
 
     project_id = create_project.invoke({"name": "a project", "description": "x", "priority": 2}).split()[2]
     epic_result = create_epic.invoke({"project_id": project_id, "title": "big idea", "description": "the overall goal"})
@@ -171,12 +171,44 @@ def test_add_subtask_to_epic_tool_parents_under_the_real_epic():
     assert epic_id in shown["id"]  # Beads' hierarchical id convention, e.g. epic-id.1
 
 
+def test_add_dependency_tool_blocks_bd_ready_until_the_blocker_closes():
+    """The whole point of the tool: an undeclared prerequisite still lets
+    `bd ready` hand out the dependent story (see dispatcher.py's
+    starvation writeup, 2026-09-04) -- a real edge must actually remove
+    it from the ready pool."""
+    beads.ensure_initialized()
+    _, _, _, _, _, _, create_project, create_epic, add_subtask_to_epic, add_dependency = (
+        build_tools(_conn(), requesting_model=None)
+    )
+
+    project_id = create_project.invoke({"name": "dep project", "description": "x", "priority": 2}).split()[2]
+    epic_id = create_epic.invoke(
+        {"project_id": project_id, "title": "an epic", "description": "x"}
+    ).split()[2]
+    scaffold_id = add_subtask_to_epic.invoke(
+        {"epic_id": epic_id, "title": "scaffold", "description": "sets everything up"}
+    ).split()[2]
+    downstream_id = add_subtask_to_epic.invoke(
+        {"epic_id": epic_id, "title": "downstream work", "description": "needs the scaffold"}
+    ).split()[2]
+
+    ready_ids_before = {i["id"] for i in beads.ready()}
+    assert downstream_id in ready_ids_before, "not blocked yet -- sanity check"
+
+    result = add_dependency.invoke({"blocked_id": downstream_id, "blocker_id": scaffold_id})
+
+    assert downstream_id in result and scaffold_id in result
+    ready_ids_after = {i["id"] for i in beads.ready()}
+    assert downstream_id not in ready_ids_after, "bd ready must respect the new edge"
+    assert scaffold_id in ready_ids_after, "the blocker itself is unaffected"
+
+
 def test_request_new_seat_tool_delegates_to_meta_agent():
     conn = _conn()
     new_seat_id = f"test-seat-{uuid.uuid4().hex[:8]}"
     requesting_model = FakeModel(json.dumps({"seat_id": new_seat_id, "system_prompt": "specialize in Y"}))
 
-    _, _, _, request_new_seat, _, _, _, _, _ = build_tools(conn, requesting_model)
+    _, _, _, request_new_seat, _, _, _, _, _, _ = build_tools(conn, requesting_model)
     result = request_new_seat.invoke({"specialty_description": "does Y"})
 
     assert new_seat_id in result

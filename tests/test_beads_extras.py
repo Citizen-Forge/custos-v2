@@ -9,8 +9,40 @@ beads.py assumes.
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
+import pytest
+
 from harness import beads
 from harness.graph import build_graph_from_model
+
+
+def test_add_dependency_blocks_bd_ready_until_the_blocker_closes():
+    beads.ensure_initialized()
+    blocker = beads.create("dep test scaffold", "sets things up")
+    blocked = beads.create("dep test downstream", "needs the scaffold")
+
+    result = beads.add_dependency(blocked["id"], blocker["id"])
+
+    assert result["status"] == "added"
+    ready_ids = {i["id"] for i in beads.ready()}
+    assert blocked["id"] not in ready_ids
+    assert blocker["id"] in ready_ids
+
+    beads.close(blocker["id"])
+    ready_ids = {i["id"] for i in beads.ready()}
+    assert blocked["id"] in ready_ids, "must unblock once the blocker closes"
+
+
+def test_add_dependency_rejects_a_nonexistent_blocker():
+    """`bd dep add` itself does not validate either id -- confirmed live
+    2026-09-04, it silently wires an edge to a typo'd id. An LLM tool
+    call is exactly the caller likely to pass one, so the wrapper must
+    catch it rather than wedge a ticket on a blocker that can never
+    close."""
+    beads.ensure_initialized()
+    story = beads.create("dep test orphan blocked", "x")
+
+    with pytest.raises(beads.BeadsError):
+        beads.add_dependency(story["id"], "does-not-exist-xyz")
 
 
 def test_search_finds_related_issues_by_keyword():
