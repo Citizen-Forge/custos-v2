@@ -57,6 +57,79 @@ def test_unassigned_work_is_detected():
 # -- capacity ---------------------------------------------------------
 
 
+def test_next_unassigned_ticket_prefers_higher_priority():
+    project = beads.create("prio proj", "d", issue_type="epic", priority=0)
+    low = beads.create("low", "d", parent=project["id"], priority=3)
+    urgent = beads.create("urgent", "d", parent=project["id"], priority=0)
+    try:
+        picked = dispatcher.next_unassigned_ticket()
+        assert picked is not None and picked["id"] == urgent["id"]
+    finally:
+        # Do not leave a high-priority unassigned ticket in the shared
+        # workspace: tick() now routes to the product-owner when one
+        # outranks the assigned work, which would break other tests.
+        beads.close(urgent["id"])
+        beads.close(low["id"])
+
+
+# -- priority preemption of an assigned backlog ----------------------
+
+
+def test_higher_priority_unassigned_work_preempts_assigned_backlog(monkeypatch):
+    """A P0 ticket no seat has been earmarked for must be brokered ahead
+    of a seat's already-assigned P2 backlog -- otherwise it sits at the
+    top of `bd ready` forever while lower-priority assigned work runs.
+    Regression for the Silent Run scaffolding starvation, 2026-09-04."""
+    project = beads.create("preempt proj", "d", issue_type="epic", priority=0)
+    backlog = beads.create("assigned p2", "d", parent=project["id"], priority=2)
+    beads.assign_to_seat(backlog["id"], "busy-seat")
+    urgent = beads.create("urgent p0", "d", parent=project["id"], priority=0)
+
+    # Pin what each scan sees; the shared test workspace carries leftovers
+    # from other tests (same reason test_toolchain.py pins next_assigned).
+    monkeypatch.setattr(
+        dispatcher, "next_assigned_ticket",
+        lambda: (beads.show(backlog["id"]), "busy-seat"),
+    )
+    monkeypatch.setattr(
+        dispatcher, "next_unassigned_ticket", lambda: beads.show(urgent["id"])
+    )
+    monkeypatch.setattr(
+        dispatcher.Dispatcher, "wake_product_owner", lambda self: "brokered urgent p0"
+    )
+
+    try:
+        d = _dispatcher(max_agents=1)
+        assert d.tick() == "brokered"
+        assert beads.show(backlog["id"])["status"] == "open", "assigned P2 must not be claimed"
+    finally:
+        beads.close(urgent["id"])
+
+
+def test_equal_priority_assigned_work_is_not_preempted(monkeypatch):
+    """At equal priority the assigned ticket keeps precedence: a seat's
+    in-flight backlog is drained, not churned by same-priority brokering."""
+    project = beads.create("nopreempt proj", "d", issue_type="epic", priority=1)
+    backlog = beads.create("assigned a", "d", parent=project["id"], priority=2)
+    beads.assign_to_seat(backlog["id"], "seat-q")
+    other = beads.create("unassigned b", "d", parent=project["id"], priority=2)
+
+    monkeypatch.setattr(
+        dispatcher, "next_assigned_ticket",
+        lambda: (beads.show(backlog["id"]), "seat-q"),
+    )
+    monkeypatch.setattr(
+        dispatcher, "next_unassigned_ticket", lambda: beads.show(other["id"])
+    )
+
+    d = _dispatcher(max_agents=1)
+    # No toolchain declared, so preflight passes and it tries to start the
+    # assigned ticket -- a real claim, no model work (the thread fails to
+    # connect and releases its slot, same as test_start_agent_claims).
+    assert d.tick() in ("started", "could not start")
+    assert beads.show(backlog["id"])["status"] == "in_progress"
+
+
 def test_capacity_respects_max_agents():
     d = _dispatcher(max_agents=2)
     assert d.capacity() == 2

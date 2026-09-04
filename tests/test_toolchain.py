@@ -72,13 +72,15 @@ def test_dispatch_refuses_a_ticket_whose_toolchain_is_missing(monkeypatch):
     beads.assign_to_seat(story["id"], "tc-seat")
     toolchain.set_for_project(project["id"], ["definitely-not-installed"])
 
-    # Pin which ticket dispatch sees. Without this the test passes alone
-    # and fails in the full suite: next_assigned_ticket scans the whole
-    # workspace, so whichever assigned ticket other tests happened to
-    # leave behind gets picked first.
+    # Pin which tickets dispatch sees. Without this the test passes alone
+    # and fails in the full suite: both scans walk the whole workspace,
+    # so whichever tickets other tests left behind get picked -- and a
+    # leftover higher-priority unassigned one would now route tick() to
+    # the product-owner instead of the toolchain gate.
     monkeypatch.setattr(
         dispatcher, "next_assigned_ticket", lambda: (beads.show(story["id"]), "tc-seat")
     )
+    monkeypatch.setattr(dispatcher, "next_unassigned_ticket", lambda: None)
 
     d = dispatcher.Dispatcher("postgresql://unused", RoutingTable({}), max_agents=1)
     assert d.tick() == "blocked on toolchain"

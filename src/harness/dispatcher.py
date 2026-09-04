@@ -223,18 +223,55 @@ def next_assigned_ticket() -> tuple[dict | None, str | None]:
     return None, None
 
 
-def has_unassigned_work() -> bool:
-    """Held projects are excluded so the product-owner is not woken to
-    broker work no agent could start."""
+def next_unassigned_ticket() -> dict | None:
+    """The highest-priority ready ticket no seat has been earmarked for
+    yet, subject to the same dispatchability and dispatch-hold filters as
+    next_assigned_ticket.
+
+    `bd ready` is already priority-sorted (0 = highest), but this does
+    not trust that -- it scans and keeps the lowest priority number seen,
+    so a change to bd's default ordering cannot silently break the
+    preemption check in tick()."""
     from . import toolchain
 
     held = held_projects()
-    return any(
-        dispatchable(i)
-        and beads.assigned_seat(i) is None
-        and toolchain.project_id_for(i["id"]) not in held
-        for i in beads.ready()
-    )
+    best: dict | None = None
+    for issue in beads.ready():
+        if not dispatchable(issue):
+            continue
+        if beads.assigned_seat(issue) is not None:
+            continue
+        if toolchain.project_id_for(issue["id"]) in held:
+            continue
+        if best is None or _priority(issue) < _priority(best):
+            best = issue
+    return best
+
+
+def has_unassigned_work() -> bool:
+    """Held projects are excluded so the product-owner is not woken to
+    broker work no agent could start."""
+    return next_unassigned_ticket() is not None
+
+
+def _priority(issue: dict) -> int:
+    """bd-native priority, 0 = highest. A missing or non-int value sorts
+    last, so a ticket that has never been triaged can never preempt one
+    that has."""
+    p = issue.get("priority")
+    return p if isinstance(p, int) else 99
+
+
+def _outranks(challenger: dict | None, incumbent: dict | None) -> bool:
+    """True if `challenger` should be brokered ahead of the already-
+    assigned `incumbent`. Strictly-better priority only: at equal
+    priority the assigned ticket keeps precedence, so a seat's in-flight
+    backlog is drained rather than churned by same-priority preemption."""
+    if challenger is None:
+        return False
+    if incumbent is None:
+        return True
+    return _priority(challenger) < _priority(incumbent)
 
 
 def running_agents() -> list[dict]:
@@ -457,39 +494,63 @@ class Dispatcher:
             log.exception("product-owner dispatch session failed")
             return None
 
+    def _start_assigned(self, issue: dict, seat_id: str) -> str:
+        """Run one already-assigned ticket, applying the preflight gates.
+
+        Preflight exists because of a real failure -- agents were
+        dispatched onto TypeScript tickets in an image with no Node,
+        burned hours of inference, and produced work nothing could build
+        or test. Better to refuse loudly than to look busy. Split out of
+        tick() so the same gates apply on both paths that reach it: the
+        normal one, and the fallback when nothing unassigned outranks
+        this ticket."""
+        if targets_harness(issue["id"]):
+            # Harness-source work goes through self-modification, not
+            # through a workspace agent that structurally cannot do it.
+            return "self-mod" if self.start_self_modification(issue, seat_id) else "could not start"
+
+        hold = project_hold(issue["id"])
+        if hold:
+            log.error("not starting %s: project on dispatch hold -- %s", issue["id"], hold)
+            return "on hold"
+
+        gaps = toolchain.check_ticket(issue["id"])
+        if gaps:
+            log.error(
+                "not starting %s: project toolchain missing %s",
+                issue["id"], ", ".join(gaps),
+            )
+            return "blocked on toolchain"
+        return "started" if self.start_agent(seat_id, issue) else "could not start"
+
     def tick(self) -> str:
         """One cycle. Returns what it did, which makes the loop testable
         without running it."""
         if self.capacity() <= 0:
             return "at capacity"
 
-        issue, seat_id = next_assigned_ticket()
-        if issue is not None:
-            # Preflight: never start work the environment cannot support.
-            # This exists because of a real failure -- agents were
-            # dispatched onto TypeScript tickets in an image with no Node,
-            # burned hours of inference, and produced work nothing could
-            # build or test. Better to refuse loudly than to look busy.
-            if targets_harness(issue["id"]):
-                # Harness-source work goes through self-modification, not
-                # through a workspace agent that structurally cannot do it.
-                return "self-mod" if self.start_self_modification(issue, seat_id) else "could not start"
+        assigned, seat_id = next_assigned_ticket()
 
-            hold = project_hold(issue["id"])
-            if hold:
-                log.error("not starting %s: project on dispatch hold -- %s", issue["id"], hold)
-                return "on hold"
-
-            gaps = toolchain.check_ticket(issue["id"])
-            if gaps:
-                log.error(
-                    "not starting %s: project toolchain missing %s",
-                    issue["id"], ", ".join(gaps),
-                )
-                return "blocked on toolchain"
-            return "started" if self.start_agent(seat_id, issue) else "could not start"
-
-        if not has_unassigned_work():
+        # Already-assigned work is drained before the product-owner is
+        # woken to broker more -- UNLESS something unassigned strictly
+        # outranks the best assigned ticket. Without that exception a
+        # freshly created high-priority ticket that no seat has been
+        # earmarked for sits at the top of `bd ready` indefinitely while
+        # lower-priority assigned work runs ahead of it: tick() keeps
+        # taking the assigned branch and never reaches wake_product_owner.
+        # Observed live 2026-09-04 -- the Silent Run scaffolding ticket
+        # (P0, unassigned, rank 1 in `bd ready`) was starved for days
+        # behind ~20 pre-assigned P2 stories.
+        if assigned is not None:
+            challenger = next_unassigned_ticket()
+            if not _outranks(challenger, assigned):
+                return self._start_assigned(assigned, seat_id)
+            log.info(
+                "unassigned %s (P%s) outranks assigned %s (P%s) -- brokering it first",
+                challenger["id"], _priority(challenger),
+                assigned["id"], _priority(assigned),
+            )
+        elif not has_unassigned_work():
             return "idle"
 
         log.info("capacity free and unassigned work waiting -- waking product-owner")
