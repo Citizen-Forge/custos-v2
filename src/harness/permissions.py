@@ -129,7 +129,12 @@ _DANGEROUS_ENV_PREFIXES = ("LD_", "DYLD_")
 _DANGEROUS_ENV = {"PATH", "IFS", "BASH_ENV", "ENV", "SHELLOPTS", "PS4", "PROMPT_COMMAND"}
 
 _SUBSTITUTION_MARKERS = ("$(", "`", "<(", ">(")
-_SEPARATORS = {"&&", "||", ";", "|", "&"}
+_SEGMENT_SEPARATORS = {"&&", "||", ";", ";;", "|", "|&", "&", "\n"}
+_REDIRECT_OPS = {">", ">>", "<", "&>", "&>>", ">&", "<>"}
+_GROUPING = {"(", ")", "{", "}"}
+# Redirect targets that are fine even though they're absolute / outside
+# the tree: the standard devices and any /dev/fd/N.
+_OK_REDIRECT_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin", "/dev/tty"}
 
 
 def _is_within_workspace(path: str, workspace_root: str) -> bool:
@@ -209,27 +214,64 @@ def _segment_ok(seg: list[str], workspace_root: str | None) -> bool:
     return True
 
 
+def _tokenize(command: str) -> list[str] | None:
+    """Operator-aware tokenization. `shlex.split` is only a *word*
+    splitter -- it leaves `pwd;` as one token -- so use the lexer in
+    punctuation-chars mode, which emits `;` `&&` `|` `>` `(` ... as their
+    own tokens while still respecting quotes. Returns None if the command
+    can't be lexed (unbalanced quotes)."""
+    lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    try:
+        return list(lex)
+    except ValueError:
+        return None
+
+
+def _ok_redirect_target(target: str, workspace_root: str | None) -> bool:
+    if target.isdigit():
+        return True  # `2>&1` style fd dup
+    if target in _OK_REDIRECT_TARGETS or target.startswith("/dev/fd/"):
+        return True
+    if workspace_root is None:
+        return True
+    return _arg_stays_in_workspace(target, workspace_root)
+
+
 def _shell_is_allowlisted(command: str, workspace_root: str | None) -> bool:
     command = command.strip()
     if not command:
         return False
     if any(m in command for m in _SUBSTITUTION_MARKERS):
         return False  # command / process substitution -- let the classifier look
-    try:
-        tokens = shlex.split(command, comments=False, posix=True)
-    except ValueError:
-        return False  # unbalanced quotes etc.
+
+    tokens = _tokenize(command)
     if not tokens:
         return False
 
     seg: list[str] = []
-    for tok in tokens:
-        if tok in _SEPARATORS:
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in _GROUPING:
+            return False  # subshell / brace group -- too much for the fast path
+        if tok in _SEGMENT_SEPARATORS:
             if not _segment_ok(seg, workspace_root):
                 return False
             seg = []
+        elif tok in _REDIRECT_OPS or (tok.rstrip("0123456789") in _REDIRECT_OPS and any(ch.isdigit() for ch in tok)):
+            # `>`, `2>`, `>>`, `&>` ...  -- drop the fd number that lexed
+            # onto the previous token, and workspace-check the target.
+            if seg and seg[-1].isdigit():
+                seg.pop()
+            target = tokens[i + 1] if i + 1 < len(tokens) else None
+            if target is None or not _ok_redirect_target(target, workspace_root):
+                return False
+            i += 2
+            continue
         else:
             seg.append(tok)
+        i += 1
     return _segment_ok(seg, workspace_root)
 
 
