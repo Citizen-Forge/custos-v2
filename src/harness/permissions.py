@@ -88,6 +88,10 @@ _ALLOWED_VERBS = {
     "awk", "tee", "patch", "install", "mktemp", "unzip", "tar",
     # harmless shell builtins
     "cd", "export", "set", "unset", "read", "shift", "xargs", "time",
+    # the beads issue CLI: bd prime tells every agent to run `bd ready`,
+    # `bd show`, `bd close` ... it operates on the local .beads DB. Only
+    # `bd dolt` reaches a remote, and that's screened below like git.
+    "bd",
 }
 
 # Never fast-pathed. Privilege escalation, disk/process/system control,
@@ -201,6 +205,10 @@ def _segment_ok(seg: list[str], workspace_root: str | None) -> bool:
     if verb == "git":
         sub = next((a for a in rest if not a.startswith("-")), None)
         if sub in _GIT_REMOTE_SUBCOMMANDS:
+            return False
+    elif verb == "bd":
+        sub = next((a for a in rest if not a.startswith("-")), None)
+        if sub == "dolt":  # `bd dolt push/pull/...` -- remote sync
             return False
     elif verb not in _ALLOWED_VERBS:
         return False

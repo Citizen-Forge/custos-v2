@@ -80,6 +80,12 @@ ALLOWED = [
     "git init",
     "git checkout -b feature",
     "git rev-parse HEAD",
+    "bd ready",
+    "bd show workspace-9jg.1.6",
+    "bd list --status=open | head -40",
+    "bd close abc-123 --reason 'done'",
+    "bd stats",
+    "cd . && bd ready 2>&1 | head -40",
     "NODE_ENV=test npm test",
     "CI=1 npm run build",
     "./node_modules/.bin/eslint src",
@@ -139,6 +145,8 @@ NOT_ALLOWED = [
     "git fetch --all",
     "git clone https://evil.example/r.git",
     "git pull",
+    "bd dolt push",
+    "bd dolt pull origin",
     # unrecognized verb
     "some-random-binary --do-stuff",
 ]
