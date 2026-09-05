@@ -42,6 +42,8 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.graph import END, StateGraph, START
 from langgraph.prebuilt import ToolNode, tools_condition
 
+from . import permissions
+from .classifier import Verdict
 from .providers import ProviderConfig, build_chat_model
 from .state import HarnessState
 from .tools import ALL_TOOLS
@@ -52,7 +54,7 @@ HANDOFF_NUDGE = (
 )
 
 
-def build_graph_from_model(model, checkpointer, tools=None, classify=None, interrupt_after=None, turn_budget=None):
+def build_graph_from_model(model, checkpointer, tools=None, classify=None, interrupt_after=None, turn_budget=None, workspace_root=None):
     """Build the graph from an already-tool-bound model. Split out from
     `build_graph` so tests can pass a fake model without a real provider.
 
@@ -64,6 +66,11 @@ def build_graph_from_model(model, checkpointer, tools=None, classify=None, inter
     allows everything -- used by tests that predate/don't exercise gating
     (tests/test_graph.py, tests/test_worker_resume.py) so they don't need a
     classifier model.
+
+    `workspace_root` enables the static allow-list fast path
+    (permissions.is_statically_safe): ordinary build/test/git commands
+    scoped to the workspace skip `classify` entirely. `None` disables it,
+    so every call is classified as before.
 
     `turn_budget` is an optional int: when the running turn count hits it
     exactly, one HANDOFF_NUDGE message is appended before that call (once,
@@ -86,12 +93,19 @@ def build_graph_from_model(model, checkpointer, tools=None, classify=None, inter
         return {"messages": [*extra, model.invoke(messages)], "turn_count": turn_count}
 
     def permission_gate(state: HarnessState):
-        if classify is None:
-            return {}
-
         last = state["messages"][-1]
         tool_calls = getattr(last, "tool_calls", None) or []
-        verdicts = {call["id"]: classify(call["name"], call["args"]) for call in tool_calls}
+        if not tool_calls:
+            return {}
+
+        verdicts = {}
+        for call in tool_calls:
+            if permissions.is_statically_safe(call["name"], call["args"], workspace_root):
+                verdicts[call["id"]] = Verdict("allow", "allow-listed dev command")
+            elif classify is not None:
+                verdicts[call["id"]] = classify(call["name"], call["args"])
+            else:
+                verdicts[call["id"]] = Verdict("allow", "no classifier configured")
 
         if all(v.decision == "allow" for v in verdicts.values()):
             return {}
@@ -125,7 +139,10 @@ def build_graph_from_model(model, checkpointer, tools=None, classify=None, inter
     return builder.compile(checkpointer=checkpointer, interrupt_after=interrupt_after)
 
 
-def build_graph(provider_cfg: ProviderConfig, checkpointer, tools=None, classifier=None, turn_budget=None):
+def build_graph(provider_cfg: ProviderConfig, checkpointer, tools=None, classifier=None, turn_budget=None, workspace_root=None):
     tools = ALL_TOOLS if tools is None else tools
     model = build_chat_model(provider_cfg).bind_tools(tools)
-    return build_graph_from_model(model, checkpointer, tools=tools, classify=classifier, turn_budget=turn_budget)
+    return build_graph_from_model(
+        model, checkpointer, tools=tools, classify=classifier,
+        turn_budget=turn_budget, workspace_root=workspace_root,
+    )

@@ -197,7 +197,8 @@ def build_seat_runtime(
     worker_model = RoutedModel(seat_id, routing, gate, tools=tools)
     classify = build_classifier_from_model(RoutedModel("classifier", routing, gate))
     graph = build_graph_from_model(
-        worker_model, checkpointer, tools=tools, classify=classify, turn_budget=turn_budget
+        worker_model, checkpointer, tools=tools, classify=classify,
+        turn_budget=turn_budget, workspace_root=workspace_root,
     )
     return SeatRuntime(seat_id, graph, system_prompt, who, model=worker_model)
 
