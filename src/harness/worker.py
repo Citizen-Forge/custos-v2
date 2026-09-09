@@ -212,6 +212,15 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
     thread_id = issue["id"]
     config = {"configurable": {"thread_id": thread_id}}
 
+    # Where the workspace stood before this run touched it. Needed
+    # because commit_all below only sees uncommitted work: if the agent
+    # runs git itself, the tree is already clean and the ticket's diff
+    # would otherwise be unrecoverable. See the commit block.
+    try:
+        work_base = workspaces.head(workspaces.project_id_for(thread_id))
+    except Exception:  # a workspace that doesn't exist yet is not an error here
+        work_base = None
+
     try:
         state = runtime.graph.get_state(config)
         if state.values:
@@ -282,7 +291,25 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
                 beads.set_metadata(thread_id, "work_commit", sha)
                 log.info("thread %s committed %s", thread_id, sha[:12])
             else:
-                log.warning("thread %s claimed completion but changed no files", thread_id)
+                # Nothing uncommitted -- but that does not mean nothing
+                # happened. Found live 2026-09-09: workspace-9jg.1.6's
+                # agent ran `git commit` itself despite the ticket saying
+                # the harness does it, so commit_all saw a clean tree,
+                # no work_commit was recorded, and the verifier judged an
+                # empty diff -- failing real, present work as "no code
+                # change". 77 of 78 closed tickets had no work_commit.
+                # Anything committed since this run started is this
+                # ticket's output, whoever ran git.
+                head_now = workspaces.head(workspaces.project_id_for(thread_id))
+                if work_base and head_now and head_now != work_base:
+                    span = f"{work_base}..{head_now}"
+                    beads.set_metadata(thread_id, "work_commit", span)
+                    log.info(
+                        "thread %s self-committed %s..%s",
+                        thread_id, work_base[:12], head_now[:12],
+                    )
+                else:
+                    log.warning("thread %s claimed completion but changed no files", thread_id)
         except Exception:
             log.exception("thread %s: could not commit workspace", thread_id)
 

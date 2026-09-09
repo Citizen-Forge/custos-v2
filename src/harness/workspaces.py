@@ -42,6 +42,57 @@ def exists(project_id: str) -> bool:
     return os.path.isdir(path_for(project_id))
 
 
+# Dependency and build directories the harness must never commit.
+# commit_all stages with `git add -A`, so anything not ignored here ends
+# up in the ticket's commit. Found live 2026-09-09: Silent Run's
+# .gitignore came from `bd init` and covered only Dolt files, so three
+# consecutive commits added, removed and re-added the whole
+# node_modules/@types tree. That buries the actual change -- and
+# commit_diff truncates at 20k characters, so a verifier judging the
+# diff can end up seeing nothing but dependency noise.
+_IGNORE_BLOCK = """
+# Added by the harness: never commit dependencies or build output.
+node_modules/
+dist/
+build/
+out/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+target/
+"""
+
+
+def _ensure_gitignore(path: str) -> None:
+    """Append the harness's ignore block if it isn't already there, and
+    commit it.
+
+    Committing immediately matters: ensure() runs before every ticket, so
+    an uncommitted .gitignore left lying in the workspace would be swept
+    into the next ticket's commit by commit_all's `git add -A`, and would
+    make commit_all report a change for a ticket that did nothing at all.
+    That signal is the one the verifier relies on, so the workspace has to
+    be genuinely clean when a ticket starts."""
+    p = os.path.join(path, ".gitignore")
+    try:
+        existing = open(p).read() if os.path.isfile(p) else ""
+        if "Added by the harness" in existing:
+            return
+        with open(p, "a") as fh:
+            fh.write(_IGNORE_BLOCK)
+    except OSError:
+        return  # a workspace we cannot write to is not worth failing a ticket over
+
+    subprocess.run(
+        ["git", "add", ".gitignore"], cwd=path, capture_output=True, text=True, timeout=60
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "harness: ignore dependency and build directories"],
+        cwd=path, capture_output=True, text=True, timeout=60,
+    )
+
+
 def ensure(project_id: str) -> str:
     """Create the workspace and its git repository if absent, and return
     its path. Idempotent -- safe to call on every ticket."""
@@ -53,6 +104,7 @@ def ensure(project_id: str) -> str:
         )
         # The container sets a system-wide git identity (see Dockerfile),
         # so commits work without further configuration here.
+    _ensure_gitignore(path)
     return path
 
 
@@ -137,13 +189,23 @@ def commit_all(project_id: str, message: str) -> str | None:
 
 
 def commit_diff(project_id: str, sha: str, max_chars: int = 20000) -> str:
-    """The diff introduced by one commit -- what a ticket actually changed.
+    """The diff a ticket actually produced.
+
+    `sha` is either a single commit -- the usual case, the harness
+    committed on the ticket's behalf -- or a `base..head` range, used when
+    the agent ran git itself and so left commit_all nothing to stage. A
+    range is diffed end-to-end rather than shown commit-by-commit, so the
+    verifier sees one coherent change set either way.
 
     Truncated: a verifier judging against acceptance criteria needs to see
     the shape of the work, not every line of a large generated file."""
+    args = (
+        ["git", "diff", "--stat", "--patch", sha]
+        if ".." in sha
+        else ["git", "show", "--stat", "--patch", sha]
+    )
     out = subprocess.run(
-        ["git", "show", "--stat", "--patch", sha],
-        cwd=path_for(project_id), capture_output=True, text=True, timeout=120,
+        args, cwd=path_for(project_id), capture_output=True, text=True, timeout=120,
     )
     if out.returncode != 0:
         return ""
@@ -151,3 +213,65 @@ def commit_diff(project_id: str, sha: str, max_chars: int = 20000) -> str:
     if len(text) > max_chars:
         text = text[:max_chars] + f"\n... [diff truncated at {max_chars} characters]"
     return text
+
+
+def run_tests(project_id: str, timeout: int = 600) -> dict | None:
+    """Best-effort mechanical run of a project's own test suite.
+
+    Returns None when there is nothing to run -- no package.json, or no
+    `test` script in it. Absence of a suite is something the verifier's
+    model should weigh against the acceptance criteria, not something to
+    decide mechanically here.
+
+    Otherwise returns {"ran", "passed", "failed", "exit", "tail"}.
+
+    This exists because an exit code is not evidence that a suite ran.
+    Node's test runner exits 0 when its file glob matches nothing. Found
+    live 2026-09-09: workspace-9jg.1.6 shipped
+    `node --test dist/test/*.js` alongside a tsconfig that only ever
+    emitted src/, so `npm test` printed "# tests 0" and exited 0 -- a
+    green command that verified nothing, on the ticket 73 others were
+    blocked behind.
+
+    Deliberately does NOT install dependencies: a missing node_modules
+    should not be reported as the ticket's failure, and a verifier step
+    should not reach the network.
+    """
+    path = path_for(project_id)
+    pkg = os.path.join(path, "package.json")
+    if not os.path.isfile(pkg):
+        return None
+    try:
+        import json as _json
+
+        with open(pkg) as fh:
+            if not (_json.load(fh).get("scripts") or {}).get("test"):
+                return None
+    except Exception:
+        return None
+
+    try:
+        out = subprocess.run(
+            ["npm", "test"], cwd=path, capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        return {"ran": 0, "passed": 0, "failed": 0, "exit": -1, "tail": "npm test timed out"}
+
+    text = (out.stdout or "") + (out.stderr or "")
+
+    def _count(label: str) -> int:
+        for line in text.splitlines():
+            if line.startswith(f"# {label} "):
+                try:
+                    return int(line.split()[-1])
+                except ValueError:
+                    return 0
+        return 0
+
+    return {
+        "ran": _count("tests"),
+        "passed": _count("pass"),
+        "failed": _count("fail"),
+        "exit": out.returncode,
+        "tail": "\n".join(text.splitlines()[-15:]),
+    }

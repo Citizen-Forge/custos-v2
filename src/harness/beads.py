@@ -214,6 +214,20 @@ def close(issue_id: str, reason: str | None = None) -> dict:
     return json.loads(_run(args))[0]
 
 
+def reopen(issue_id: str, reason: str, actor: str = DEFAULT_ACTOR) -> dict:
+    """Put a wrongly-closed ticket back into the queue.
+
+    Closing is what releases a ticket's dependents, so a ticket that
+    closed but did not actually satisfy its acceptance criteria has to go
+    back to open -- otherwise everything blocked on it proceeds against
+    work that was never done. Found live 2026-09-09: workspace-9jg.1.6
+    closed, failed verification, and stayed closed anyway -- releasing 73
+    dependents onto a scaffold whose test suite ran zero tests."""
+    return json.loads(
+        _run(["update", issue_id, "--status", "open", "--append-notes", reason], actor=actor)
+    )[0]
+
+
 def create(
     title: str,
     description: str,

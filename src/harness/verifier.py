@@ -17,8 +17,11 @@ refused."
 """
 
 import json
+import logging
 
 from . import beads, verifications, workspaces
+
+log = logging.getLogger(__name__)
 
 PROMPT = """You are verifying whether completed work actually meets its stated acceptance \
 criteria. You are a SEPARATE reviewer, not the agent that did the work -- judge honestly \
@@ -33,6 +36,9 @@ Accumulated notes from the work: {notes}
 
 The actual code change this ticket produced:
 {diff}
+
+Result of actually running the project's own test suite just now:
+{test_result}
 
 Weigh the diff above all else. It is what the ticket actually changed; the close reason and \
 notes are the agent's own account of it and may be generous. If the diff is empty or does not \
@@ -63,6 +69,30 @@ def _diff_for(issue: dict) -> str:
         return ""
 
 
+def _tests_for(issue: dict) -> dict | None:
+    """Run the project's own suite, or None if there isn't one to run."""
+    try:
+        return workspaces.run_tests(workspaces.project_id_for(issue["id"]))
+    except Exception:
+        log.exception("could not run tests for %s", issue.get("id"))
+        return None
+
+
+def _describe_tests(tests: dict | None) -> str:
+    if tests is None:
+        return "(no runnable test script in this project)"
+    if tests["exit"] == 0 and tests["ran"] == 0:
+        return (
+            "THE TEST COMMAND EXITED 0 BUT RAN ZERO TESTS. This is not a passing suite -- it is "
+            "a command that verified nothing (e.g. a runner whose file glob matched no files). "
+            f"Treat it as no test coverage at all.\n{tests['tail']}"
+        )
+    return (
+        f"exit={tests['exit']}  tests_run={tests['ran']}  passed={tests['passed']}  "
+        f"failed={tests['failed']}\n{tests['tail']}"
+    )
+
+
 def verify_ticket(conn, issue_id: str, model) -> dict | None:
     """Returns the recorded verdict dict, or None if this ticket isn't a
     candidate for verification: no acceptance criteria were ever set
@@ -81,6 +111,7 @@ def verify_ticket(conn, issue_id: str, model) -> dict | None:
         return None
 
     seat_id = beads.assigned_seat(issue) or issue.get("assignee") or "unknown"
+    tests = _tests_for(issue)
 
     response = model.invoke(
         PROMPT.format(
@@ -90,6 +121,7 @@ def verify_ticket(conn, issue_id: str, model) -> dict | None:
             close_reason=issue.get("close_reason") or "(none recorded)",
             notes=issue.get("notes") or "(none)",
             diff=_diff_for(issue) or "(no code change recorded for this ticket)",
+            test_result=_describe_tests(tests),
         )
     )
     content = getattr(response, "content", response)
@@ -104,5 +136,28 @@ def verify_ticket(conn, issue_id: str, model) -> dict | None:
         verdict = "fail"
         reasoning = f"verifier response unparseable: {e}"
 
+    # Mechanical override, applied only to the one case that admits no
+    # judgement: the suite exited 0 while running nothing. A model
+    # reading a well-written test file has no way to see that the file is
+    # never executed, so this is checked rather than asked.
+    if verdict == "pass" and tests and tests["exit"] == 0 and tests["ran"] == 0:
+        verdict = "fail"
+        reasoning = (
+            "Mechanical check overrode a pass: the project's test command exited 0 but ran "
+            "zero tests, so it is not evidence of anything. " + reasoning
+        )
+
     verifications.record(conn, issue_id, seat_id, verdict, reasoning)
+
+    # A closed ticket is what releases everything blocked on it. If the
+    # work did not meet its criteria, leaving it closed hands the
+    # dependents a foundation that was never built -- so put it back and
+    # flag it for a human rather than silently letting the queue proceed.
+    if verdict == "fail":
+        try:
+            beads.reopen(issue_id, f"verification failed: {reasoning}")
+            beads.flag_for_human(issue_id, f"verification failed: {reasoning}")
+        except Exception:
+            log.exception("could not reopen %s after failed verification", issue_id)
+
     return {"issue_id": issue_id, "seat_id": seat_id, "verdict": verdict, "reasoning": reasoning}
