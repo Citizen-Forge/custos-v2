@@ -34,11 +34,21 @@ Acceptance criteria: {acceptance_criteria}
 How the assigned agent says it was completed (close reason): {close_reason}
 Accumulated notes from the work: {notes}
 
-The actual code change this ticket produced:
+The actual code change this ticket produced, as a unified diff:
 {diff}
+
+Read the diff as a diff. A line starting with `-` was REMOVED by this ticket and is NOT in \
+the code any more; a line starting with `+` was ADDED and IS the current state. Never report \
+a `-` line as a present-day problem -- if the ticket deleted a bad line, that is the fix, not \
+the fault. When both a `-` and a `+` version of the same setting appear, only the `+` one is live.
 
 Result of actually running the project's own test suite just now:
 {test_result}
+
+That test result is MEASURED, not claimed -- the suite was executed to produce it. Where it \
+speaks to a criterion (do the tests run, do they pass), believe it over anything you infer \
+from reading the diff. Do not assert that tests fail, or that the project does not build, when \
+the measured result above says otherwise.
 
 Weigh the diff above all else. It is what the ticket actually changed; the close reason and \
 notes are the agent's own account of it and may be generous. If the diff is empty or does not \
