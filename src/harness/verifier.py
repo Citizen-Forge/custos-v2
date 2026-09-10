@@ -42,6 +42,14 @@ the code any more; a line starting with `+` was ADDED and IS the current state. 
 a `-` line as a present-day problem -- if the ticket deleted a bad line, that is the fix, not \
 the fault. When both a `-` and a `+` version of the same setting appear, only the `+` one is live.
 
+The project's configuration and readme files AS THEY STAND RIGHT NOW:
+{current_files}
+
+Those are the live contents, read from disk just now -- not the diff, not a claim. Later \
+tickets may have committed on top of the one under review, so this is the state that \
+actually exists. If a criterion asks whether a file exists or what it contains, answer from \
+this section; do not say a thing cannot be verified when its current contents are printed above.
+
 Result of actually running the project's own test suite just now:
 {test_result}
 
@@ -88,6 +96,15 @@ def _tests_for(issue: dict) -> dict | None:
         return None
 
 
+def _current_files_for(issue: dict) -> str:
+    """Live contents of the project's criteria-bearing files."""
+    try:
+        return workspaces.criteria_file_snapshot(workspaces.project_id_for(issue["id"]))
+    except Exception:
+        log.exception("could not snapshot files for %s", issue.get("id"))
+        return ""
+
+
 def _describe_tests(tests: dict | None) -> str:
     if tests is None:
         return "(no runnable test script in this project)"
@@ -131,6 +148,7 @@ def verify_ticket(conn, issue_id: str, model) -> dict | None:
             close_reason=issue.get("close_reason") or "(none recorded)",
             notes=issue.get("notes") or "(none)",
             diff=_diff_for(issue) or "(no code change recorded for this ticket)",
+            current_files=_current_files_for(issue) or "(no configuration or readme files found)",
             test_result=_describe_tests(tests),
         )
     )
@@ -159,15 +177,29 @@ def verify_ticket(conn, issue_id: str, model) -> dict | None:
 
     verifications.record(conn, issue_id, seat_id, verdict, reasoning)
 
-    # A closed ticket is what releases everything blocked on it. If the
-    # work did not meet its criteria, leaving it closed hands the
-    # dependents a foundation that was never built -- so put it back and
-    # flag it for a human rather than silently letting the queue proceed.
+    # What a fail verdict costs depends on whether we reopen. Reopening
+    # re-blocks every dependent, which is right when the work genuinely
+    # is not there and catastrophic when the verdict is wrong: on
+    # 2026-09-09 a false fail on workspace-9jg.1.6 -- scaffolding whose
+    # suite was passing 21 of 21 at the time -- reopened the ticket and
+    # froze all 73 dependents for sixteen hours. The morning of the same
+    # day, the opposite: real breakage stayed closed and released those
+    # dependents onto a scaffold whose tests ran nothing.
+    #
+    # So gate the expensive half on evidence that does not depend on a
+    # model's judgement. If the measured suite is broken or hollow, the
+    # work objectively is not done -- reopen. If it genuinely passes, a
+    # fail is a judgement call (a missing README, thin coverage); flag it
+    # for a human, but let the dependents keep moving.
     if verdict == "fail":
+        objectively_unfinished = tests is not None and (
+            tests["exit"] != 0 or tests["ran"] == 0
+        )
         try:
-            beads.reopen(issue_id, f"verification failed: {reasoning}")
+            if objectively_unfinished:
+                beads.reopen(issue_id, f"verification failed: {reasoning}")
             beads.flag_for_human(issue_id, f"verification failed: {reasoning}")
         except Exception:
-            log.exception("could not reopen %s after failed verification", issue_id)
+            log.exception("could not act on failed verification for %s", issue_id)
 
     return {"issue_id": issue_id, "seat_id": seat_id, "verdict": verdict, "reasoning": reasoning}

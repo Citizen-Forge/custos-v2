@@ -275,3 +275,45 @@ def run_tests(project_id: str, timeout: int = 600) -> dict | None:
         "exit": out.returncode,
         "tail": "\n".join(text.splitlines()[-15:]),
     }
+
+
+# Files acceptance criteria are usually written against -- "contains a
+# package.json", "a README states how to build". Small, and their current
+# contents answer such a criterion outright.
+_CRITERIA_FILES = (
+    "package.json", "tsconfig.json", "README.md", "readme.md",
+    "pyproject.toml", "setup.cfg", "Makefile", "Cargo.toml", "go.mod",
+)
+
+
+def criteria_file_snapshot(project_id: str, max_chars: int = 6000) -> str:
+    """Current contents of the project's configuration and readme files.
+
+    A diff says what a ticket *changed*; it does not say what the project
+    now *is*. Found live 2026-09-09: the verifier was shown a diff in
+    which tsconfig's `"module": "commonjs"` was replaced by `"ESNext"`,
+    correctly understood that the bad line had been removed, and still
+    failed the ticket because it "cannot be verified as met without
+    seeing the corrected tsconfig in the final state" -- which nothing
+    ever gave it. Later commits by other tickets widen that gap further,
+    since the reviewed commit is no longer HEAD.
+
+    Returns "" when the workspace has none of these files."""
+    path = path_for(project_id)
+    parts, used = [], 0
+    for name in _CRITERIA_FILES:
+        p = os.path.join(path, name)
+        if not os.path.isfile(p):
+            continue
+        try:
+            body = open(p).read()
+        except OSError:
+            continue
+        if len(body) > 2000:
+            body = body[:2000] + "\n... [truncated]"
+        block = f"--- {name} (current contents) ---\n{body}\n"
+        if used + len(block) > max_chars:
+            break
+        parts.append(block)
+        used += len(block)
+    return "".join(parts)
