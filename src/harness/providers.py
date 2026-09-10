@@ -43,10 +43,30 @@ class ProviderConfig:
     cost_tier: int = 0
 
 
+# A model call that never returns takes the whole project down with it.
+# The dispatcher runs one agent at a time, so a worker blocked on a socket
+# holds that slot indefinitely: no exception, no outcome logged, nothing
+# for the retry logic to act on, and every ready ticket simply waits.
+# Observed twice on 2026-09-10 -- a run made a successful call at
+# 10:35:26 and then sat at 0% CPU for 65 minutes with the model server
+# idle, until the harness was restarted by hand.
+#
+# Generous rather than tight: local inference on a 30B MoE is slow, and a
+# long generation is normal here (see the no-agent-timeout note -- stall
+# timeouts on the AGENT are wrong). This bounds one HTTP request, not the
+# agent's thinking. On expiry the call raises, work_one_ticket logs the
+# failure, and the dispatcher retries and eventually flags -- all of which
+# are recoverable states, unlike silence.
+_REQUEST_TIMEOUT_S = 900
+_MAX_RETRIES = 2
+
+
 def build_chat_model(cfg: ProviderConfig) -> ChatOpenAI:
     return ChatOpenAI(
         base_url=cfg.base_url,
         model=cfg.model,
         api_key=cfg.api_key or "not-needed",
         max_tokens=cfg.max_tokens,
+        timeout=_REQUEST_TIMEOUT_S,
+        max_retries=_MAX_RETRIES,
     )
