@@ -71,6 +71,19 @@ def _chain_from_env(env_prefix: str, default_base_url: str, default_model: str, 
     env_max_tokens = os.environ.get(f"{env_prefix}_MAX_TOKENS")
     resolved_max_tokens = int(env_max_tokens) if env_max_tokens else max_tokens
 
+    # A "thinking" model returns a `reasoning_content` alongside each
+    # assistant message and requires it to be replayed on the next turn.
+    # langchain_openai does not round-trip that field, so with such a model
+    # the FIRST call of a thread succeeds and every later one fails 400 --
+    # which then silently falls through to the fallback provider. Setting
+    # {PREFIX}_MODEL_DISABLE_THINKING (or {PREFIX}_FALLBACK_DISABLE_THINKING)
+    # turns thinking off for that provider only.
+    # Found live 2026-09-12 against DeepSeek, whose only two models are both
+    # thinking models; the local llama.cpp server takes no such parameter,
+    # which is why this is opt-in per provider rather than global.
+    def _thinking_off(var: str) -> dict | None:
+        return {"thinking": {"type": "disabled"}} if os.environ.get(var) else None
+
     chain = [
         ProviderConfig(
             name=f"{env_prefix.lower()}-primary",
@@ -78,6 +91,7 @@ def _chain_from_env(env_prefix: str, default_base_url: str, default_model: str, 
             model=os.environ.get(f"{env_prefix}_MODEL_NAME", default_model),
             api_key=os.environ.get(f"{env_prefix}_MODEL_API_KEY"),
             max_tokens=resolved_max_tokens,
+            extra_body=_thinking_off(f"{env_prefix}_MODEL_DISABLE_THINKING"),
         )
     ]
     fallback_base_url = os.environ.get(f"{env_prefix}_FALLBACK_BASE_URL")
@@ -90,6 +104,7 @@ def _chain_from_env(env_prefix: str, default_base_url: str, default_model: str, 
                 api_key=os.environ.get(f"{env_prefix}_FALLBACK_API_KEY"),
                 concurrency_limit=int(os.environ.get(f"{env_prefix}_FALLBACK_CONCURRENCY", "4")),
                 max_tokens=resolved_max_tokens,
+                extra_body=_thinking_off(f"{env_prefix}_FALLBACK_DISABLE_THINKING"),
             )
         )
     return chain

@@ -41,6 +41,19 @@ class ProviderConfig:
     # piece of work, steered by a single system-wide slider (settings.py)
     # rather than needing separate policy per role. See model_registry.py.
     cost_tier: int = 0
+    # Provider-specific request body additions, merged into every call.
+    # Needed 2026-09-12: DeepSeek's only models (deepseek-flash,
+    # deepseek-v4-pro) are thinking models, and their API rejects any
+    # multi-turn conversation that replays an assistant message without its
+    # `reasoning_content` -- "The `reasoning_content` in the thinking mode
+    # must be passed back to the API", HTTP 400. langchain_openai does not
+    # round-trip that field, so every agent turn after the first failed and
+    # fell through to the local fallback. Sending {"thinking": {"type":
+    # "disabled"}} turns thinking off and makes multi-turn tool loops work
+    # (verified against the full 16-tool payload). Kept per-provider rather
+    # than global precisely because the local llama.cpp server has no such
+    # parameter and should not receive it.
+    extra_body: dict | None = None
 
 
 # A model call that never returns takes the whole project down with it.
@@ -69,4 +82,5 @@ def build_chat_model(cfg: ProviderConfig) -> ChatOpenAI:
         max_tokens=cfg.max_tokens,
         timeout=_REQUEST_TIMEOUT_S,
         max_retries=_MAX_RETRIES,
+        extra_body=cfg.extra_body,
     )
