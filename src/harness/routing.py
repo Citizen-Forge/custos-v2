@@ -43,6 +43,46 @@ from .providers import ProviderConfig, build_chat_model
 
 DEFAULT_COOLDOWN_SECONDS = 60.0
 
+# A provider that rejects the *content* of a request is not unwell, and cooling
+# it down is actively harmful. The request is rebuilt from the same checkpoint
+# on retry, so the rejection recurs identically -- but every attempt inside the
+# cooldown window now dies instantly with AllProvidersCoolingDown without
+# reaching the server at all. With one provider per role, which is the normal
+# deployment here, that burns a ticket's entire retry budget in seconds.
+#
+# Cost, measured on 2026-09-11: four tickets (workspace-9jg.11.4, 11.3, 11.2
+# and 10.5) were each flagged for a human with work_commit=NONE this way, while
+# holding 2,116 lines of real work uncommitted in the shared workspace. 10.5's
+# was complete and fully passing -- nine tests, nine green. One overflow also
+# took two attempts off an unrelated ticket on a *different* seat, because the
+# cooldown outlives the run that caused it. None of those attempts made a
+# single model call.
+#
+# Two shapes seen in practice, both from llama.cpp:
+#   400 exceed_context_size_error -- a resumed checkpoint outgrew the window
+#   500 failed to parse tool call arguments -- the model emitted an argument
+#       long enough to be truncated mid-string, producing invalid JSON
+_CONTENT_ERROR_MARKERS = (
+    "exceed_context_size_error",
+    "exceeds the available context size",
+    "failed to parse tool call arguments",
+)
+
+
+def is_content_error(exc: BaseException) -> bool:
+    """True when a provider rejected what we sent rather than being unhealthy.
+
+    Treats any 4xx as content: a 400 means the request was unacceptable, which
+    says nothing about whether the backend is up. 5xx stays provider
+    ill-health and still cools down, except for the known llama.cpp tool-call
+    parse failure, which is caused by what we sent rather than by the server.
+    """
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and 400 <= status < 500:
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in _CONTENT_ERROR_MARKERS)
+
 
 class AllProvidersCoolingDown(Exception):
     pass
@@ -132,7 +172,14 @@ class RoutedModel:
                     return self._model_for(cfg).invoke(messages)
                 except Exception as e:  # noqa: BLE001 -- any provider failure triggers fallback
                     last_error = e
-                    self._routing.report_failure(cfg)
+                    # Content rejections do not cool the provider down -- see
+                    # is_content_error. The attempt still fails and we still
+                    # fall through to the next provider (a backend with a
+                    # larger window may well accept the same request), but the
+                    # provider stays available so the ticket's next retry is a
+                    # real one instead of an instant AllProvidersCoolingDown.
+                    if not is_content_error(e):
+                        self._routing.report_failure(cfg)
 
         if not attempted_any:
             raise AllProvidersCoolingDown(f"every provider for role {self._role!r} is cooling down")

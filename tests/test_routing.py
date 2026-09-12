@@ -118,3 +118,102 @@ def test_concurrency_gate_serializes_calls_to_the_same_provider():
     # first one's finished -- if the gate weren't enforcing this, both
     # calls' 0.15s sleeps would overlap and start_b would be ~0, not >= end_a.
     assert start_b >= end_a
+
+
+class _HTTPError(RuntimeError):
+    """Stands in for openai's error types, which carry status_code."""
+
+    def __init__(self, message, status_code=None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class RejectingModel:
+    """Fails every call with a given exception, and counts the attempts."""
+
+    def __init__(self, exc):
+        self.exc = exc
+        self.attempts = 0
+
+    def invoke(self, messages):
+        self.attempts += 1
+        raise self.exc
+
+
+def test_content_rejection_does_not_cool_the_provider_down():
+    # A 400 means the request was unacceptable, not that the backend is
+    # unwell. Cooling down here is what flagged four tickets on 2026-09-11
+    # as having produced nothing -- see the comment in routing.py.
+    primary = _cfg("primary")
+    overflow = _HTTPError(
+        "Error code: 400 - request (66117 tokens) exceeds the available "
+        "context size (65536 tokens)",
+        status_code=400,
+    )
+    routing = RoutingTable({"worker": [primary]})
+    routed = RoutedModel("worker", routing, ConcurrencyGate(), model_factory=lambda cfg: RejectingModel(overflow))
+
+    with pytest.raises(_HTTPError):
+        routed.invoke("hi")
+
+    assert not routing.is_cooling_down(primary)
+
+
+def test_a_retry_after_a_content_rejection_still_reaches_the_provider():
+    # The point of not cooling down: the *next* attempt is a real attempt.
+    # Before this, it died instantly with AllProvidersCoolingDown without a
+    # single call leaving the harness.
+    primary = _cfg("primary")
+    model = RejectingModel(_HTTPError("Error code: 400 - bad request", status_code=400))
+    routing = RoutingTable({"worker": [primary]})
+    routed = RoutedModel("worker", routing, ConcurrencyGate(), model_factory=lambda cfg: model)
+
+    for _ in range(3):
+        with pytest.raises(_HTTPError):
+            routed.invoke("hi")
+
+    assert model.attempts == 3  # not 1 attempt then two instant cooldown failures
+
+
+def test_malformed_tool_call_is_treated_as_content_despite_being_a_500():
+    # llama.cpp returns 500 when the model emits a tool-call argument long
+    # enough to be truncated mid-string. The server is fine; we sent junk.
+    primary = _cfg("primary")
+    parse_failure = _HTTPError(
+        "Error code: 500 - Failed to parse tool call arguments as JSON: "
+        "syntax error while parsing value - missing closing quote",
+        status_code=500,
+    )
+    routing = RoutingTable({"worker": [primary]})
+    routed = RoutedModel("worker", routing, ConcurrencyGate(), model_factory=lambda cfg: RejectingModel(parse_failure))
+
+    with pytest.raises(_HTTPError):
+        routed.invoke("hi")
+
+    assert not routing.is_cooling_down(primary)
+
+
+def test_ordinary_provider_failure_still_cools_down():
+    # The rate-limit case this mechanism was built for must keep working.
+    primary = _cfg("primary")
+    backup = _cfg("backup")
+    models = {"primary": FakeModel("primary", fail=True), "backup": FakeModel("backup")}
+    routing = RoutingTable({"worker": [primary, backup]})
+    routed = RoutedModel("worker", routing, ConcurrencyGate(), model_factory=lambda cfg: models[cfg.name])
+
+    assert routed.invoke("hi") == "response from backup"
+    assert routing.is_cooling_down(primary)
+
+
+def test_a_500_without_a_known_marker_still_cools_down():
+    primary = _cfg("primary")
+    backup = _cfg("backup")
+    models = {
+        "primary": RejectingModel(_HTTPError("Error code: 500 - internal server error", status_code=500)),
+        "backup": FakeModel("backup"),
+    }
+    routing = RoutingTable({"worker": [primary, backup]})
+    routed = RoutedModel("worker", routing, ConcurrencyGate(), model_factory=lambda cfg: models[cfg.name])
+
+    assert routed.invoke("hi") == "response from backup"
+    assert routing.is_cooling_down(primary)
