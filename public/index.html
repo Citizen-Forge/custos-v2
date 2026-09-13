@@ -103,6 +103,18 @@
   .stat b { color: var(--text); font-size: 1.1rem; display: block; }
   #status { font-size: 0.75rem; color: var(--muted); }
   .board-section { grid-column: 1 / -1; }
+  .project-tabs {
+    display: flex; flex-wrap: wrap; gap: 0.25rem;
+    border-bottom: 1px solid var(--border); margin-bottom: 0.75rem;
+  }
+  .project-tabs .ptab {
+    background: none; border: none; border-bottom: 2px solid transparent;
+    color: var(--muted); padding: 0.5rem 0.75rem; cursor: pointer;
+    font: inherit; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 0.3rem;
+  }
+  .project-tabs .ptab:hover { color: inherit; }
+  .project-tabs .ptab.active { color: inherit; border-bottom-color: currentColor; }
+  .project-tabs .ptab-blocked { color: #d97706; font-size: 0.72rem; }
   .project { border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; margin-bottom: 0.75rem; }
   .project:last-child { margin-bottom: 0; }
   .project-head { display: flex; align-items: baseline; gap: 0.5rem; }
@@ -187,6 +199,7 @@
   </section>
   <section class="board-section" data-tab="home">
     <h2>Board <span class="count" id="projects-count">0</span></h2>
+    <div id="project-tabs" class="project-tabs"></div>
     <div id="projects-list"></div>
   </section>
   <section data-tab="home">
@@ -263,6 +276,14 @@ function el(html) {
 // refresh cycle, since it rarely changes; refreshAll() re-renders
 // seats using whatever's currently cached here.
 let avatarStyle = "micah";
+
+// The Board is one project at a time. Projects used to stack vertically,
+// which meant scrolling past every ticket in the first project to reach
+// the next one. The selected project is remembered across the 5s refresh
+// (which re-renders the whole panel) and across reloads via localStorage.
+const PROJECT_TAB_STORAGE_KEY = "custos_active_project";
+let activeProjectId = null;
+let cachedProjects = [];
 
 async function loadAvatarStyle() {
   try {
@@ -619,17 +640,51 @@ function renderRoadmap(projects) {
 
 async function refreshProjects() {
   try {
-    const items = await fetchJSON("/projects");
-    document.getElementById("projects-count").textContent = items.length;
-    document.getElementById("projects-list").innerHTML = items.length
-      ? items.map(projectCard).join("")
-      : `<div class="empty">no projects yet -- the product-owner creates these from ideas</div>`;
-    renderRoadmap(items);
+    cachedProjects = await fetchJSON("/projects");
+    document.getElementById("projects-count").textContent = cachedProjects.length;
+    renderProjects();
+    renderRoadmap(cachedProjects);
   } catch (e) {
     const msg = `<div class="empty">error: ${e.message}</div>`;
+    document.getElementById("project-tabs").innerHTML = "";
     document.getElementById("projects-list").innerHTML = msg;
     document.getElementById("roadmap-list").innerHTML = msg;
   }
+}
+
+function selectProject(id) {
+  activeProjectId = id;
+  try { localStorage.setItem(PROJECT_TAB_STORAGE_KEY, id); } catch (e) { /* private mode */ }
+  renderProjects();
+}
+
+// Render the project tab strip and the selected project's kanban from the
+// last /projects payload. Kept separate from the fetch so switching tabs
+// is instant instead of waiting on another slow /projects call.
+function renderProjects() {
+  const tabsEl = document.getElementById("project-tabs");
+  const listEl = document.getElementById("projects-list");
+  if (!cachedProjects.length) {
+    tabsEl.innerHTML = "";
+    listEl.innerHTML = `<div class="empty">no projects yet -- the product-owner creates these from ideas</div>`;
+    return;
+  }
+  if (!cachedProjects.some(p => p.id === activeProjectId)) {
+    activeProjectId = cachedProjects[0].id;
+  }
+  tabsEl.innerHTML = cachedProjects.map(p => {
+    const stories = (p.epics || []).flatMap(epic => epic.stories || []);
+    const blocked = stories.filter(isBlocked).length;
+    const active = p.id === activeProjectId ? " active" : "";
+    // A blocked count on the tab is the one thing worth seeing without
+    // clicking through every project.
+    const badge = blocked ? `<span class="ptab-blocked">${blocked} blocked</span>` : "";
+    return `<button class="ptab${active}" onclick="selectProject('${escapeHtml(p.id)}')">
+      <span class="priority-badge p${p.priority}">P${p.priority}</span>
+      ${escapeHtml(p.title)}${badge}
+    </button>`;
+  }).join("");
+  listEl.innerHTML = projectCard(cachedProjects.find(p => p.id === activeProjectId));
 }
 
 async function refreshWiki() {
@@ -783,6 +838,7 @@ async function init() {
   // Settings rarely change -- load once before the first render (so
   // avatars use the real style from the start, not a flash of the
   // default) rather than polling them every refresh cycle like tickets.
+  try { activeProjectId = localStorage.getItem(PROJECT_TAB_STORAGE_KEY) || null; } catch (e) { /* private mode */ }
   await Promise.all([loadAvatarStyle(), loadCostSlider(), refreshModelRegistry()]);
   showTab(initialTab());
   setInterval(refreshAll, REFRESH_MS);
