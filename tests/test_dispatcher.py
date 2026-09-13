@@ -89,7 +89,7 @@ def test_higher_priority_unassigned_work_preempts_assigned_backlog(monkeypatch):
     # from other tests (same reason test_toolchain.py pins next_assigned).
     monkeypatch.setattr(
         dispatcher, "next_assigned_ticket",
-        lambda: (beads.show(backlog["id"]), "busy-seat"),
+        lambda *a, **k: (beads.show(backlog["id"]), "busy-seat"),
     )
     monkeypatch.setattr(
         dispatcher, "next_unassigned_ticket", lambda: beads.show(urgent["id"])
@@ -116,7 +116,7 @@ def test_equal_priority_assigned_work_is_not_preempted(monkeypatch):
 
     monkeypatch.setattr(
         dispatcher, "next_assigned_ticket",
-        lambda: (beads.show(backlog["id"]), "seat-q"),
+        lambda *a, **k: (beads.show(backlog["id"]), "seat-q"),
     )
     monkeypatch.setattr(
         dispatcher, "next_unassigned_ticket", lambda: beads.show(other["id"])
@@ -263,6 +263,25 @@ def test_human_flagged_work_is_not_treated_as_an_orphan():
     issue, _ = dispatcher.next_assigned_ticket()
 
     assert issue is None or issue["id"] != story["id"]
+
+
+def test_next_assigned_ticket_skips_seats_already_running(monkeypatch):
+    """With MAX_RUNNING_AGENTS > 1 the selector must not keep returning a
+    ticket whose seat is already working -- start_agent refuses that as
+    already-running (one ticket per seat), tick() reports "could not
+    start", and dispatch stalls at a single agent however high the cap is.
+    Found live 2026-09-13."""
+    monkeypatch.setattr(dispatcher, "held_projects", lambda: {})
+    monkeypatch.setattr(dispatcher.beads, "in_progress", lambda: [
+        {"id": "busy.1", "issue_type": "task", "metadata": {"assigned_seat": "seat-1"}},
+        {"id": "busy.2", "issue_type": "task", "metadata": {"assigned_seat": "seat-2"}},
+    ])
+    monkeypatch.setattr(dispatcher.beads, "ready", lambda: [])
+
+    issue, seat = dispatcher.next_assigned_ticket(busy_seats={"seat-1"})
+
+    assert issue["id"] == "busy.2"
+    assert seat == "seat-2"
 
 
 # -- observability ----------------------------------------------------

@@ -208,15 +208,24 @@ def project_hold(ticket_id: str) -> str | None:
     return held_projects().get(toolchain.project_id_for(ticket_id))
 
 
-def next_assigned_ticket() -> tuple[dict | None, str | None]:
+def next_assigned_ticket(busy_seats: set[str] | None = None) -> tuple[dict | None, str | None]:
     """A ticket the product-owner has already assigned that can start now.
 
     Orphans first, for the reason worker.py's docstring spells out: `bd
     ready` only ever returns status=open issues, so a ticket left
     in_progress by a crashed agent never reappears there and would be
     stranded forever if this only looked at the ready pool. Human-flagged
-    issues are skipped -- they are parked deliberately, not orphaned."""
+    issues are skipped -- they are parked deliberately, not orphaned.
+
+    `busy_seats` (optional) skips tickets whose seat already has a running
+    agent. Without it, with MAX_RUNNING_AGENTS > 1, the selector returns
+    the ticket it just claimed every cycle: start_agent refuses it as
+    already running, tick() reports "could not start", and the
+    dispatcher sits at one agent however high the cap is. Found live
+    2026-09-13 while raising the cap to 3 -- the log showed a single
+    'resuming thread' and nothing else for a full minute."""
     held = held_projects()
+    busy = busy_seats or set()
 
     def _skip(issue):
         from . import toolchain
@@ -227,14 +236,14 @@ def next_assigned_ticket() -> tuple[dict | None, str | None]:
         if not dispatchable(issue) or beads.is_flagged_for_human(issue) or _skip(issue):
             continue
         seat_id = beads.assigned_seat(issue)
-        if seat_id:
+        if seat_id and seat_id not in busy:
             return issue, seat_id
 
     for issue in beads.ready():
         if not dispatchable(issue) or _skip(issue):
             continue
         seat_id = beads.assigned_seat(issue)
-        if seat_id:
+        if seat_id and seat_id not in busy:
             return issue, seat_id
     return None, None
 
@@ -545,7 +554,9 @@ class Dispatcher:
         if self.capacity() <= 0:
             return "at capacity"
 
-        assigned, seat_id = next_assigned_ticket()
+        with self._lock:
+            busy = set(self._running)
+        assigned, seat_id = next_assigned_ticket(busy)
 
         # Already-assigned work is drained before the product-owner is
         # woken to broker more -- UNLESS something unassigned strictly
