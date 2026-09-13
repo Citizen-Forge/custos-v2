@@ -2,6 +2,7 @@
 and Phase 4's refuse-work / handoff-note primitives."""
 
 import os
+import signal
 import subprocess
 from typing import Annotated
 
@@ -17,6 +18,61 @@ def _prompt_conn():
     import psycopg
 
     return psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+
+
+# How long a single agent shell command may run before it is killed and the
+# timeout handed back as an ordinary tool result. Hardcoded at 120s
+# originally, which killed real runs: an agent that edits a file and then
+# runs `npm test` in one command routinely exceeds two minutes on a cold
+# TypeScript build. subprocess.TimeoutExpired propagated out of the tool
+# and took the whole graph run down; after MAX_TICKET_FAILURES the
+# dispatcher parked the ticket for a human. A command that never finishes
+# is information the agent should see and react to, not a reason to
+# discard the run -- same reasoning as read_file/write_file returning
+# their errors instead of raising. Matches workspaces.run_tests' 600s,
+# since it is often the same suite being run by hand.
+SHELL_TIMEOUT = int(os.environ.get("SHELL_TIMEOUT", "600"))
+
+
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """Kill the shell AND its children. shell=True puts the real work in a
+    child of the shell, so proc.kill() alone can orphan a running test
+    runner; on POSIX the whole session started via start_new_session is
+    killed instead."""
+    try:
+        os.killpg(os.getpgid(proc.pid), getattr(signal, "SIGKILL", signal.SIGTERM))
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _run_shell(command: str, workspace_root: str) -> str:
+    proc = subprocess.Popen(
+        command,
+        shell=True,
+        cwd=workspace_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        out, _ = proc.communicate(timeout=SHELL_TIMEOUT)
+        return out or ""
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc)
+        try:
+            out, _ = proc.communicate(timeout=10)
+        except Exception:  # noqa: BLE001 -- a final drain failure must
+            # still return the timeout to the agent, not raise.
+            out = ""
+        return (out or "") + (
+            f"\n[command timed out after {SHELL_TIMEOUT}s and was killed. "
+            "If it was a test or build, run a narrower target or split the "
+            "command; if it needs longer, raise SHELL_TIMEOUT.]"
+        )
 
 
 @tool
@@ -210,15 +266,11 @@ def build_workspace_tools(workspace_root: str) -> list:
         # there's no workspace-independent hard invariant for shell commands
         # to enforce, and re-gating on the same static safe-set would silently
         # break any command the classifier explicitly approved.
-        result = subprocess.run(
-            command,
-            shell=True,
-            cwd=workspace_root,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        return (result.stdout or "") + (result.stderr or "")
+        #
+        # A timeout is returned as text, never raised. See _run_shell and
+        # SHELL_TIMEOUT: an exception here used to kill the run and strand
+        # the ticket behind a human flag.
+        return _run_shell(command, workspace_root)
 
     @tool
     def read_file(path: str) -> str:
