@@ -103,6 +103,10 @@
   .stat b { color: var(--text); font-size: 1.1rem; display: block; }
   #status { font-size: 0.75rem; color: var(--muted); }
   .board-section { grid-column: 1 / -1; }
+  /* The project tab strip sits above Roadmap and Board and scopes both;
+     it carries its own section for the tab show/hide logic but should not
+     look like a panel of its own. */
+  .project-nav { background: none; border: none; padding: 0; }
   .project-tabs {
     display: flex; flex-wrap: wrap; gap: 0.25rem;
     border-bottom: 1px solid var(--border); margin-bottom: 0.75rem;
@@ -193,13 +197,15 @@
   <button class="tab" data-tab="settings">Settings</button>
 </nav>
 <main>
+  <section id="project-nav" class="board-section project-nav" data-tab="home">
+    <div id="project-tabs" class="project-tabs"></div>
+  </section>
   <section class="board-section" data-tab="home">
     <h2>Roadmap <span class="count" id="roadmap-count">0</span></h2>
     <div id="roadmap-list"></div>
   </section>
   <section class="board-section" data-tab="home">
     <h2>Board <span class="count" id="projects-count">0</span></h2>
-    <div id="project-tabs" class="project-tabs"></div>
     <div id="projects-list"></div>
   </section>
   <section data-tab="home">
@@ -620,16 +626,14 @@ function roadmapEpicCard(epic) {
   </div>`;
 }
 
-function renderRoadmap(projects) {
+function renderRoadmap(project) {
   const lanes = {};
-  for (const project of projects) {
-    for (const epic of project.epics || []) {
-      const priority = epic.priority ?? project.priority ?? 9;
-      (lanes[priority] = lanes[priority] || []).push({ ...epic, projectTitle: project.title });
-    }
+  for (const epic of project.epics || []) {
+    const priority = epic.priority ?? project.priority ?? 9;
+    (lanes[priority] = lanes[priority] || []).push({ ...epic, projectTitle: project.title });
   }
   const priorities = Object.keys(lanes).map(Number).sort((a, b) => a - b);
-  document.getElementById("roadmap-count").textContent = priorities.reduce((n, p) => n + lanes[p].length, 0);
+  document.getElementById("roadmap-count").textContent = (project.epics || []).length;
   document.getElementById("roadmap-list").innerHTML = priorities.length
     ? priorities.map(p => `<div class="swimlane">
         <div class="swimlane-head"><span class="priority-badge p${p}">P${p}</span></div>
@@ -641,9 +645,7 @@ function renderRoadmap(projects) {
 async function refreshProjects() {
   try {
     cachedProjects = await fetchJSON("/projects");
-    document.getElementById("projects-count").textContent = cachedProjects.length;
     renderProjects();
-    renderRoadmap(cachedProjects);
   } catch (e) {
     const msg = `<div class="empty">error: ${e.message}</div>`;
     document.getElementById("project-tabs").innerHTML = "";
@@ -658,17 +660,26 @@ function selectProject(id) {
   renderProjects();
 }
 
-// Render the project tab strip and the selected project's kanban from the
-// last /projects payload. Kept separate from the fetch so switching tabs
-// is instant instead of waiting on another slow /projects call.
+// The project tabs scope the whole Home view -- Roadmap and Board both
+// render only the selected project. Kept separate from the fetch so
+// switching tabs is instant instead of waiting on another slow /projects
+// call.
 function renderProjects() {
   const tabsEl = document.getElementById("project-tabs");
   const listEl = document.getElementById("projects-list");
+  const roadmapEl = document.getElementById("roadmap-list");
+  const navEl = document.getElementById("project-nav");
+
   if (!cachedProjects.length) {
+    navEl.style.display = "none";
     tabsEl.innerHTML = "";
     listEl.innerHTML = `<div class="empty">no projects yet -- the product-owner creates these from ideas</div>`;
+    roadmapEl.innerHTML = `<div class="empty">no epics yet -- the product-owner creates these from ideas</div>`;
+    document.getElementById("roadmap-count").textContent = "0";
+    document.getElementById("projects-count").textContent = "0";
     return;
   }
+  navEl.style.display = "";
   if (!cachedProjects.some(p => p.id === activeProjectId)) {
     activeProjectId = cachedProjects[0].id;
   }
@@ -684,7 +695,12 @@ function renderProjects() {
       ${escapeHtml(p.title)}${badge}
     </button>`;
   }).join("");
-  listEl.innerHTML = projectCard(cachedProjects.find(p => p.id === activeProjectId));
+
+  const project = cachedProjects.find(p => p.id === activeProjectId);
+  const stories = (project.epics || []).flatMap(epic => epic.stories || []);
+  document.getElementById("projects-count").textContent = stories.length;
+  listEl.innerHTML = projectCard(project);
+  renderRoadmap(project);
 }
 
 async function refreshWiki() {
