@@ -20,6 +20,8 @@ import json
 import logging
 import os
 
+import psycopg
+
 from . import beads, verifications, workspaces
 
 log = logging.getLogger(__name__)
@@ -145,6 +147,10 @@ def _reset_thread(conn, issue_id: str) -> None:
         with conn.cursor() as cur:
             for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
                 cur.execute(f"DELETE FROM {table} WHERE thread_id = %s", (issue_id,))
+    except psycopg.errors.UndefinedTable:
+        # Test databases have no checkpointer tables until a worker test
+        # creates them. Absent tables mean nothing to reset, not a failure.
+        log.debug("no checkpointer tables to reset for %s", issue_id)
     except Exception:
         log.exception("could not reset the graph thread for %s", issue_id)
 

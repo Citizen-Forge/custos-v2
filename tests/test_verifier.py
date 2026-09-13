@@ -164,7 +164,7 @@ def test_failed_verification_requeues_with_the_finding():
     assert current["status"] == "open", "a failed ticket must go back in the queue"
     assert beads.is_flagged_for_human(current) is False, "requeued work must be dispatchable"
     meta = current.get("metadata") or {}
-    assert meta.get("rework_count") == "1"
+    assert int(meta.get("rework_count")) == 1
     assert "the thing was not done" in (meta.get("rework_reason") or "")
     assert not meta.get("completion_summary"), "the old claim must not re-close the ticket"
     assert verifications.get_for_issue(conn, issue["id"])["verdict"] == "fail"
