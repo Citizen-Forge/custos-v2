@@ -33,8 +33,20 @@ def main() -> None:
             "VERIFIER_MODEL_BASE_URL", os.environ.get("LOCAL_MODEL_BASE_URL", "http://host.docker.internal:11434/v1")
         ),
         model=os.environ.get("VERIFIER_MODEL_NAME", os.environ.get("LOCAL_MODEL_NAME", "qwen2.5:7b-instruct")),
-        api_key=os.environ.get("VERIFIER_MODEL_API_KEY"),
+        # Falls back to LOCAL_MODEL_API_KEY for the same reason base_url
+        # and model already fall back to their LOCAL_* counterparts: a
+        # VERIFIER_* override is opt-out, so an unset key must not mean
+        # "no key" when the inherited base_url is an authenticated one.
+        api_key=os.environ.get("VERIFIER_MODEL_API_KEY", os.environ.get("LOCAL_MODEL_API_KEY")),
         max_tokens=int(os.environ.get("VERIFIER_MAX_TOKENS", "6000")),
+        # See ProviderConfig.extra_body -- verify_ticket makes a single
+        # call, so this is belt-and-braces here, but it keeps this manual
+        # entry point behaving identically to the scheduled one.
+        extra_body=(
+            {"thinking": {"type": "disabled"}}
+            if os.environ.get("VERIFIER_MODEL_DISABLE_THINKING", os.environ.get("LOCAL_MODEL_DISABLE_THINKING"))
+            else None
+        ),
     )
     model = build_chat_model(provider_cfg)
 

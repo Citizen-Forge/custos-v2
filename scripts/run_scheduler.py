@@ -50,7 +50,7 @@ from harness.overwatch import run_overwatch_session
 from harness.product_owner import ROLE as PRODUCT_OWNER_ROLE
 from harness.product_owner import build_tools as build_product_owner_tools
 from harness.product_owner import run_triage_session
-from harness.providers import ProviderConfig, build_chat_model
+from harness.providers import ProviderConfig
 from harness.routing import ConcurrencyGate, RoutedModel, RoutingTable
 from harness.verifier import verify_ticket
 
@@ -61,18 +61,101 @@ DEFAULT_INTERVAL_SECONDS = 1800
 
 
 def _provider(name: str, max_tokens: int) -> ProviderConfig:
+    # Every field falls back to LOCAL_MODEL_* so that pointing the worker
+    # at a new provider moves the scheduler's jobs with it by default --
+    # SCHEDULER_MODEL_* exists to opt one of them back out, not to have to
+    # be set. The api_key fallback was missing until 2026-09-12: with the
+    # worker moved to DeepSeek, base_url and model followed correctly and
+    # the key did not, so every verifier/product-owner/overwatch call
+    # would have authenticated as "not-needed" and 401'd.
     return ProviderConfig(
         name=name,
         base_url=os.environ.get(
             "SCHEDULER_MODEL_BASE_URL", os.environ.get("LOCAL_MODEL_BASE_URL", "http://host.docker.internal:11434/v1")
         ),
         model=os.environ.get("SCHEDULER_MODEL_NAME", os.environ.get("LOCAL_MODEL_NAME", "qwen2.5:7b-instruct")),
+        api_key=os.environ.get("SCHEDULER_MODEL_API_KEY", os.environ.get("LOCAL_MODEL_API_KEY")),
         max_tokens=max_tokens,
+        # See ProviderConfig.extra_body: a thinking model demands its
+        # `reasoning_content` be replayed on the next turn and
+        # langchain_openai does not round-trip it. The verifier makes a
+        # single call and would survive; product_owner and overwatch are
+        # multi-turn tool loops and would 400 on their second turn.
+        extra_body=(
+            {"thinking": {"type": "disabled"}}
+            if os.environ.get("SCHEDULER_MODEL_DISABLE_THINKING", os.environ.get("LOCAL_MODEL_DISABLE_THINKING"))
+            else None
+        ),
     )
 
 
+def _fallback_provider(name: str, max_tokens: int) -> ProviderConfig | None:
+    """The second entry of every scheduler chain, or None when no
+    fallback is configured.
+
+    Mirrors worker.py's LOCAL_FALLBACK_* handling so that "the model the
+    scheduler falls back to" and "the model the worker falls back to" are
+    one setting, not two that can drift apart. SCHEDULER_FALLBACK_*
+    overrides it per-service the same way SCHEDULER_MODEL_* overrides the
+    primary.
+    """
+    base_url = os.environ.get("SCHEDULER_FALLBACK_BASE_URL", os.environ.get("LOCAL_FALLBACK_BASE_URL"))
+    if not base_url:
+        return None
+    return ProviderConfig(
+        name=f"{name}-fallback",
+        base_url=base_url,
+        model=os.environ.get(
+            "SCHEDULER_FALLBACK_MODEL_NAME", os.environ.get("LOCAL_FALLBACK_MODEL_NAME", "gemini-2.0-flash")
+        ),
+        api_key=os.environ.get("SCHEDULER_FALLBACK_API_KEY", os.environ.get("LOCAL_FALLBACK_API_KEY")),
+        concurrency_limit=int(
+            os.environ.get("SCHEDULER_FALLBACK_CONCURRENCY", os.environ.get("LOCAL_FALLBACK_CONCURRENCY", "4"))
+        ),
+        max_tokens=max_tokens,
+        extra_body=(
+            {"thinking": {"type": "disabled"}}
+            if os.environ.get(
+                "SCHEDULER_FALLBACK_DISABLE_THINKING", os.environ.get("LOCAL_FALLBACK_DISABLE_THINKING")
+            )
+            else None
+        ),
+    )
+
+
+def _chain(name: str, max_tokens: int) -> list[ProviderConfig]:
+    """Primary plus fallback, the shape RoutingTable expects.
+
+    Added 2026-09-12, when the scheduler's primary moved off the LAN to a
+    paid API: until then every job here was a ONE-ENTRY chain, so any
+    refusal from the single provider -- an expired key, exhausted credits
+    (402), an outage -- did not degrade the scheduler, it stopped it.
+    That is worse here than in the worker, because these jobs are the
+    system's own feedback loop: no verifier means tickets close unchecked
+    and no product-owner means nothing gets dispatched at all, and neither
+    failure is loud.
+    """
+    chain = [_provider(name, max_tokens)]
+    fallback = _fallback_provider(name, max_tokens)
+    if fallback:
+        chain.append(fallback)
+    return chain
+
+
+def _routed(role: str, name: str, max_tokens: int, tools=None) -> RoutedModel:
+    """A `.invoke()`-compatible model over the full chain, for the jobs
+    that used to call build_chat_model directly and so could not fail
+    over at all. Each job builds its own RoutingTable, which means
+    cooldown state is per-job rather than shared -- acceptable because a
+    cycle runs them in sequence, and deliberate rather than incidental:
+    one job cooling a provider down should not blind the next job to a
+    provider that may have recovered by the time it runs.
+    """
+    return RoutedModel(role, RoutingTable({role: _chain(name, max_tokens)}), ConcurrencyGate(), tools=tools)
+
+
 def run_product_owner_job(conn_string: str) -> None:
-    routing = RoutingTable({PRODUCT_OWNER_ROLE: [_provider("product-owner", 4000)]})
+    routing = RoutingTable({PRODUCT_OWNER_ROLE: _chain("product-owner", 4000)})
     gate = ConcurrencyGate()
     with psycopg.connect(conn_string, autocommit=True) as conn:
         prompts.init_table(conn)
@@ -88,7 +171,7 @@ def run_product_owner_job(conn_string: str) -> None:
 
 
 def run_overwatch_job(conn_string: str) -> None:
-    routing = RoutingTable({OVERWATCH_ROLE: [_provider("overwatch", 6000)]})
+    routing = RoutingTable({OVERWATCH_ROLE: _chain("overwatch", 6000)})
     gate = ConcurrencyGate()
     with psycopg.connect(conn_string, autocommit=True) as conn:
         seats.init_table(conn)
@@ -102,7 +185,7 @@ def run_overwatch_job(conn_string: str) -> None:
 
 
 def run_meta_agent_job(conn_string: str) -> None:
-    model = build_chat_model(_provider("meta-agent", 4000))
+    model = _routed("meta-agent", "meta-agent", 4000)
     with psycopg.connect(conn_string, autocommit=True) as conn:
         prompts.init_table(conn)
         seats.init_table(conn)
@@ -114,7 +197,7 @@ def run_meta_agent_job(conn_string: str) -> None:
 
 
 def run_verifier_job(conn_string: str) -> None:
-    model = build_chat_model(_provider("verifier", 6000))
+    model = _routed("verifier", "verifier", 6000)
     beads.ensure_initialized()
     with psycopg.connect(conn_string, autocommit=True) as conn:
         seats.init_table(conn)
@@ -148,7 +231,7 @@ def run_progress_job(conn_string: str) -> None:
     parks the ticket AND frees the seat -- killing an agent's work on a
     clock, which is precisely the timeout this design rejects. Set
     STALL_FLAGS_FOR_HUMAN=true to opt in."""
-    model = build_chat_model(_provider("progress", 2000))
+    model = _routed("progress", "progress", 2000)
     beads.ensure_initialized()
     flag = os.environ.get("STALL_FLAGS_FOR_HUMAN", "").lower() in ("1", "true", "yes")
 

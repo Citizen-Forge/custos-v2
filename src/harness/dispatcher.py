@@ -116,7 +116,23 @@ def _provider(max_tokens: int) -> ProviderConfig:
         model=os.environ.get(
             "SCHEDULER_MODEL_NAME", os.environ.get("LOCAL_MODEL_NAME", "qwen2.5:7b-instruct")
         ),
+        # api_key and extra_body fall back to LOCAL_* for the same reason
+        # base_url and model already do: SCHEDULER_MODEL_* is an opt-out,
+        # so moving the worker to a new provider must move this with it
+        # whole rather than half. Missing until 2026-09-12 -- with the
+        # worker on DeepSeek this config inherited an authenticated
+        # base_url and no key, so wake_product_owner would have 401'd.
+        api_key=os.environ.get("SCHEDULER_MODEL_API_KEY", os.environ.get("LOCAL_MODEL_API_KEY")),
         max_tokens=max_tokens,
+        # A thinking model requires its `reasoning_content` replayed on
+        # the next turn and langchain_openai drops it -- and this is an
+        # agentic tool loop, so it would fail on turn two. See
+        # ProviderConfig.extra_body.
+        extra_body=(
+            {"thinking": {"type": "disabled"}}
+            if os.environ.get("SCHEDULER_MODEL_DISABLE_THINKING", os.environ.get("LOCAL_MODEL_DISABLE_THINKING"))
+            else None
+        ),
     )
 
 

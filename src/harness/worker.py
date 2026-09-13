@@ -90,6 +90,15 @@ def _chain_from_env(env_prefix: str, default_base_url: str, default_model: str, 
             base_url=os.environ.get(f"{env_prefix}_MODEL_BASE_URL", default_base_url),
             model=os.environ.get(f"{env_prefix}_MODEL_NAME", default_model),
             api_key=os.environ.get(f"{env_prefix}_MODEL_API_KEY"),
+            # The fallback has had {PREFIX}_FALLBACK_CONCURRENCY since Phase 2
+            # and the primary had nothing, so it silently took
+            # ProviderConfig's default of 1 -- correct when the primary was a
+            # single-slot local llama.cpp server, wrong once it is a hosted
+            # API that can take many requests at once. Left at 1 it caps the
+            # whole system however high MAX_RUNNING_AGENTS goes, because every
+            # agent's calls queue on one semaphore (routing.ConcurrencyGate
+            # keys by provider NAME, shared across roles).
+            concurrency_limit=int(os.environ.get(f"{env_prefix}_MODEL_CONCURRENCY", "1")),
             max_tokens=resolved_max_tokens,
             extra_body=_thinking_off(f"{env_prefix}_MODEL_DISABLE_THINKING"),
         )
