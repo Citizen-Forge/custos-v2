@@ -240,7 +240,7 @@ def next_assigned_ticket(busy_seats: set[str] | None = None) -> tuple[dict | Non
             return issue, seat_id
 
     for issue in beads.ready():
-        if not dispatchable(issue) or _skip(issue):
+        if not dispatchable(issue) or beads.is_flagged_for_human(issue) or _skip(issue):
             continue
         seat_id = beads.assigned_seat(issue)
         if seat_id and seat_id not in busy:

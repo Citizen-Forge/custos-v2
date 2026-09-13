@@ -12,7 +12,7 @@ import os
 import psycopg
 
 from harness import beads, verifications
-from harness.verifier import verify_ticket
+from harness.verifier import MAX_VERIFIER_REWORKS, verify_ticket
 
 
 class FakeModel:
@@ -137,3 +137,50 @@ def test_prompt_includes_real_ticket_evidence():
     assert "the specific criteria text" in captured["prompt"]
     assert "the specific notes text" in captured["prompt"]
     assert "the specific close reason text" in captured["prompt"]
+
+
+# -- the rework loop --------------------------------------------------
+#
+# A fail used to be recorded and then parked (reopened only when the test
+# suite was objectively broken, otherwise just flagged), so the verifier's
+# finding sat unactioned on the board. It now goes back to an agent with
+# the finding attached, bounded by MAX_VERIFIER_REWORKS.
+
+
+def test_failed_verification_requeues_with_the_finding():
+    conn = _conn()
+    beads.ensure_initialized()
+    issue = beads.create("rework me", "x", acceptance_criteria="must do the thing")
+    beads.claim(issue["id"])
+    beads.set_metadata(issue["id"], "completion_summary", "I did the thing")
+    beads.set_metadata(issue["id"], "work_commit", "abc123")
+    beads.close(issue["id"], reason="done")
+
+    model = FakeModel(json.dumps({"verdict": "fail", "reasoning": "the thing was not done"}))
+    result = verify_ticket(conn, issue["id"], model)
+
+    assert result["verdict"] == "fail"
+    current = beads.show(issue["id"])
+    assert current["status"] == "open", "a failed ticket must go back in the queue"
+    assert beads.is_flagged_for_human(current) is False, "requeued work must be dispatchable"
+    meta = current.get("metadata") or {}
+    assert meta.get("rework_count") == "1"
+    assert "the thing was not done" in (meta.get("rework_reason") or "")
+    assert not meta.get("completion_summary"), "the old claim must not re-close the ticket"
+    assert verifications.get_for_issue(conn, issue["id"])["verdict"] == "fail"
+
+
+def test_requeue_is_bounded_then_flags_for_a_human():
+    conn = _conn()
+    beads.ensure_initialized()
+    issue = beads.create("exhausted", "x", acceptance_criteria="must do the thing")
+    beads.claim(issue["id"])
+    beads.set_metadata(issue["id"], "rework_count", str(MAX_VERIFIER_REWORKS))
+    beads.close(issue["id"], reason="done")
+
+    result = verify_ticket(
+        conn, issue["id"], FakeModel(json.dumps({"verdict": "fail", "reasoning": "still wrong"}))
+    )
+
+    assert result["verdict"] == "fail"
+    assert beads.is_flagged_for_human(beads.show(issue["id"])) is True

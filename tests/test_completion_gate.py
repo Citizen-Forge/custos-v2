@@ -44,6 +44,29 @@ class StubRuntime:
         return None
 
 
+class CapturingRuntime:
+    """A fresh-start runtime (no existing graph state) that records the
+    initial state worker.work_one_ticket passes to the graph, so the opening
+    prompt can be asserted on."""
+
+    def __init__(self, seat_id, captured):
+        self.seat_id = seat_id
+        self.system_prompt = None
+        self.who = seat_id
+        self.captured = captured
+        self.graph = self
+
+    def get_state(self, config):
+        class S:
+            values = None  # falsy -> worker takes the "starting thread" path
+
+        return S()
+
+    def invoke(self, state, config=None):
+        self.captured["state"] = state
+        return None
+
+
 def _assigned_story(seat_id):
     project = beads.create("gate proj", "d", issue_type="epic", priority=1)
     story = beads.create("gate story", "d", parent=project["id"])
@@ -94,6 +117,18 @@ def test_refusal_still_wins_over_the_completion_gate():
     assert beads.show(story["id"])["status"] != "closed"
 
 
+def test_rework_reason_is_in_the_initial_prompt():
+    """A verifier-requeued ticket carries the finding that failed it; the
+    fresh attempt's opening prompt must include it, or the agent re-submits
+    the same work and the rework loop burns its budget for nothing."""
+    story = _assigned_story("rework-seat")
+    beads.set_metadata(story["id"], "rework_reason", "the suite never asserted determinism")
+
+    captured = {}
+    worker.work_one_ticket(CapturingRuntime("rework-seat", captured), beads.show(story["id"]))
+
+    prompt = captured["state"]["messages"][-1][1]
+    assert "the suite never asserted determinism" in prompt
 # -- acceptance criteria ---------------------------------------------
 
 

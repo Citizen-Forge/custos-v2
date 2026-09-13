@@ -18,10 +18,20 @@ refused."
 
 import json
 import logging
+import os
 
 from . import beads, verifications, workspaces
 
 log = logging.getLogger(__name__)
+
+# How many times a failed verification sends a ticket back to an agent
+# before it is parked for a human instead. The point of re-queuing is that
+# the verifier's finding gets acted on, not merely recorded -- but a
+# reopened ticket re-blocks its dependents (see the comment on the old
+# fail branch), so the loop has to be finite. Two attempts rides out a
+# verdict the agent can actually fix, then hands a genuine impasse to a
+# person rather than churning forever.
+MAX_VERIFIER_REWORKS = int(os.environ.get("MAX_VERIFIER_REWORKS", "2"))
 
 PROMPT = """You are verifying whether completed work actually meets its stated acceptance \
 criteria. You are a SEPARATE reviewer, not the agent that did the work -- judge honestly \
@@ -120,21 +130,69 @@ def _describe_tests(tests: dict | None) -> str:
     )
 
 
+def _reset_thread(conn, issue_id: str) -> None:
+    """Drop the ticket's LangGraph thread so a requeued attempt genuinely
+    starts over.
+
+    Without this, re-queuing is a no-op that lies: the graph for that
+    ticket has already reached END, so worker.work_one_ticket's resume
+    returns immediately, and (before completion_summary is cleared) the
+    ticket would just be re-closed with its old claim. A fresh thread with
+    the verifier's finding in the opening prompt is what makes the agent
+    re-attempt. Best-effort: the checkpointer tables are absent in some
+    tests, and a failed reset must not abort the verdict itself."""
+    try:
+        with conn.cursor() as cur:
+            for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+                cur.execute(f"DELETE FROM {table} WHERE thread_id = %s", (issue_id,))
+    except Exception:
+        log.exception("could not reset the graph thread for %s", issue_id)
+
+
+def requeue_for_rework(conn, issue_id: str, reasoning: str, attempt: int) -> None:
+    """Send a verification-failed ticket back to an agent, carrying the
+    verifier's actual finding.
+
+    Clearing completion_summary is load-bearing: worker.work_one_ticket
+    closes a ticket as soon as that key is set, so leaving it would let the
+    old claim close the ticket again the moment capacity frees, with the
+    verifier's finding never read. work_commit is cleared so the verifier's
+    idempotency (which is per-commit) judges the next attempt's diff
+    instead of skipping it."""
+    beads.set_metadata(issue_id, "rework_count", str(attempt))
+    beads.set_metadata(issue_id, "rework_reason", reasoning[:4000])
+    for key in ("completion_summary", "work_commit"):
+        try:
+            beads.unset_metadata(issue_id, key)
+        except Exception:
+            log.exception("could not clear %s on %s", key, issue_id)
+    try:
+        beads.remove_human_flag(issue_id)
+    except Exception:
+        log.exception("could not clear the human flag on %s", issue_id)
+    beads.reopen(issue_id, f"verifier fail #{attempt}: {reasoning}")
+    _reset_thread(conn, issue_id)
+
+
 def verify_ticket(conn, issue_id: str, model) -> dict | None:
-    """Returns the recorded verdict dict, or None if this ticket isn't a
-    candidate for verification: no acceptance criteria were ever set
-    (nothing to check against), it isn't closed yet (nothing to verify),
-    or it's already been verified (idempotent -- re-running the verifier
-    across the same tickets shouldn't re-judge them every time). An
-    unparseable model response fails closed to "fail", same posture as
-    reviewer.py -- an unverifiable verdict is not a pass."""
+    """The recorded verdict dict, or None when the ticket isn't a candidate:
+    no acceptance criteria, not closed, or already verified for this commit.
+
+    The idempotency check is per-commit, not per-issue: a verdict already
+    recorded for the commit under judgement is skipped, but a ticket whose
+    work_commit has changed since (i.e. it was requeued after a fail and
+    produced new work) is judged again. An unparseable model response
+    fails closed to "fail", same posture as reviewer.py -- an unverifiable
+    verdict is not a pass."""
     issue = beads.show(issue_id)
     criteria = beads.acceptance_criteria(issue)
     if not criteria:
         return None
     if issue.get("status") != "closed":
         return None
-    if verifications.get_for_issue(conn, issue_id):
+    current_commit = (issue.get("metadata") or {}).get("work_commit")
+    existing = verifications.get_for_issue(conn, issue_id)
+    if existing and existing.get("work_commit") == current_commit:
         return None
 
     seat_id = beads.assigned_seat(issue) or issue.get("assignee") or "unknown"
@@ -175,30 +233,28 @@ def verify_ticket(conn, issue_id: str, model) -> dict | None:
             "zero tests, so it is not evidence of anything. " + reasoning
         )
 
-    verifications.record(conn, issue_id, seat_id, verdict, reasoning)
+    verifications.record(conn, issue_id, seat_id, verdict, reasoning, work_commit=current_commit)
 
-    # What a fail verdict costs depends on whether we reopen. Reopening
-    # re-blocks every dependent, which is right when the work genuinely
-    # is not there and catastrophic when the verdict is wrong: on
-    # 2026-09-09 a false fail on workspace-9jg.1.6 -- scaffolding whose
-    # suite was passing 21 of 21 at the time -- reopened the ticket and
-    # froze all 73 dependents for sixteen hours. The morning of the same
-    # day, the opposite: real breakage stayed closed and released those
-    # dependents onto a scaffold whose tests ran nothing.
-    #
-    # So gate the expensive half on evidence that does not depend on a
-    # model's judgement. If the measured suite is broken or hollow, the
-    # work objectively is not done -- reopen. If it genuinely passes, a
-    # fail is a judgement call (a missing README, thin coverage); flag it
-    # for a human, but let the dependents keep moving.
+    # A fail must be actioned, not just recorded. The ticket goes back to
+    # an agent with the verifier's finding attached (requeue_for_rework),
+    # and only after MAX_VERIFIER_REWORKS attempts is it parked for a
+    # human. This replaced the old split -- reopen when the test suite was
+    # objectively broken, otherwise only flag -- which left judgement-call
+    # fails sitting unactioned on the board forever. The cost of reopening
+    # is real (it re-blocks dependents; a false fail once froze 73 of them
+    # for sixteen hours, see the git history), which is exactly why the
+    # loop is bounded rather than unbounded.
     if verdict == "fail":
-        objectively_unfinished = tests is not None and (
-            tests["exit"] != 0 or tests["ran"] == 0
-        )
+        attempt = int((issue.get("metadata") or {}).get("rework_count") or 0) + 1
         try:
-            if objectively_unfinished:
-                beads.reopen(issue_id, f"verification failed: {reasoning}")
-            beads.flag_for_human(issue_id, f"verification failed: {reasoning}")
+            if attempt <= MAX_VERIFIER_REWORKS:
+                log.info("requeuing %s for rework attempt %s: %s", issue_id, attempt, reasoning[:200])
+                requeue_for_rework(conn, issue_id, reasoning, attempt)
+            else:
+                beads.flag_for_human(
+                    issue_id,
+                    f"verification failed after {MAX_VERIFIER_REWORKS} rework attempt(s): {reasoning}",
+                )
         except Exception:
             log.exception("could not act on failed verification for %s", issue_id)
 

@@ -284,6 +284,23 @@ def test_next_assigned_ticket_skips_seats_already_running(monkeypatch):
     assert seat == "seat-2"
 
 
+def test_human_flagged_ready_work_is_not_dispatched(monkeypatch):
+    """The in_progress path skipped parked tickets but the ready path did
+    not, so a ticket reopened-and-flagged (the old failed-verification
+    shape) could be picked back up. Both paths must skip them."""
+    monkeypatch.setattr(dispatcher, "held_projects", lambda: {})
+    monkeypatch.setattr(dispatcher.beads, "in_progress", lambda: [])
+    monkeypatch.setattr(dispatcher.beads, "ready", lambda: [
+        {"id": "parked.1", "issue_type": "task", "labels": ["human"],
+         "metadata": {"assigned_seat": "seat-1"}},
+    ])
+
+    issue, seat = dispatcher.next_assigned_ticket(busy_seats=set())
+
+    assert issue is None
+    assert seat is None
+
+
 # -- observability ----------------------------------------------------
 
 

@@ -260,6 +260,21 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
                 f"{context}\n\n---\n\nTicket: {issue['title']}\n\n"
                 f"{issue.get('description', '')}"
             )
+            # A ticket requeued by the verifier carries the finding that
+            # failed it. Without this the agent re-attempts blind and
+            # re-submits the same work (the verifier's idempotency is
+            # per-commit, so that just fails again until the rework budget
+            # is gone). `issue` came from `bd list`, which carries no
+            # metadata, so the reason is fetched explicitly.
+            rework = (beads.show(thread_id).get("metadata") or {}).get("rework_reason")
+            if rework:
+                prompt += (
+                    "\n\n---\n\nA previous attempt at this ticket was REJECTED by a "
+                    "separate verification pass for this reason:\n\n"
+                    f"{rework}\n\n"
+                    "Address that specific problem. Do not resubmit the previous "
+                    "approach unchanged."
+                )
             initial_messages = (
                 [("system", runtime.system_prompt)] if runtime.system_prompt else []
             ) + [("user", prompt)]

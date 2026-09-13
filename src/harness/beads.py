@@ -112,6 +112,25 @@ def set_metadata(issue_id: str, key: str, value: str, actor: str = DEFAULT_ACTOR
     )[0]
 
 
+def unset_metadata(issue_id: str, key: str, actor: str = DEFAULT_ACTOR) -> dict:
+    """Remove one metadata key. Used by the verifier's rework requeue to
+    clear `completion_summary`/`work_commit` from a failed attempt, so the
+    next dispatch cannot mistake the old completion claim for a new one."""
+    return json.loads(
+        _run(["update", issue_id, "--unset-metadata", key], actor=actor)
+    )[0]
+
+
+def remove_human_flag(issue_id: str, actor: str = DEFAULT_ACTOR) -> dict:
+    """Drop the `human` label. A ticket requeued for rework must not stay
+    parked -- both dispatch and worker._next_ticket skip flagged issues, so
+    leaving the label on would re-open a ticket nothing was allowed to
+    touch."""
+    return json.loads(
+        _run(["update", issue_id, "--remove-label", "human"], actor=actor)
+    )[0]
+
+
 def add_dependency(blocked_id: str, blocker_id: str, actor: str = DEFAULT_ACTOR) -> dict:
     """Record that `blocked_id` cannot be dispatched until `blocker_id`
     closes -- `bd dep add <blocked> <blocker>`, bd's own phrasing (the
@@ -344,6 +363,16 @@ def flag_for_human(issue_id: str, reason: str, actor: str = DEFAULT_ACTOR) -> di
 
 def is_flagged_for_human(issue: dict) -> bool:
     return "human" in (issue.get("labels") or [])
+
+
+def parked_for_human() -> list[dict]:
+    """Every human-flagged issue, WITH notes/metadata/labels.
+
+    `list_all` returns the lean shape (`bd list --all` carries no notes,
+    metadata or labels -- see its docstring), so recovering *why* something
+    was parked needs this `--long` variant. Used by the maintenance script
+    that requeues failed verifications."""
+    return json.loads(_run(["list", "--label", "human", "--long", "--limit", "0"]))
 
 
 def append_note(issue_id: str, text: str, actor: str = DEFAULT_ACTOR) -> dict:

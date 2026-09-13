@@ -25,22 +25,33 @@ def init_table(conn) -> None:
         )
         """
     )
+    # Added with the verifier's rework loop (2026-09-13). A verdict is
+    # idempotent only for the commit it judged: once a failed ticket is
+    # requeued and produces a new commit, verifier.verify_ticket must judge
+    # the new work rather than skip it as "already verified". Existing rows
+    # keep NULL and so are re-judged on their next close, which is the
+    # desired backfill.
+    conn.execute("ALTER TABLE verifications ADD COLUMN IF NOT EXISTS work_commit TEXT")
 
 
-def record(conn, issue_id: str, seat_id: str, verdict: str, reasoning: str) -> int:
+def record(
+    conn, issue_id: str, seat_id: str, verdict: str, reasoning: str, work_commit: str | None = None
+) -> int:
     row = conn.execute(
-        "INSERT INTO verifications (issue_id, seat_id, verdict, reasoning) VALUES (%s, %s, %s, %s) "
+        "INSERT INTO verifications (issue_id, seat_id, verdict, reasoning, work_commit) "
+        "VALUES (%s, %s, %s, %s, %s) "
         "ON CONFLICT (issue_id) DO UPDATE SET seat_id = EXCLUDED.seat_id, verdict = EXCLUDED.verdict, "
-        "reasoning = EXCLUDED.reasoning, verified_at = now() "
+        "reasoning = EXCLUDED.reasoning, work_commit = EXCLUDED.work_commit, verified_at = now() "
         "RETURNING id",
-        (issue_id, seat_id, verdict, reasoning),
+        (issue_id, seat_id, verdict, reasoning, work_commit),
     ).fetchone()
     return row[0]
 
 
 def get_for_issue(conn, issue_id: str) -> dict | None:
     row = conn.execute(
-        "SELECT id, issue_id, seat_id, verdict, reasoning, verified_at FROM verifications WHERE issue_id = %s",
+        "SELECT id, issue_id, seat_id, verdict, reasoning, verified_at, work_commit "
+        "FROM verifications WHERE issue_id = %s",
         (issue_id,),
     ).fetchone()
     return _row_to_dict(row) if row else None
@@ -48,8 +59,8 @@ def get_for_issue(conn, issue_id: str) -> dict | None:
 
 def list_for_seat(conn, seat_id: str) -> list[dict]:
     rows = conn.execute(
-        "SELECT id, issue_id, seat_id, verdict, reasoning, verified_at FROM verifications "
-        "WHERE seat_id = %s ORDER BY verified_at",
+        "SELECT id, issue_id, seat_id, verdict, reasoning, verified_at, work_commit "
+        "FROM verifications WHERE seat_id = %s ORDER BY verified_at",
         (seat_id,),
     ).fetchall()
     return [_row_to_dict(r) for r in rows]
@@ -81,4 +92,5 @@ def _row_to_dict(row) -> dict:
         "verdict": row[3],
         "reasoning": row[4],
         "verified_at": row[5],
+        "work_commit": row[6],
     }
