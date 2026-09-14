@@ -208,6 +208,7 @@ def test_legacy_verdict_is_rejudged_when_requeued():
     issue = beads.create("legacy rework", "x", acceptance_criteria="must do the thing")
     beads.claim(issue["id"])
     beads.set_metadata(issue["id"], "rework_count", "1")
+    beads.set_metadata(issue["id"], "work_commit", "newsha")
     beads.close(issue["id"])
     verifications.record(conn, issue["id"], "some-seat", "fail", "judged before work_commit existed")
 

@@ -121,6 +121,9 @@ def test_close_blocked_by_an_open_blocker_is_not_a_failure(monkeypatch):
     outcome = worker.work_one_ticket(StubRuntime("blocked-close-seat"), beads.show(story["id"]))
 
     assert outcome == "blocked"
+    # Park it so it cannot pollute next_assigned_ticket for later tests
+    # (the close path is stubbed out in this test).
+    beads.flag_for_human(story["id"], "test cleanup")
 
 
 def test_refusal_still_wins_over_the_completion_gate():
