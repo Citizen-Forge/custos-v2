@@ -558,11 +558,13 @@ const KANBAN_COLUMNS = [
   { key: "closed", label: "Done" },
 ];
 
-// "human" is a label, not a status (beads.is_flagged_for_human), and
-// `bd list` carries labels in the same payload the board already
-// fetches -- so this column costs no extra call.
+// "human" is a label, not a status (beads.is_flagged_for_human). A ticket
+// only counts as Blocked while it is still live work: a CLOSED ticket keeps
+// the label after a verifier-exhausted rework, but it is not blocked work and
+// belongs in Done, not Blocked (found live 2026-09-14 -- the Blocked column
+// was showing closed tickets alongside genuinely-parked open ones).
 function isBlocked(story) {
-  return (story.labels || []).includes("human");
+  return story.status !== "closed" && (story.labels || []).includes("human");
 }
 
 function kanbanCard(story) {
