@@ -197,9 +197,19 @@ def verify_ticket(conn, issue_id: str, model) -> dict | None:
     if issue.get("status") != "closed":
         return None
     current_commit = (issue.get("metadata") or {}).get("work_commit")
+    rework_count = (issue.get("metadata") or {}).get("rework_count")
     existing = verifications.get_for_issue(conn, issue_id)
-    if existing and existing.get("work_commit") == current_commit:
-        return None
+    if existing:
+        if existing.get("work_commit") == current_commit:
+            return None
+        # A verdict recorded before work_commit existed (NULL) is trusted
+        # as-is: re-judging every already-verified legacy ticket would
+        # reopen settled work and re-block its dependents for no reason.
+        # The one exception is a ticket that was explicitly requeued for
+        # rework -- its old verdict must not stand in the way of judging
+        # the new work.
+        if existing.get("work_commit") is None and not rework_count:
+            return None
 
     seat_id = beads.assigned_seat(issue) or issue.get("assignee") or "unknown"
     tests = _tests_for(issue)

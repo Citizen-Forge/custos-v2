@@ -352,7 +352,20 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
         except Exception:
             log.exception("thread %s: could not commit workspace", thread_id)
 
-        beads.close(thread_id, reason=summary[:500])
+        try:
+            beads.close(thread_id, reason=summary[:500])
+        except beads.BeadsError as e:
+            # bd refuses to close a ticket while one of its blockers is
+            # open. The work is done and committed; it simply cannot close
+            # until the blocker does. Counting this as a crash used to flag
+            # a finished ticket for a human after three retries -- observed
+            # live 2026-09-13, workspace-9jg.11.6 while its blocker 1.6 was
+            # mid-rework. Leave it in_progress; the next dispatch resumes
+            # past the graph and retries the close. "blocked" (not
+            # "failed") so the dispatcher does not count it against the
+            # retry budget.
+            log.warning("thread %s could not close yet: %s", thread_id, e)
+            return "blocked"
         log.info("thread %s complete", thread_id)
         return "closed"
     except Exception:

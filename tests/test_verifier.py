@@ -184,3 +184,35 @@ def test_requeue_is_bounded_then_flags_for_a_human():
 
     assert result["verdict"] == "fail"
     assert beads.is_flagged_for_human(beads.show(issue["id"])) is True
+
+
+def test_legacy_verdict_is_trusted_not_rejudged():
+    """A verdict recorded before work_commit existed (NULL) must be left
+    alone -- re-judging every settled ticket would reopen it and re-block
+    its dependents."""
+    conn = _conn()
+    beads.ensure_initialized()
+    issue = beads.create("legacy pass", "x", acceptance_criteria="must do the thing")
+    beads.claim(issue["id"])
+    beads.close(issue["id"])
+    verifications.record(conn, issue["id"], "some-seat", "pass", "judged before work_commit existed")
+
+    assert verify_ticket(conn, issue["id"], FakeModel("should never be called")) is None
+
+
+def test_legacy_verdict_is_rejudged_when_requeued():
+    """A requeued ticket's old verdict must not block judging its new work,
+    even though that verdict predates the work_commit column."""
+    conn = _conn()
+    beads.ensure_initialized()
+    issue = beads.create("legacy rework", "x", acceptance_criteria="must do the thing")
+    beads.claim(issue["id"])
+    beads.set_metadata(issue["id"], "rework_count", "1")
+    beads.close(issue["id"])
+    verifications.record(conn, issue["id"], "some-seat", "fail", "judged before work_commit existed")
+
+    result = verify_ticket(
+        conn, issue["id"], FakeModel(json.dumps({"verdict": "pass", "reasoning": "now it does"}))
+    )
+
+    assert result["verdict"] == "pass"

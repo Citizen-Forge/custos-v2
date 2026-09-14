@@ -105,6 +105,24 @@ def test_a_claimed_completion_closes_with_its_summary():
     assert "tick.ts" in (current.get("close_reason") or "")
 
 
+def test_close_blocked_by_an_open_blocker_is_not_a_failure(monkeypatch):
+    """bd refuses to close a ticket whose blocker is still open -- which
+    happens while a re-opened blocker is mid-rework. That is not a crash (the
+    work is done and committed), so it must not burn the retry budget and
+    park the ticket for a human. Regression for workspace-9jg.11.6."""
+    story = _assigned_story("blocked-close-seat")
+    beads.set_metadata(story["id"], "completion_summary", "did the work")
+
+    def refuse(*a, **k):
+        raise beads.BeadsError("cannot close: blocked by open issues [x]")
+
+    monkeypatch.setattr(beads, "close", refuse)
+
+    outcome = worker.work_one_ticket(StubRuntime("blocked-close-seat"), beads.show(story["id"]))
+
+    assert outcome == "blocked"
+
+
 def test_refusal_still_wins_over_the_completion_gate():
     """refuse_ticket must keep parking a ticket for a human rather than
     falling through to the unclaimed path."""
