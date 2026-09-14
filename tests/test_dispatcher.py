@@ -36,10 +36,12 @@ def test_projects_and_epics_are_not_dispatchable():
 
 
 def test_next_assigned_ticket_finds_assigned_work(monkeypatch):
-    # Constant order keeps this test about *finding* assigned work; roadmap
-    # ordering has its own test, and the shared test workspace carries
-    # leftovers that would otherwise decide the min.
+    # Constant order and no in-progress leftovers keeps this test about
+    # *finding* assigned work; roadmap ordering has its own test, and the
+    # shared test workspace carries leftovers that would otherwise decide
+    # the min.
     monkeypatch.setattr(dispatcher, "_order", lambda issue: ())
+    monkeypatch.setattr(beads, "in_progress", lambda: [])
     project = beads.create("assigned proj", "d", issue_type="epic", priority=1)
     story = beads.create("assigned story", "d", parent=project["id"])
     beads.assign_to_seat(story["id"], "some-seat")

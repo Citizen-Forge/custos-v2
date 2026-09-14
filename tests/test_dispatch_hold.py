@@ -55,9 +55,10 @@ def test_held_assigned_ticket_is_skipped_not_returned():
 
 
 def test_a_held_ticket_does_not_starve_another_project(monkeypatch):
-    # Constant order: this test is about the hold not starving the other
-    # project, not about roadmap ordering (which has its own test).
+    # Constant order and no in-progress leftovers: this test is about the
+    # hold not starving the other project, not about ordering or resumes.
     monkeypatch.setattr(dispatcher, "_order", lambda issue: ())
+    monkeypatch.setattr(beads, "in_progress", lambda: [])
     held_p, held_s = _project_with_story("starve held", hold="on hold")
     beads.assign_to_seat(held_s["id"], "seat-a")
     open_p, open_s = _project_with_story("starve open")
