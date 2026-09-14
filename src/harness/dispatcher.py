@@ -232,20 +232,26 @@ def next_assigned_ticket(busy_seats: set[str] | None = None) -> tuple[dict | Non
 
         return toolchain.project_id_for(issue["id"]) in held
 
-    for issue in beads.in_progress():
-        if not dispatchable(issue) or beads.is_flagged_for_human(issue) or _skip(issue):
-            continue
-        seat_id = beads.assigned_seat(issue)
-        if seat_id and seat_id not in busy:
-            return issue, seat_id
+    def _pick(issues):
+        """Best candidate by roadmap order among this pool. Choosing the min
+        rather than bd's first result is what keeps dispatch depth-first by
+        epic instead of interleaving epics."""
+        best = None
+        best_seat = None
+        for issue in issues:
+            if not dispatchable(issue) or beads.is_flagged_for_human(issue) or _skip(issue):
+                continue
+            seat_id = beads.assigned_seat(issue)
+            if not seat_id or seat_id in busy:
+                continue
+            if best is None or _order(issue) < _order(best):
+                best, best_seat = issue, seat_id
+        return best, best_seat
 
-    for issue in beads.ready():
-        if not dispatchable(issue) or beads.is_flagged_for_human(issue) or _skip(issue):
-            continue
-        seat_id = beads.assigned_seat(issue)
-        if seat_id and seat_id not in busy:
-            return issue, seat_id
-    return None, None
+    orphaned = _pick(beads.in_progress())
+    if orphaned[0] is not None:
+        return orphaned
+    return _pick(beads.ready())
 
 
 def next_unassigned_ticket() -> dict | None:
@@ -268,7 +274,7 @@ def next_unassigned_ticket() -> dict | None:
             continue
         if toolchain.project_id_for(issue["id"]) in held:
             continue
-        if best is None or _priority(issue) < _priority(best):
+        if best is None or _order(issue) < _order(best):
             best = issue
     return best
 
@@ -287,16 +293,65 @@ def _priority(issue: dict) -> int:
     return p if isinstance(p, int) else 99
 
 
+def _seg_key(segments: list[str]) -> tuple:
+    """Natural id ordering, so `.2` precedes `.10` -- a plain string sort
+    puts `.10` first."""
+    return tuple((0, int(s)) if s.isdigit() else (1, s) for s in segments)
+
+
+# Fresh work is chosen in roadmap order: the highest-priority project, then
+# its highest-priority epic, then the story. Without this, dispatch drains
+# `bd`'s raw ordering, which interleaves epics -- the board showed the first
+# epic at 1/6 while later epics were already in flight (2026-09-14). The
+# epic's OWN priority is the load-bearing part: Silent Run's stories are all
+# P2, so only the epic they hang under distinguishes "finish epic 1 first".
+# Cached because it needs the whole issue list (one `bd list --all`, ~5s).
+_ORDER_TTL = 60.0
+_order_cache: dict = {"at": -1e9, "keys": {}}
+
+
+def _order_keys() -> dict:
+    now = time.monotonic()
+    if now - _order_cache["at"] < _ORDER_TTL:
+        return _order_cache["keys"]
+
+    issues = beads.list_all()
+    prio = {i["id"]: (i.get("priority") if isinstance(i.get("priority"), int) else 9) for i in issues}
+    keys = {}
+    for issue in issues:
+        segments = issue["id"].split(".")
+        project_id = segments[0]
+        epic_id = ".".join(segments[:2]) if len(segments) >= 2 else project_id
+        own = issue.get("priority") if isinstance(issue.get("priority"), int) else 9
+        keys[issue["id"]] = (
+            prio.get(project_id, 9),          # project priority
+            prio.get(epic_id, 9),             # epic priority
+            own,                               # the story's own priority
+            _seg_key(segments[:2]),            # epic id, naturally
+            _seg_key(segments),                # story id, naturally
+        )
+    _order_cache.update(at=now, keys=keys)
+    return keys
+
+
+def _order(issue: dict) -> tuple:
+    key = _order_keys().get(issue["id"])
+    if key is not None:
+        return key
+    return (9, 9, _priority(issue), _seg_key([]), _seg_key(issue["id"].split(".")))
+
+
 def _outranks(challenger: dict | None, incumbent: dict | None) -> bool:
     """True if `challenger` should be brokered ahead of the already-
-    assigned `incumbent`. Strictly-better priority only: at equal
-    priority the assigned ticket keeps precedence, so a seat's in-flight
-    backlog is drained rather than churned by same-priority preemption."""
+    assigned `incumbent`, using the same roadmap ordering dispatch uses.
+    Strictly-better only: at the same position the assigned ticket keeps
+    precedence, so a seat's in-flight backlog is drained rather than
+    churned by same-position preemption."""
     if challenger is None:
         return False
     if incumbent is None:
         return True
-    return _priority(challenger) < _priority(incumbent)
+    return _order(challenger) < _order(incumbent)
 
 
 def running_agents() -> list[dict]:

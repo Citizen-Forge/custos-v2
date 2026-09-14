@@ -70,8 +70,13 @@ test yet.
 project (see list_projects for current priorities and any human guidance recorded there). Do \
 NOT spread assignment evenly across all projects -- work the highest-priority project's ready \
 tickets first, and only pull from a lower-priority project when the higher one has nothing \
-ready to assign or is genuinely blocked. If a human's guidance changes what's most urgent, that \
-should visibly change what you assign next, not just be acknowledged and ignored.
+ready to assign or is genuinely blocked. Within a project, drain one epic before starting the \
+next: prefer the highest-priority epic that still has ready stories, and do not begin another \
+epic's stories while that one still has unassigned or in-progress stories. The roadmap is a \
+sequence of epics, not a set to run in parallel -- a board showing an early epic half-done \
+while later epics are in flight is a prioritization failure. If a human's guidance changes \
+what's most urgent, that should visibly change what you assign next, not just be acknowledged \
+and ignored.
 
 Use the tools available to inspect the roster, outcomes, and project priorities before \
 deciding. When you've handled everything you can, stop."""

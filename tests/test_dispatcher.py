@@ -284,6 +284,35 @@ def test_next_assigned_ticket_skips_seats_already_running(monkeypatch):
     assert seat == "seat-2"
 
 
+def test_next_assigned_ticket_prefers_the_earlier_epic(monkeypatch):
+    """Dispatch must drain epics in roadmap order: a story under an earlier
+    (higher-priority) epic wins even when a later epic's story has a better
+    story-level priority. Found live 2026-09-14 -- the first epic sat at
+    1/6 while later epics were already in flight because selection used
+    raw `bd` order."""
+    monkeypatch.setattr(dispatcher, "held_projects", lambda: {})
+    monkeypatch.setattr(dispatcher.beads, "list_all", lambda: [
+        {"id": "proj", "priority": 1},
+        {"id": "proj.1", "priority": 0},
+        {"id": "proj.2", "priority": 1},
+    ])
+    monkeypatch.setattr(dispatcher.beads, "in_progress", lambda: [])
+    monkeypatch.setattr(dispatcher.beads, "ready", lambda: [
+        # later epic, but a better story-level priority
+        {"id": "proj.2.1", "issue_type": "task", "priority": 0,
+         "metadata": {"assigned_seat": "seat-2"}},
+        # earlier epic, ordinary story priority
+        {"id": "proj.1.1", "issue_type": "task", "priority": 2,
+         "metadata": {"assigned_seat": "seat-1"}},
+    ])
+    dispatcher._order_cache["at"] = -1e9  # force a recompute against the stub
+
+    issue, seat = dispatcher.next_assigned_ticket(busy_seats=set())
+
+    assert issue["id"] == "proj.1.1"
+    assert seat == "seat-1"
+
+
 def test_human_flagged_ready_work_is_not_dispatched(monkeypatch):
     """The in_progress path skipped parked tickets but the ready path did
     not, so a ticket reopened-and-flagged (the old failed-verification
