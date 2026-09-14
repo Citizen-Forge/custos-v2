@@ -78,7 +78,7 @@ def test_dispatch_refuses_a_ticket_whose_toolchain_is_missing(monkeypatch):
     # leftover higher-priority unassigned one would now route tick() to
     # the product-owner instead of the toolchain gate.
     monkeypatch.setattr(
-        dispatcher, "next_assigned_ticket", lambda: (beads.show(story["id"]), "tc-seat")
+        dispatcher, "next_assigned_ticket", lambda *a, **k: (beads.show(story["id"]), "tc-seat")
     )
     monkeypatch.setattr(dispatcher, "next_unassigned_ticket", lambda: None)
 
