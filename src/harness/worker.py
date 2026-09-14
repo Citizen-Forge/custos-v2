@@ -223,6 +223,9 @@ def build_seat_runtime(
     graph = build_graph_from_model(
         worker_model, checkpointer, tools=tools, classify=classify,
         turn_budget=turn_budget, workspace_root=workspace_root,
+        # Worker runs only: a seat that stops without complete_ticket gets
+        # one nudge to finish before the run is treated as unclaimed.
+        completion_gate=True,
     )
     return SeatRuntime(seat_id, graph, system_prompt, who, model=worker_model)
 

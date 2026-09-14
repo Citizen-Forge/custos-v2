@@ -13,7 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from harness import beads
-from harness.graph import HANDOFF_NUDGE, build_graph_from_model
+from harness.graph import COMPLETION_NUDGE, HANDOFF_NUDGE, build_graph_from_model
 
 
 class RefusesImmediately:
@@ -109,6 +109,10 @@ class ConsumesATurnThenRespondsToNudge:
 
     def invoke(self, messages):
         last = messages[-1] if messages else None
+        if isinstance(last, HumanMessage) and last.content == COMPLETION_NUDGE:
+            # This model has nothing more to do; stop cleanly (no tool call)
+            # so the graph can end rather than looping on remember_fact.
+            return AIMessage(content="done")
         if isinstance(last, HumanMessage) and last.content == HANDOFF_NUDGE:
             return AIMessage(
                 content="",

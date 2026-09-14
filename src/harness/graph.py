@@ -38,9 +38,9 @@ tickets, request a new specialist), and future seats may too. Defaults to
 keeps working unchanged.
 """
 
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, StateGraph, START
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import ToolNode
 
 from . import permissions
 from .classifier import Verdict
@@ -53,8 +53,51 @@ HANDOFF_NUDGE = (
     "write_handoff_note with what's done and what's left, then stop."
 )
 
+# The tools that legitimately end a ticket. complete_ticket records the
+# work; refuse_ticket escalates to a human; decline_ticket hands it back.
+# A run that stops without one of these has neither done the work nor said
+# why not, which is what worker.work_one_ticket then flags for a human.
+TERMINAL_TOOL_NAMES = {"complete_ticket", "refuse_ticket", "decline_ticket"}
 
-def build_graph_from_model(model, checkpointer, tools=None, classify=None, interrupt_after=None, turn_budget=None, workspace_root=None):
+# One extra turn, offered when the model stops without a terminal call.
+# Off the back of the strongest remaining failure mode on the board
+# (2026-09-13: ~13 of 16 parked Silent Run tickets read "agent stopped
+# without calling complete_ticket"): the model finishes its reasoning,
+# writes a summary in prose, and ends the turn without ever calling the
+# tool. One nudge converts most of those into a real completion claim.
+# Deliberately ONE, not a loop: a model that ignores the nudge or answers
+# it with more tool calls must not be given an unbounded chance to spin.
+COMPLETION_NUDGE = (
+    "Your turn ended without finishing this ticket: you have not called "
+    "complete_ticket. If the work is genuinely done, call complete_ticket NOW with a "
+    "concrete summary of what you changed and how you checked it. If it is not done and "
+    "you cannot finish it, call refuse_ticket with the reason, or decline_ticket if it "
+    "belongs to another specialist. Do not simply stop again."
+)
+
+
+def _terminal_called(messages: list) -> bool:
+    """True once the model has called complete_ticket/refuse_ticket/
+    decline_ticket at any point in this thread."""
+    for message in messages:
+        for call in getattr(message, "tool_calls", None) or []:
+            if call.get("name") in TERMINAL_TOOL_NAMES:
+                return True
+    return False
+
+
+def _stopped_without_terminal(messages: list) -> bool:
+    """The model's last turn ended on prose, with no tool call and no
+    terminal call already made."""
+    last = messages[-1] if messages else None
+    if not isinstance(last, AIMessage):
+        return False
+    if getattr(last, "tool_calls", None):
+        return False
+    return not _terminal_called(messages)
+
+
+def build_graph_from_model(model, checkpointer, tools=None, classify=None, interrupt_after=None, turn_budget=None, workspace_root=None, completion_gate=False):
     """Build the graph from an already-tool-bound model. Split out from
     `build_graph` so tests can pass a fake model without a real provider.
 
@@ -77,20 +120,38 @@ def build_graph_from_model(model, checkpointer, tools=None, classify=None, inter
     not repeated on every subsequent turn). `None` disables it entirely --
     existing tests that don't pass it are unaffected.
 
+    `completion_gate` (worker only, off otherwise): when the model stops
+    without calling complete_ticket/refuse_ticket/decline_ticket, offer one
+    COMPLETION_NUDGE turn before ending. Opt-in rather than inferred from
+    the toolset so the graph stays a plain ReAct loop for every caller that
+    is not a ticket worker -- scripted test models that end with a tool call
+    should not suddenly grow an extra turn.
+
     `interrupt_after` is test-only (see tests/test_worker_resume.py) --
     production never sets it.
     """
     tools = ALL_TOOLS if tools is None else tools
+    has_completion_gate = completion_gate
 
     def call_model(state: HarnessState):
         turn_count = state.get("turn_count", 0) + 1
+        nudged = state.get("completion_nudged", False)
         messages = state["messages"]
         extra = []
         if turn_budget is not None and turn_count == turn_budget:
             nudge = HumanMessage(content=HANDOFF_NUDGE)
             messages = messages + [nudge]
             extra = [nudge]
-        return {"messages": [*extra, model.invoke(messages)], "turn_count": turn_count}
+        if has_completion_gate and not nudged and _stopped_without_terminal(messages):
+            nudge = HumanMessage(content=COMPLETION_NUDGE)
+            messages = messages + [nudge]
+            extra = [*extra, nudge]
+            nudged = True
+        return {
+            "messages": [*extra, model.invoke(messages)],
+            "turn_count": turn_count,
+            "completion_nudged": nudged,
+        }
 
     def permission_gate(state: HarnessState):
         last = state["messages"][-1]
@@ -127,22 +188,39 @@ def build_graph_from_model(model, checkpointer, tools=None, classify=None, inter
     def route_after_gate(state: HarnessState) -> str:
         return "agent" if isinstance(state["messages"][-1], ToolMessage) else "tools"
 
+    def after_agent(state: HarnessState) -> str:
+        """Where the agent goes when it stops making tool calls.
+
+        Normally END. With a completion gate, a run that stops without a
+        terminal call gets ONE extra turn (see COMPLETION_NUDGE) before
+        ending -- after which it ends regardless, so a model that answers
+        the nudge with more tool calls cannot loop here."""
+        last = state["messages"][-1]
+        if getattr(last, "tool_calls", None):
+            return "permission_gate"
+        if not has_completion_gate or state.get("completion_nudged", False):
+            return END
+        if _terminal_called(state["messages"]):
+            return END
+        return "agent"
+
     builder = StateGraph(HarnessState)
     builder.add_node("agent", call_model)
     builder.add_node("permission_gate", permission_gate)
     builder.add_node("tools", ToolNode(tools))
     builder.add_edge(START, "agent")
-    builder.add_conditional_edges("agent", tools_condition, {"tools": "permission_gate", END: END})
+    builder.add_conditional_edges("agent", after_agent, {"permission_gate": "permission_gate", "agent": "agent", END: END})
     builder.add_conditional_edges("permission_gate", route_after_gate, {"tools": "tools", "agent": "agent"})
     builder.add_edge("tools", "agent")
 
     return builder.compile(checkpointer=checkpointer, interrupt_after=interrupt_after)
 
 
-def build_graph(provider_cfg: ProviderConfig, checkpointer, tools=None, classifier=None, turn_budget=None, workspace_root=None):
+def build_graph(provider_cfg: ProviderConfig, checkpointer, tools=None, classifier=None, turn_budget=None, workspace_root=None, completion_gate=False):
     tools = ALL_TOOLS if tools is None else tools
     model = build_chat_model(provider_cfg).bind_tools(tools)
     return build_graph_from_model(
         model, checkpointer, tools=tools, classify=classifier,
         turn_budget=turn_budget, workspace_root=workspace_root,
+        completion_gate=completion_gate,
     )

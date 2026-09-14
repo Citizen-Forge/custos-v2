@@ -11,3 +11,8 @@ class HarnessState(TypedDict):
     # graph.py reads this. Scoped to one ticket/thread for now, not a
     # cross-ticket "seat" -- see PLAN.md Phase 4 for what's still open.
     turn_count: int
+    # Set once the completion nudge (graph.py) has been offered, so a run
+    # that stops without complete_ticket gets exactly one extra turn and
+    # not an unbounded loop. Missing on threads predating it -- callers
+    # read it with .get(..., False).
+    completion_nudged: bool
