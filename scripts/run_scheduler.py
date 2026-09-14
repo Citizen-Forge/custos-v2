@@ -49,6 +49,7 @@ from harness.overwatch import build_tools as build_overwatch_tools
 from harness.overwatch import run_overwatch_session
 from harness.product_owner import ESCALATION_BRIEF
 from harness.product_owner import ROLE as PRODUCT_OWNER_ROLE
+from harness.product_owner import build_escalation_tools
 from harness.product_owner import build_tools as build_product_owner_tools
 from harness.product_owner import run_triage_session
 from harness.providers import ProviderConfig
@@ -231,7 +232,7 @@ def run_escalations_job(conn_string: str) -> None:
         settings.init_table(conn)
         verifications.init_table(conn)
         requesting_model = RoutedModel(PRODUCT_OWNER_ROLE, routing, gate)
-        tools = build_product_owner_tools(conn, requesting_model)
+        tools = build_escalation_tools(conn, requesting_model)
         agent_model = RoutedModel(PRODUCT_OWNER_ROLE, routing, gate, tools=tools)
         with PostgresSaver.from_conn_string(conn_string) as checkpointer:
             checkpointer.setup()
