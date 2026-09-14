@@ -33,12 +33,35 @@ import uuid
 
 from langchain_core.tools import tool
 
-from . import beads, meta_agent, model_registry, outcomes, seats, settings
+from . import beads, escalations, meta_agent, model_registry, outcomes, seats, settings
 from .graph import build_graph_from_model
 
 ROLE = "product_owner"
 
 DEFAULT_BRIEF = "Triage the current queue."
+
+# A session, not another standing role: the same product-owner, pointed at
+# the escalation queue instead of the unassigned pool. Most escalations are
+# the product-owner's to resolve -- fix an underspecified ticket, name a
+# missing consumer, reassign to the right specialist, or requeue work whose
+# crash cause is fixed -- and only the ones it cannot decide should keep a
+# human's attention.
+ESCALATION_BRIEF = """Tickets other agents parked for a human are waiting. Call \
+`list_escalations`, then take exactly one action on each listed ticket, in order, and do not \
+invent unrelated work.
+
+Choose the action from what the escalation says:
+- Crashed or stopped (run failed, no completion claim) with a cause that is infrastructure, not \
+the work: `requeue_escalation` with a short directive for the next attempt.
+- Underspecified (no acceptance criteria, a missing consumer, an unstated decision): fix that \
+first -- `set_acceptance_criteria`, `split_escalated_ticket`, or `assign_ticket` to a better suit \
+-- then `requeue_escalation` with a directive.
+- A genuine product decision you can make: make it, recording it with \
+`set_acceptance_criteria` or `resolve_escalation` rather than leaving it.
+- Wrong specialist: `assign_ticket` (or `request_new_seat`) then `requeue_escalation`.
+
+Leave a ticket untouched only if it truly needs a person and you cannot decide it. Do not requeue \
+a ticket whose project is on dispatch hold. Stop once every listed escalation has been actioned."""
 
 SYSTEM_PROMPT = """You are the product-owner for an autonomous software delivery system. \
 Several kinds of session you run:
@@ -205,6 +228,50 @@ def build_tools(conn, requesting_model):
             return f"error: {e}"
         return f"{blocked_id} now depends on {blocker_id} -- blocked until it closes"
 
+    @tool
+    def list_escalations() -> str:
+        """Tickets other agents escalated and parked for a human, each with the reason they gave."""
+        items = escalations.pending()
+        if not items:
+            return "no escalations pending"
+        return "\n".join(
+            f"{i['id']} [{i['status']}] {i['title']}\n  reason: {(i.get('notes') or '').strip()[:600]}"
+            for i in items
+        )
+
+    @tool
+    def set_acceptance_criteria(issue_id: str, criteria: str) -> str:
+        """Set or replace a ticket's acceptance criteria -- the usual fix when an escalation
+        says the ticket had none or was underspecified."""
+        beads.set_acceptance_criteria(issue_id, criteria, actor=ROLE)
+        return f"set acceptance criteria on {issue_id}"
+
+    @tool
+    def split_escalated_ticket(issue_id: str, title: str, description: str,
+                               acceptance_criteria: str = "") -> str:
+        """Split an oversized or multi-part escalated ticket by adding a child subtask under it,
+        so the parent can be narrowed and the piece handed out separately."""
+        sub = beads.create(title, description, parent=issue_id,
+                           acceptance_criteria=acceptance_criteria or None)
+        return f"created subtask {sub['id']} under {issue_id}: {sub['title']}"
+
+    @tool
+    def requeue_escalation(issue_id: str, directive: str) -> str:
+        """Resolve an escalation by requeuing the ticket with a directive the next attempt sees.
+        Bounded: after the escalation budget is spent the ticket is left for a human."""
+        try:
+            n = escalations.requeue(conn, issue_id, directive)
+        except Exception as e:
+            return f"error: {e}"
+        return f"requeued {issue_id} (escalation attempt {n} of {escalations.MAX_ESCALATION_ATTEMPTS})"
+
+    @tool
+    def resolve_escalation(issue_id: str, resolution: str) -> str:
+        """Close an escalated ticket with a decision recorded -- for escalations that are answered
+        rather than requeued (accept a refusal, decide an ambiguity, cancel the work)."""
+        beads.respond_to_human(issue_id, resolution, actor=ROLE)
+        return f"resolved {issue_id}"
+
     return [
         list_seats,
         list_unassigned_tickets,
@@ -216,6 +283,11 @@ def build_tools(conn, requesting_model):
         create_epic,
         add_subtask_to_epic,
         add_dependency,
+        list_escalations,
+        set_acceptance_criteria,
+        split_escalated_ticket,
+        requeue_escalation,
+        resolve_escalation,
     ]
 
 

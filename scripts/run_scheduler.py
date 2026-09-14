@@ -47,6 +47,7 @@ from harness.meta_agent import propose_prompt_update
 from harness.overwatch import ROLE as OVERWATCH_ROLE
 from harness.overwatch import build_tools as build_overwatch_tools
 from harness.overwatch import run_overwatch_session
+from harness.product_owner import ESCALATION_BRIEF
 from harness.product_owner import ROLE as PRODUCT_OWNER_ROLE
 from harness.product_owner import build_tools as build_product_owner_tools
 from harness.product_owner import run_triage_session
@@ -211,6 +212,35 @@ def run_verifier_job(conn_string: str) -> None:
                     log.info("verified %s: %s", issue["id"], result["verdict"])
 
 
+def run_escalations_job(conn_string: str) -> None:
+    """Product-owner session over the escalation queue -- tickets other
+    agents parked for a human. Skipped entirely when the queue is empty
+    (no model call), and bounded per ticket by escalations.MAX_ESCALATION_ATTEMPTS."""
+    from harness import escalations
+
+    pending = escalations.pending()
+    if not pending:
+        log.info("escalations: none pending")
+        return
+
+    routing = RoutingTable({PRODUCT_OWNER_ROLE: _chain("product-owner", 6000)})
+    gate = ConcurrencyGate()
+    with psycopg.connect(conn_string, autocommit=True) as conn:
+        prompts.init_table(conn)
+        seats.init_table(conn)
+        settings.init_table(conn)
+        verifications.init_table(conn)
+        requesting_model = RoutedModel(PRODUCT_OWNER_ROLE, routing, gate)
+        tools = build_product_owner_tools(conn, requesting_model)
+        agent_model = RoutedModel(PRODUCT_OWNER_ROLE, routing, gate, tools=tools)
+        with PostgresSaver.from_conn_string(conn_string) as checkpointer:
+            checkpointer.setup()
+            result = run_triage_session(
+                agent_model, tools, checkpointer, brief=ESCALATION_BRIEF
+            )
+    log.info("escalations: %s", result["final_message"][:300])
+
+
 def run_progress_job(conn_string: str) -> None:
     """Check whether running agents are actually getting anywhere.
 
@@ -272,6 +302,7 @@ JOBS = [
     ("overwatch", run_overwatch_job),
     ("meta_agent", run_meta_agent_job),
     ("verifier", run_verifier_job),
+    ("escalations", run_escalations_job),
     ("progress", run_progress_job),
 ]
 
