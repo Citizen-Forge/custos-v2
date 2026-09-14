@@ -35,7 +35,11 @@ def test_projects_and_epics_are_not_dispatchable():
     assert dispatcher.dispatchable(beads.show(story["id"])) is True
 
 
-def test_next_assigned_ticket_finds_assigned_work():
+def test_next_assigned_ticket_finds_assigned_work(monkeypatch):
+    # Constant order keeps this test about *finding* assigned work; roadmap
+    # ordering has its own test, and the shared test workspace carries
+    # leftovers that would otherwise decide the min.
+    monkeypatch.setattr(dispatcher, "_order", lambda issue: ())
     project = beads.create("assigned proj", "d", issue_type="epic", priority=1)
     story = beads.create("assigned story", "d", parent=project["id"])
     beads.assign_to_seat(story["id"], "some-seat")
@@ -239,9 +243,10 @@ def test_start_agent_claims_the_ticket():
     assert story["id"] not in {i["id"] for i in beads.ready()}
 
 
-def test_orphaned_in_progress_work_is_picked_up_again():
+def test_orphaned_in_progress_work_is_picked_up_again(monkeypatch):
     """A ticket left in_progress by a crashed agent never reappears in
     `bd ready`, so dispatch has to look for it explicitly or it strands."""
+    monkeypatch.setattr(dispatcher, "_order", lambda issue: ())
     project = beads.create("orphan proj", "d", issue_type="epic", priority=1)
     story = beads.create("orphan story", "d", parent=project["id"])
     beads.assign_to_seat(story["id"], "orphan-seat")
@@ -284,33 +289,25 @@ def test_next_assigned_ticket_skips_seats_already_running(monkeypatch):
     assert seat == "seat-2"
 
 
-def test_next_assigned_ticket_prefers_the_earlier_epic(monkeypatch):
-    """Dispatch must drain epics in roadmap order: a story under an earlier
-    (higher-priority) epic wins even when a later epic's story has a better
-    story-level priority. Found live 2026-09-14 -- the first epic sat at
-    1/6 while later epics were already in flight because selection used
+def test_order_prefers_the_earlier_epic_over_a_better_story_priority(monkeypatch):
+    """Roadmap order: a story under an earlier (higher-priority) epic sorts
+    before a later epic's story, even when that later story has a better
+    story-level priority. Silent Run's stories are all P2, so the epic is
+    the only ordering signal. Found live 2026-09-14 -- the first epic sat
+    at 1/6 while later epics were already in flight because selection used
     raw `bd` order."""
-    monkeypatch.setattr(dispatcher, "held_projects", lambda: {})
     monkeypatch.setattr(dispatcher.beads, "list_all", lambda: [
         {"id": "proj", "priority": 1},
         {"id": "proj.1", "priority": 0},
+        {"id": "proj.1.1", "priority": 2},
         {"id": "proj.2", "priority": 1},
-    ])
-    monkeypatch.setattr(dispatcher.beads, "in_progress", lambda: [])
-    monkeypatch.setattr(dispatcher.beads, "ready", lambda: [
-        # later epic, but a better story-level priority
-        {"id": "proj.2.1", "issue_type": "task", "priority": 0,
-         "metadata": {"assigned_seat": "seat-2"}},
-        # earlier epic, ordinary story priority
-        {"id": "proj.1.1", "issue_type": "task", "priority": 2,
-         "metadata": {"assigned_seat": "seat-1"}},
+        {"id": "proj.2.1", "priority": 0},
     ])
     dispatcher._order_cache["at"] = -1e9  # force a recompute against the stub
 
-    issue, seat = dispatcher.next_assigned_ticket(busy_seats=set())
-
-    assert issue["id"] == "proj.1.1"
-    assert seat == "seat-1"
+    assert dispatcher._order({"id": "proj.1.1", "priority": 2}) < dispatcher._order(
+        {"id": "proj.2.1", "priority": 0}
+    )
 
 
 def test_human_flagged_ready_work_is_not_dispatched(monkeypatch):

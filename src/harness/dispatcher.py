@@ -274,7 +274,7 @@ def next_unassigned_ticket() -> dict | None:
             continue
         if toolchain.project_id_for(issue["id"]) in held:
             continue
-        if best is None or _order(issue) < _order(best):
+        if best is None or _priority(issue) < _priority(best):
             best = issue
     return best
 
@@ -343,15 +343,14 @@ def _order(issue: dict) -> tuple:
 
 def _outranks(challenger: dict | None, incumbent: dict | None) -> bool:
     """True if `challenger` should be brokered ahead of the already-
-    assigned `incumbent`, using the same roadmap ordering dispatch uses.
-    Strictly-better only: at the same position the assigned ticket keeps
-    precedence, so a seat's in-flight backlog is drained rather than
-    churned by same-position preemption."""
+    assigned `incumbent`. Strictly-better priority only: at equal
+    priority the assigned ticket keeps precedence, so a seat's in-flight
+    backlog is drained rather than churned by same-priority preemption."""
     if challenger is None:
         return False
     if incumbent is None:
         return True
-    return _order(challenger) < _order(incumbent)
+    return _priority(challenger) < _priority(incumbent)
 
 
 def running_agents() -> list[dict]:
