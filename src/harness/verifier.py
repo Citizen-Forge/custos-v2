@@ -85,16 +85,18 @@ Respond with strict JSON and nothing else: \
 
 
 def _diff_for(issue: dict) -> str:
-    """The diff this ticket produced, from the commit made on its behalf
-    when it claimed completion (worker.work_one_ticket). Absent for
-    tickets closed before that existed, and for tickets that changed no
-    files at all -- both are meaningful signals to a verifier, so this
-    returns empty rather than raising."""
+    """The diff this ticket produced.
+
+    Prefers the commits the harness made for this ticket (found by their
+    `<ticket-id>: ` subject), falling back to the recorded work_commit.
+    Absent for a ticket that genuinely changed no files -- which is a
+    meaningful signal to the verifier, so this returns empty rather than
+    raising."""
     sha = (issue.get("metadata") or {}).get("work_commit")
-    if not sha:
-        return ""
     try:
-        return workspaces.commit_diff(workspaces.project_id_for(issue["id"]), sha)
+        return workspaces.diff_for_ticket(
+            workspaces.project_id_for(issue["id"]), issue["id"], sha
+        )
     except Exception:
         return ""
 

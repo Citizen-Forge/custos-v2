@@ -215,6 +215,56 @@ def commit_diff(project_id: str, sha: str, max_chars: int = 20000) -> str:
     return text
 
 
+def commits_for_ticket(project_id: str, ticket_id: str) -> list[str]:
+    """Commit shas whose subject begins `<ticket_id>: ` -- i.e. the commits
+    the harness made on this ticket's behalf (worker.commit_all uses that
+    prefix). Oldest first. Empty when the workspace or git history is
+    absent, or when the agent committed itself without the harness's
+    prefix."""
+    path = path_for(project_id)
+    if not os.path.isdir(path):
+        return []
+    out = subprocess.run(
+        ["git", "log", "--all", "--reverse", "--format=%H%x1f%s"],
+        cwd=path, capture_output=True, text=True, timeout=120,
+    )
+    if out.returncode != 0:
+        return []
+    prefix = f"{ticket_id}:"
+    shas = []
+    for line in out.stdout.splitlines():
+        sha, _, subject = line.partition("\x1f")
+        if sha and subject.startswith(prefix):
+            shas.append(sha)
+    return shas
+
+
+def diff_for_ticket(project_id: str, ticket_id: str, work_commit: str | None = None,
+                    max_chars: int = 20000) -> str:
+    """The diff attributable to a ticket.
+
+    Prefers the commits the harness made for this ticket, found by subject,
+    so a missing or misattributed work_commit cannot hide the work. Falls
+    back to the recorded work_commit when no such commit exists (e.g. the
+    agent ran git itself). Found live 2026-09-14: four tickets (1.6, 13.1,
+    13.4, 1.5) were failed by the verifier on empty or wrong diffs because
+    work_commit had never been recorded or pointed at another seat's
+    commit -- a false fail that parked real, present work."""
+    shas = commits_for_ticket(project_id, ticket_id)
+    if shas:
+        path = path_for(project_id)
+        parent = subprocess.run(
+            ["git", "rev-parse", f"{shas[0]}^"],
+            cwd=path, capture_output=True, text=True, timeout=60,
+        )
+        if parent.returncode == 0 and parent.stdout.strip():
+            return commit_diff(project_id, f"{parent.stdout.strip()}..{shas[-1]}", max_chars)
+        return commit_diff(project_id, shas[-1], max_chars)
+    if work_commit:
+        return commit_diff(project_id, work_commit, max_chars)
+    return ""
+
+
 def run_tests(project_id: str, timeout: int = 600) -> dict | None:
     """Best-effort mechanical run of a project's own test suite.
 

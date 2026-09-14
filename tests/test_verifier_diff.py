@@ -72,6 +72,43 @@ def test_diff_for_a_ticket_with_no_commit_is_empty():
     assert verifier._diff_for({"id": "x.1.1", "metadata": {}}) == ""
 
 
+def test_ticket_commits_are_found_even_without_a_work_commit(projects_root):
+    """The fallback: the harness's own commits are found by their
+    `<ticket-id>: ` subject, so a missing work_commit cannot hide the work."""
+    path = workspaces.ensure("proj-c")
+    open(os.path.join(path, "a.ts"), "w").write("// a\n")
+    workspaces.commit_all("proj-c", "proj-c.1.1: first attempt")
+    open(os.path.join(path, "b.ts"), "w").write("// b\n")
+    workspaces.commit_all("proj-c", "proj-c.1.1: second attempt")
+
+    diff = workspaces.diff_for_ticket("proj-c", "proj-c.1.1", None)
+
+    assert "a.ts" in diff and "b.ts" in diff
+
+
+def test_ticket_commits_are_not_conflated_across_tickets(projects_root):
+    path = workspaces.ensure("proj-d")
+    open(os.path.join(path, "one.ts"), "w").write("// one\n")
+    workspaces.commit_all("proj-d", "proj-d.1.1: ticket one")
+    open(os.path.join(path, "two.ts"), "w").write("// two\n")
+    workspaces.commit_all("proj-d", "proj-d.1.2: ticket two")
+
+    diff = workspaces.diff_for_ticket("proj-d", "proj-d.1.2", None)
+
+    assert "two.ts" in diff
+    assert "one.ts" not in diff
+
+
+def test_diff_falls_back_to_work_commit_without_ticket_commits(projects_root):
+    path = workspaces.ensure("proj-e")
+    open(os.path.join(path, "x.ts"), "w").write("// x\n")
+    sha = workspaces.commit_all("proj-e", "a message with no ticket id")
+
+    diff = workspaces.diff_for_ticket("proj-e", "proj-e.9.9", sha)
+
+    assert "x.ts" in diff
+
+
 def test_verifier_prompt_carries_the_diff(projects_root, monkeypatch):
     beads.ensure_initialized()
     project = beads.create("vdiff proj", "d", issue_type="epic", priority=1)
