@@ -98,7 +98,7 @@ def test_higher_priority_unassigned_work_preempts_assigned_backlog(monkeypatch):
         lambda *a, **k: (beads.show(backlog["id"]), "busy-seat"),
     )
     monkeypatch.setattr(
-        dispatcher, "next_unassigned_ticket", lambda: beads.show(urgent["id"])
+        dispatcher, "next_unassigned_ticket", lambda *a, **k: beads.show(urgent["id"])
     )
     monkeypatch.setattr(
         dispatcher.Dispatcher, "wake_product_owner", lambda self: "brokered urgent p0"
@@ -125,7 +125,7 @@ def test_equal_priority_assigned_work_is_not_preempted(monkeypatch):
         lambda *a, **k: (beads.show(backlog["id"]), "seat-q"),
     )
     monkeypatch.setattr(
-        dispatcher, "next_unassigned_ticket", lambda: beads.show(other["id"])
+        dispatcher, "next_unassigned_ticket", lambda *a, **k: beads.show(other["id"])
     )
 
     d = _dispatcher(max_agents=1)
@@ -424,9 +424,11 @@ def test_unassigned_work_in_an_engaged_project_is_not_brokered(monkeypatch):
     that is already busy -- it would only queue behind the gate."""
     monkeypatch.setattr(dispatcher, "_order", lambda issue: ())
     project = beads.create("engaged proj", "d", issue_type="epic", priority=1)
-    beads.create("engaged story", "d", parent=project["id"])
+    story = beads.create("engaged story", "d", parent=project["id"], priority=0)
 
-    assert dispatcher.next_unassigned_ticket(engaged={project["id"]}) is None
+    picked = dispatcher.next_unassigned_ticket(engaged={project["id"]})
+
+    assert picked is None or picked["id"] != story["id"]
 
 
 # -- verify on close --------------------------------------------------

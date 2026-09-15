@@ -261,22 +261,28 @@ def next_assigned_ticket(
     busy = busy_seats or set()
     forking = engaged_projects() if engaged is None else engaged
 
-    def _skip(issue):
-        from . import toolchain
+    def _skip(issue, new_work: bool):
+        project = toolchain.project_id_for(issue["id"])
+        if project in held:
+            return True
+        # One ticket at a time per project only gates the START of work.
+        # The ticket already in flight IS what the orphan pool exists to
+        # resume -- a ticket left `in_progress` by a crash never comes back
+        # through `bd ready` -- so applying the gate there would strand it
+        # forever. Regression test:
+        # test_orphaned_in_progress_work_is_picked_up_again.
+        return new_work and project in forking
 
-        return (
-            toolchain.project_id_for(issue["id"]) in held
-            or toolchain.project_id_for(issue["id"]) in forking
-        )
-
-    def _pick(issues):
+    def _pick(issues, new_work: bool):
         """Best candidate by roadmap order among this pool. Choosing the min
         rather than bd's first result is what keeps dispatch depth-first by
         epic instead of interleaving epics."""
         best = None
         best_seat = None
         for issue in issues:
-            if not dispatchable(issue) or beads.is_flagged_for_human(issue) or _skip(issue):
+            if not dispatchable(issue) or beads.is_flagged_for_human(issue):
+                continue
+            if _skip(issue, new_work):
                 continue
             seat_id = beads.assigned_seat(issue)
             if not seat_id or seat_id in busy:
@@ -285,10 +291,10 @@ def next_assigned_ticket(
                 best, best_seat = issue, seat_id
         return best, best_seat
 
-    orphaned = _pick(beads.in_progress())
+    orphaned = _pick(beads.in_progress(), new_work=False)
     if orphaned[0] is not None:
         return orphaned
-    return _pick(beads.ready())
+    return _pick(beads.ready(), new_work=True)
 
 
 def next_unassigned_ticket(engaged: set[str] | None = None) -> dict | None:
