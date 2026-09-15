@@ -54,12 +54,14 @@ import time
 import psycopg
 from langgraph.checkpoint.postgres import PostgresSaver
 
-from . import beads, reflection, seats, toolchain, workspaces
+from . import beads, reflection, seats, toolchain, verifications, workspaces
 from .product_owner import ROLE as PRODUCT_OWNER_ROLE
 from .product_owner import build_tools as build_product_owner_tools
 from .product_owner import run_triage_session
 from .providers import ProviderConfig
 from .routing import ConcurrencyGate, RoutedModel, RoutingTable
+from .verifier import build_model as build_verifier_model
+from .verifier import verify_ticket
 from .worker import build_seat_runtime, work_one_ticket
 
 logging.basicConfig(level=logging.INFO)
@@ -208,7 +210,34 @@ def project_hold(ticket_id: str) -> str | None:
     return held_projects().get(toolchain.project_id_for(ticket_id))
 
 
-def next_assigned_ticket(busy_seats: set[str] | None = None) -> tuple[dict | None, str | None]:
+def engaged_projects() -> set[str]:
+    """Projects that already have a ticket in flight.
+
+    One ticket at a time per project, all the way through. Agents on a
+    project share its git history, so two at once fork from the same
+    commit and land conflicting edits to the files every ticket touches --
+    found live 2026-09-15 with per-ticket worktrees in place: src/index.ts
+    is the barrel every new module is re-exported from, and two tickets
+    appending to it from the same base conflicted on every merge
+    (workspace-9jg.1.3, 14.2). Serialising trades that away for
+    throughput; the operator's call, taken with the conflict rate in
+    hand.
+
+    Read fresh on every call, never cached: `start_agent` claims the
+    ticket synchronously, which is what makes it in_flight, and the loop
+    can tick again immediately -- a cached answer here would let a second
+    ticket in the same project start beside the first."""
+    projects: set[str] = set()
+    for issue in beads.in_progress():
+        if beads.is_flagged_for_human(issue):
+            continue  # parked for a person, not being worked
+        projects.add(toolchain.project_id_for(issue["id"]))
+    return projects
+
+
+def next_assigned_ticket(
+    busy_seats: set[str] | None = None, engaged: set[str] | None = None
+) -> tuple[dict | None, str | None]:
     """A ticket the product-owner has already assigned that can start now.
 
     Orphans first, for the reason worker.py's docstring spells out: `bd
@@ -223,14 +252,22 @@ def next_assigned_ticket(busy_seats: set[str] | None = None) -> tuple[dict | Non
     already running, tick() reports "could not start", and the
     dispatcher sits at one agent however high the cap is. Found live
     2026-09-13 while raising the cap to 3 -- the log showed a single
-    'resuming thread' and nothing else for a full minute."""
+    'resuming thread' and nothing else for a full minute.
+
+    `engaged` (optional) is the set of projects already holding a ticket
+    -- see engaged_projects. Computed when omitted so existing callers and
+    tests keep the serialisation without knowing about it."""
     held = held_projects()
     busy = busy_seats or set()
+    forking = engaged_projects() if engaged is None else engaged
 
     def _skip(issue):
         from . import toolchain
 
-        return toolchain.project_id_for(issue["id"]) in held
+        return (
+            toolchain.project_id_for(issue["id"]) in held
+            or toolchain.project_id_for(issue["id"]) in forking
+        )
 
     def _pick(issues):
         """Best candidate by roadmap order among this pool. Choosing the min
@@ -254,7 +291,7 @@ def next_assigned_ticket(busy_seats: set[str] | None = None) -> tuple[dict | Non
     return _pick(beads.ready())
 
 
-def next_unassigned_ticket() -> dict | None:
+def next_unassigned_ticket(engaged: set[str] | None = None) -> dict | None:
     """The highest-priority ready ticket no seat has been earmarked for
     yet, subject to the same dispatchability and dispatch-hold filters as
     next_assigned_ticket.
@@ -263,26 +300,28 @@ def next_unassigned_ticket() -> dict | None:
     not trust that -- it scans and keeps the lowest priority number seen,
     so a change to bd's default ordering cannot silently break the
     preemption check in tick()."""
-    from . import toolchain
-
     held = held_projects()
+    forking = engaged_projects() if engaged is None else engaged
     best: dict | None = None
     for issue in beads.ready():
         if not dispatchable(issue):
             continue
         if beads.assigned_seat(issue) is not None:
             continue
-        if toolchain.project_id_for(issue["id"]) in held:
+        project_id = toolchain.project_id_for(issue["id"])
+        if project_id in held or project_id in forking:
             continue
         if best is None or _priority(issue) < _priority(best):
             best = issue
     return best
 
 
-def has_unassigned_work() -> bool:
+def has_unassigned_work(engaged: set[str] | None = None) -> bool:
     """Held projects are excluded so the product-owner is not woken to
-    broker work no agent could start."""
-    return next_unassigned_ticket() is not None
+    broker work no agent could start. Projects already running a ticket
+    are excluded for the same reason: brokering more into them would only
+    queue behind the serialisation gate."""
+    return next_unassigned_ticket(engaged) is not None
 
 
 def _priority(issue: dict) -> int:
@@ -391,6 +430,9 @@ class Dispatcher:
         self._running: dict[str, dict] = {}
         self._failures: dict[str, int] = {}
         self._lock = threading.Lock()
+        # Built lazily and kept: verifier.build_model constructs a provider
+        # client, and verify-on-close runs once per finished ticket.
+        self._verifier_model = None
 
     def capacity(self) -> int:
         with self._lock:
@@ -425,6 +467,10 @@ class Dispatcher:
                 outcome = work_one_ticket(runtime, issue)
             log.info("seat %r finished %s: %s", seat_id, issue["id"], outcome)
             self._record_outcome(issue["id"], outcome)
+
+            # Judge it before anything else in this project is dispatched.
+            if outcome == "closed":
+                self.verify_now(issue["id"])
 
             # The agent's own slot, before it goes back to sleep. Held
             # inside the capacity slot deliberately: it is part of the
@@ -468,6 +514,47 @@ class Dispatcher:
             )
         except Exception:
             log.exception("could not flag %s", ticket_id)
+
+    def verifier_model(self):
+        if self._verifier_model is None:
+            self._verifier_model = build_verifier_model()
+        return self._verifier_model
+
+    def verify_now(self, ticket_id: str) -> dict | None:
+        """Judge a ticket that has just closed, here and now.
+
+        The verifier is otherwise a scheduler job on a 1800s cadence, and
+        dispatch is serialised per project behind "the previous ticket is
+        finished". Leaving verification to the schedule would therefore
+        idle a project for up to half an hour between tickets -- so it
+        runs here instead, as soon as the ticket closes.
+
+        This is the same judgement, not a shortcut around it: the same
+        verifier.verify_ticket, the same prompt, the same separate model
+        call reading the measured evidence -- still a different agent
+        from the one that did the work, which is the property that
+        matters (see verifier.py's docstring). A fail still requeues the
+        ticket with the finding, so the project stays engaged and gets
+        worked again rather than the next ticket jumping the queue.
+
+        A verification that errors is logged and left to the scheduled
+        job: it must not fail the ticket, whose work is committed and
+        merged, nor kill the dispatch thread."""
+        try:
+            with psycopg.connect(self.conn_string, autocommit=True) as conn:
+                verifications.init_table(conn)
+                result = verify_ticket(conn, ticket_id, self.verifier_model())
+        except Exception:
+            log.exception(
+                "could not verify %s on close; the scheduled verifier will retry", ticket_id
+            )
+            return None
+        if result:
+            log.info(
+                "verified %s: %s -- %s",
+                ticket_id, result["verdict"], result["reasoning"][:200],
+            )
+        return result
 
     def start_agent(self, seat_id: str, issue: dict) -> bool:
         with self._lock:
@@ -610,7 +697,11 @@ class Dispatcher:
 
         with self._lock:
             busy = set(self._running)
-        assigned, seat_id = next_assigned_ticket(busy)
+        # Read once and hand the same answer to every selector below: if
+        # each re-read its own, a project could be admitted on one answer
+        # and skipped on the next.
+        engaged = engaged_projects()
+        assigned, seat_id = next_assigned_ticket(busy, engaged)
 
         # Already-assigned work is drained before the product-owner is
         # woken to broker more -- UNLESS something unassigned strictly
@@ -623,7 +714,7 @@ class Dispatcher:
         # (P0, unassigned, rank 1 in `bd ready`) was starved for days
         # behind ~20 pre-assigned P2 stories.
         if assigned is not None:
-            challenger = next_unassigned_ticket()
+            challenger = next_unassigned_ticket(engaged)
             if not _outranks(challenger, assigned):
                 return self._start_assigned(assigned, seat_id)
             log.info(
@@ -631,7 +722,7 @@ class Dispatcher:
                 challenger["id"], _priority(challenger),
                 assigned["id"], _priority(assigned),
             )
-        elif not has_unassigned_work():
+        elif not has_unassigned_work(engaged):
             return "idle"
 
         log.info("capacity free and unassigned work waiting -- waking product-owner")

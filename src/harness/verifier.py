@@ -35,6 +35,41 @@ log = logging.getLogger(__name__)
 # person rather than churning forever.
 MAX_VERIFIER_REWORKS = int(os.environ.get("MAX_VERIFIER_REWORKS", "2"))
 
+
+def build_model():
+    """The verifier's model, from VERIFIER_* falling back to LOCAL_*.
+
+    Shared by the standalone entry point and by the dispatcher's
+    verify-on-close step, so the two cannot drift into judging tickets
+    with differently-configured models."""
+    from .providers import ProviderConfig, build_chat_model
+
+    provider_cfg = ProviderConfig(
+        name="verifier",
+        base_url=os.environ.get(
+            "VERIFIER_MODEL_BASE_URL",
+            os.environ.get("LOCAL_MODEL_BASE_URL", "http://host.docker.internal:11434/v1"),
+        ),
+        model=os.environ.get(
+            "VERIFIER_MODEL_NAME", os.environ.get("LOCAL_MODEL_NAME", "qwen2.5:7b-instruct")
+        ),
+        # Falls back to LOCAL_MODEL_API_KEY for the same reason base_url
+        # and model already fall back to their LOCAL_* counterparts: a
+        # VERIFIER_* override is opt-out, so an unset key must not mean
+        # "no key" when the inherited base_url is an authenticated one.
+        api_key=os.environ.get("VERIFIER_MODEL_API_KEY", os.environ.get("LOCAL_MODEL_API_KEY")),
+        max_tokens=int(os.environ.get("VERIFIER_MAX_TOKENS", "6000")),
+        extra_body=(
+            {"thinking": {"type": "disabled"}}
+            if os.environ.get(
+                "VERIFIER_MODEL_DISABLE_THINKING", os.environ.get("LOCAL_MODEL_DISABLE_THINKING")
+            )
+            else None
+        ),
+    )
+    return build_chat_model(provider_cfg)
+
+
 PROMPT = """You are verifying whether completed work actually meets its stated acceptance \
 criteria. You are a SEPARATE reviewer, not the agent that did the work -- judge honestly \
 from the evidence, don't assume good faith just because the work was marked complete.

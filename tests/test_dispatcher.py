@@ -352,3 +352,128 @@ def test_running_agents_reports_claimed_work():
     running = {a["ticket_id"]: a for a in dispatcher.running_agents()}
     assert active["id"] in running
     assert running[active["id"]]["seat_id"] == "seat-r"
+
+
+# -- one ticket at a time per project ---------------------------------
+#
+# Agents on a project share its git history, so two at once fork from the
+# same commit and both edit what every ticket edits. Found live
+# 2026-09-15, with per-ticket worktrees already in place: src/index.ts is
+# the barrel every new module is re-exported from, and workspace-9jg.1.3
+# and 14.2 both appended to it from the same base, so neither merged.
+
+
+def test_engaged_projects_reports_a_project_with_a_ticket_in_flight(monkeypatch):
+    monkeypatch.setattr(
+        beads, "in_progress",
+        lambda: [{"id": "workspace-abc.1.1", "assignee": "seat-a", "labels": []}],
+    )
+
+    assert dispatcher.engaged_projects() == {"workspace-abc"}
+
+
+def test_a_human_flagged_ticket_does_not_engage_its_project(monkeypatch):
+    """Parked is not in flight. A ticket waiting on a person must not hold
+    its project's other work up."""
+    monkeypatch.setattr(
+        beads, "in_progress",
+        lambda: [{"id": "workspace-abc.1.1", "assignee": "seat-a", "labels": ["human"]}],
+    )
+
+    assert dispatcher.engaged_projects() == set()
+
+
+def test_a_project_already_running_a_ticket_starts_no_second_one(monkeypatch):
+    monkeypatch.setattr(beads, "in_progress", lambda: [])
+    project = beads.create("serial proj", "d", issue_type="epic", priority=1)
+    beads.create("serial running", "d", parent=project["id"])
+    waiting = beads.create("serial waiting", "d", parent=project["id"], priority=0)
+    other_project = beads.create("serial other proj", "d", issue_type="epic", priority=3)
+    beads.create("serial other story", "d", parent=other_project["id"], priority=3)
+    beads.assign_to_seat(waiting["id"], "serial-seat")
+
+    # With no gate at all, the engaged project's own ticket is what runs --
+    # it is P0 and outranks everything else on the board.
+    monkeypatch.setattr(dispatcher, "engaged_projects", lambda: set())
+    without_gate, _ = dispatcher.next_assigned_ticket()
+    assert without_gate["id"] == waiting["id"], "test setup: this is the ticket at stake"
+
+    issue, _ = dispatcher.next_assigned_ticket(engaged={project["id"]})
+
+    assert issue is None or issue["id"] != waiting["id"], "the engaged project must be skipped"
+
+
+def test_in_flight_work_engages_its_project_without_being_told(monkeypatch):
+    """The default path: no caller passes `engaged`, and the gate still
+    holds."""
+    monkeypatch.setattr(dispatcher, "_order", lambda issue: ())
+    project = beads.create("auto serial proj", "d", issue_type="epic", priority=1)
+    running = beads.create("auto serial running", "d", parent=project["id"])
+    waiting = beads.create("auto serial waiting", "d", parent=project["id"])
+    beads.assign_to_seat(running["id"], "auto-seat")
+    beads.assign_to_seat(waiting["id"], "auto-seat")
+    beads.claim(running["id"], actor="auto-seat")
+
+    issue, _ = dispatcher.next_assigned_ticket()
+
+    assert issue is None or issue["id"] != waiting["id"]
+
+
+def test_unassigned_work_in_an_engaged_project_is_not_brokered(monkeypatch):
+    """The product-owner must not be woken to broker work into a project
+    that is already busy -- it would only queue behind the gate."""
+    monkeypatch.setattr(dispatcher, "_order", lambda issue: ())
+    project = beads.create("engaged proj", "d", issue_type="epic", priority=1)
+    beads.create("engaged story", "d", parent=project["id"])
+
+    assert dispatcher.next_unassigned_ticket(engaged={project["id"]}) is None
+
+
+# -- verify on close --------------------------------------------------
+
+
+class _FakeModel:
+    """Stands in for the verifier's model. Same shape as test_verifier.py's."""
+
+    def __init__(self, content):
+        self.content = content
+
+    def invoke(self, prompt):
+        return type("Response", (), {"content": self.content})()
+
+
+def test_verify_now_records_a_real_verdict(monkeypatch):
+    """Verify-on-close is a real verification, not a rubber stamp: the
+    same verify_ticket, so a fail still requeues the ticket with the
+    finding and the project keeps working it."""
+    import json
+    import os
+
+    project = beads.create("verify-now proj", "d", issue_type="epic", priority=1)
+    story = beads.create(
+        "verify-now story", "d", parent=project["id"], acceptance_criteria="does the thing"
+    )
+    beads.close(story["id"], reason="did it")
+
+    d = dispatcher.Dispatcher(os.environ["DATABASE_URL"], RoutingTable({}), max_agents=1)
+    d._verifier_model = _FakeModel(json.dumps({"verdict": "pass", "reasoning": "present"}))
+
+    result = d.verify_now(story["id"])
+
+    assert result is not None
+    assert result["verdict"] == "pass"
+
+
+def test_verify_now_fails_open_when_it_cannot_verify(monkeypatch):
+    """A verification error must not fail the ticket -- its work is
+    committed and merged by then -- nor kill the dispatch thread. The
+    scheduled verifier job is the backstop."""
+    import os
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("provider unreachable")
+
+    monkeypatch.setattr(dispatcher, "verify_ticket", boom)
+    d = dispatcher.Dispatcher(os.environ["DATABASE_URL"], RoutingTable({}), max_agents=1)
+
+    assert d.verify_now("workspace-verify-fail.1.1") is None
