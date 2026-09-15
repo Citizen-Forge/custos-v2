@@ -192,25 +192,23 @@ def test_a_project_with_no_commits_yet_still_gets_a_worktree(projects_root):
 
 
 def test_reset_moves_a_ticket_back_onto_the_integration_tip(projects_root):
-    """A requeued ticket must start from the current work, not from the
-    commit it forked at -- re-running on the old base merges into the same
-    conflict it was parked for (workspace-9jg.1.3, 14.2, both appending to
-    src/index.ts from a stale base)."""
+    """Every ticket is actioned from the state of the integration branch
+    when it starts, so this runs on every pickup -- not only the first."""
     worktree = workspaces.for_ticket("workspace-9jg.1.1")
     open(os.path.join(worktree, "attempt-one.ts"), "w").write("first try")
     first = workspaces.commit_all_for_ticket("workspace-9jg.1.1", "workspace-9jg.1.1: first try")
 
-    # Another ticket's work lands while 1.1 is parked.
+    # An approved ticket's work lands while 1.1 is idle.
     lander = workspaces.for_ticket("workspace-9jg.1.2")
     open(os.path.join(lander, "landed.ts"), "w").write("x")
     workspaces.commit_all_for_ticket("workspace-9jg.1.2", "workspace-9jg.1.2: landed")
     workspaces.merge_to_integration("workspace-9jg.1.2")
 
-    previous = workspaces.reset_ticket_to_integration("workspace-9jg.1.1")
+    previous = workspaces.reset_for_attempt("workspace-9jg.1.1")
 
     assert previous == first
     assert workspaces.head_for_ticket("workspace-9jg.1.1") == workspaces.head("workspace-9jg")
-    assert os.path.exists(os.path.join(worktree, "landed.ts")), "it sees the merged work"
+    assert os.path.exists(os.path.join(worktree, "landed.ts")), "it sees the landed work"
     assert not os.path.exists(os.path.join(worktree, "attempt-one.ts")), "the old attempt is gone"
 
 
@@ -224,61 +222,20 @@ def test_reset_does_not_leave_the_old_attempt_in_the_verifier_diff(projects_root
     workspaces.commit_all_for_ticket("workspace-9jg.1.1", "workspace-9jg.1.1: rejected attempt")
     assert len(workspaces.commits_for_ticket("workspace-9jg", "workspace-9jg.1.1")) == 1
 
-    workspaces.reset_ticket_to_integration("workspace-9jg.1.1")
+    workspaces.reset_for_attempt("workspace-9jg.1.1")
 
     assert workspaces.commits_for_ticket("workspace-9jg", "workspace-9jg.1.1") == []
 
 
-def test_an_unworked_ticket_tree_advances_to_the_current_tip(projects_root):
-    """The property that makes serialising worth it: a first attempt's tree
-    must contain everything the previously closed ticket added.
+def test_reset_discards_uncommitted_leftovers(projects_root):
+    """A half-written file from an interrupted run is not work; the ticket
+    starts clean."""
+    worktree = workspaces.for_ticket("workspace-9jg.1.1")
+    open(os.path.join(worktree, "half-written.ts"), "w").write("interrupted")
 
-    A tree is branched from the tip when it is created, but one can exist
-    without ever having been worked -- created for a dispatch that then
-    died before the agent ran -- and reusing it as-is would leave the
-    ticket on a base that predates every ticket that has landed since."""
-    ticket = "workspace-9jg.1.1"
-    tree = workspaces.for_ticket(ticket)
+    workspaces.reset_for_attempt("workspace-9jg.1.1")
 
-    lander = workspaces.for_ticket("workspace-9jg.1.2")
-    open(os.path.join(lander, "landed.ts"), "w").write("x")
-    workspaces.commit_all_for_ticket("workspace-9jg.1.2", "workspace-9jg.1.2: landed")
-    workspaces.merge_to_integration("workspace-9jg.1.2")
-
-    again = workspaces.for_ticket(ticket)
-
-    assert again == tree
-    assert os.path.exists(os.path.join(tree, "landed.ts")), "sees what landed since"
-
-
-def test_a_worked_ticket_tree_is_left_where_its_attempt_left_it(projects_root):
-    """The other half: a tree with work of its own is a real attempt, and
-    rework continues from it rather than from a clean tip."""
-    ticket = "workspace-9jg.1.1"
-    tree = workspaces.for_ticket(ticket)
-    open(os.path.join(tree, "attempt.ts"), "w").write("x")
-    workspaces.commit_all_for_ticket(ticket, f"{ticket}: attempt")
-
-    workspaces.for_ticket(ticket)
-
-    assert os.path.exists(os.path.join(tree, "attempt.ts")), "the attempt is not thrown away"
-
-
-def test_an_in_use_ticket_tree_is_never_moved_under_the_agent(projects_root):
-    """Uncommitted work in the tree means an agent is (or was) mid-run --
-    a crashed orphan being resumed, say. Advancing it would discard that."""
-    ticket = "workspace-9jg.1.1"
-    tree = workspaces.for_ticket(ticket)
-
-    lander = workspaces.for_ticket("workspace-9jg.1.2")
-    open(os.path.join(lander, "landed.ts"), "w").write("x")
-    workspaces.commit_all_for_ticket("workspace-9jg.1.2", "workspace-9jg.1.2: landed")
-    workspaces.merge_to_integration("workspace-9jg.1.2")
-
-    open(os.path.join(tree, "uncommitted-work.ts"), "w").write("in flight")
-    workspaces.for_ticket(ticket)
-
-    assert os.path.exists(os.path.join(tree, "uncommitted-work.ts"))
+    assert not os.path.exists(os.path.join(worktree, "half-written.ts"))
 
 
 def test_two_projects_get_separate_directories(projects_root):

@@ -11,7 +11,7 @@ import os
 
 import psycopg
 
-from harness import beads, verifications
+from harness import beads, verifications, verifier
 from harness.verifier import MAX_VERIFIER_REWORKS, verify_ticket
 
 
@@ -168,6 +168,29 @@ def test_failed_verification_requeues_with_the_finding():
     assert "the thing was not done" in (meta.get("rework_reason") or "")
     assert not meta.get("completion_summary"), "the old claim must not re-close the ticket"
     assert verifications.get_for_issue(conn, issue["id"])["verdict"] == "fail"
+
+
+def test_a_pass_lands_the_work_and_a_fail_does_not(monkeypatch):
+    """The merge into the integration branch is gated on this verdict. An
+    approved ticket's work lands; a rejected one stays on its own branch,
+    so what the next ticket starts from is only ever accepted work."""
+    landed = []
+    monkeypatch.setattr(verifier, "land", lambda ticket_id: landed.append(ticket_id) or True)
+
+    conn = _conn()
+    beads.ensure_initialized()
+
+    passed = beads.create("lands proj", "x", acceptance_criteria="must do the thing")
+    beads.close(passed["id"], reason="done")
+    verify_ticket(conn, passed["id"], FakeModel(json.dumps({"verdict": "pass", "reasoning": "ok"})))
+
+    failed = beads.create("does not land", "x", acceptance_criteria="must do the thing")
+    beads.close(failed["id"], reason="done")
+    verify_ticket(
+        conn, failed["id"], FakeModel(json.dumps({"verdict": "fail", "reasoning": "not done"}))
+    )
+
+    assert landed == [passed["id"]], "exactly the approved ticket lands"
 
 
 def test_requeue_is_bounded_then_flags_for_a_human():

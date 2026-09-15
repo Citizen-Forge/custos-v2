@@ -92,10 +92,11 @@ the fault. When both a `-` and a `+` version of the same setting appear, only th
 The project's configuration and readme files AS THEY STAND RIGHT NOW:
 {current_files}
 
-Those are the live contents, read from disk just now -- not the diff, not a claim. Later \
-tickets may have committed on top of the one under review, so this is the state that \
-actually exists. If a criterion asks whether a file exists or what it contains, answer from \
-this section; do not say a thing cannot be verified when its current contents are printed above.
+Those are the live contents, read from disk just now -- not the diff, not a claim. They are \
+read from the ticket's OWN working tree, which is the state this ticket's change produces and \
+is not yet on the project's integration branch (that happens only if you pass it). If a \
+criterion asks whether a file exists or what it contains, answer from this section; do not say \
+a thing cannot be verified when its current contents are printed above.
 
 Result of actually running the project's own test suite just now:
 {test_result}
@@ -137,21 +138,53 @@ def _diff_for(issue: dict) -> str:
 
 
 def _tests_for(issue: dict) -> dict | None:
-    """Run the project's own suite, or None if there isn't one to run."""
+    """Run the project's own suite against the ticket's own tree.
+
+    The ticket's tree, not the integration checkout: the merge into the
+    integration branch is gated on this verdict, so the checkout does not
+    yet contain the change under review and the suite would be measured
+    without it."""
     try:
-        return workspaces.run_tests(workspaces.project_id_for(issue["id"]))
+        return workspaces.run_tests_for_ticket(issue["id"])
     except Exception:
         log.exception("could not run tests for %s", issue.get("id"))
         return None
 
 
 def _current_files_for(issue: dict) -> str:
-    """Live contents of the project's criteria-bearing files."""
+    """Live contents of the project's criteria-bearing files, from the
+    ticket's own tree, for the same reason _tests_for uses it."""
     try:
-        return workspaces.criteria_file_snapshot(workspaces.project_id_for(issue["id"]))
+        return workspaces.criteria_file_snapshot_for_ticket(issue["id"])
     except Exception:
         log.exception("could not snapshot files for %s", issue.get("id"))
         return ""
+
+
+def land(ticket_id: str) -> bool:
+    """Merge a ticket's approved work into the integration branch.
+
+    The merge used to happen when the ticket was committed, which meant the
+    integration branch carried work the verifier had not judged yet -- and
+    when a verdict came back fail, work that had already been rejected.
+    Landing it here instead, on a pass, is what makes "actioned from the
+    state of the integration branch" mean something: what a ticket starts
+    from is only ever work that passed review.
+
+    A ticket that will not merge is parked for a person rather than
+    guessed at, and its work stays on its own branch."""
+    ok, reason = workspaces.merge_to_integration(ticket_id)
+    if ok:
+        log.info("landed %s on the integration branch", ticket_id)
+        return True
+    log.error("could not land %s: %s", ticket_id, reason)
+    beads.flag_for_human(
+        ticket_id,
+        f"the work was approved but could not be merged into the integration branch: "
+        f"{reason}. It is committed on branch {workspaces.ticket_branch(ticket_id)}; "
+        f"someone has to resolve that.",
+    )
+    return False
 
 
 def _describe_tests(tests: dict | None) -> str:
@@ -287,6 +320,16 @@ def verify_ticket(conn, issue_id: str, model) -> dict | None:
         )
 
     verifications.record(conn, issue_id, seat_id, verdict, reasoning, work_commit=current_commit)
+
+    # A pass is what lands the work. Until this runs the ticket's commit is
+    # only on its own branch, so the integration branch never holds work
+    # that has not been judged -- which is what lets the next ticket start
+    # from a tree of accepted work only.
+    if verdict == "pass":
+        try:
+            land(issue_id)
+        except Exception:
+            log.exception("approved %s but could not land it", issue_id)
 
     # A fail must be actioned, not just recorded. The ticket goes back to
     # an agent with the verifier's finding attached (requeue_for_rework),

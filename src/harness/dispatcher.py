@@ -461,8 +461,18 @@ class Dispatcher:
         does not have. Crashes are the case worth handling, and `finally`
         handles them. Do not add one back without asking."""
         try:
-            # Each ticket is worked in its own project's workspace.
+            # Each ticket is worked in its own project's workspace, moved
+            # onto the integration tip as it stands now -- every ticket is
+            # actioned from the state of the integration branch when it
+            # starts. Safe because the merge is gated on verification, so
+            # that branch holds accepted work and nothing else.
             workspace_root = workspaces.for_ticket(issue["id"])
+            previous = workspaces.reset_for_attempt(issue["id"])
+            if previous:
+                log.info(
+                    "%s: tree reset to the integration tip (was %s)",
+                    issue["id"], previous[:12],
+                )
             with PostgresSaver.from_conn_string(self.conn_string) as checkpointer:
                 checkpointer.setup()
                 with psycopg.connect(self.conn_string, autocommit=True) as conn:

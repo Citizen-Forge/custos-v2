@@ -222,52 +222,15 @@ def ticket_branch(ticket_id: str) -> str:
     return f"ticket/{ticket_id}"
 
 
-def _advance_unworked_tree(ticket_id: str, repo: str, worktree: str) -> None:
-    """Move an untouched ticket tree up to the integration tip.
-
-    A tree is branched from the tip when it is first created, which is what
-    makes it contain everything already merged. But a tree can come to
-    exist without ever being worked -- created for a dispatch that then
-    died before the agent ran -- and reusing it leaves the ticket on a base
-    that predates every ticket that has landed since. With one ticket at a
-    time per project, that is the difference between a first attempt seeing
-    the previous ticket's work and not seeing it at all, which is the whole
-    point of serialising.
-
-    Only a branch with NOTHING of its own is moved, and only while the tree
-    is clean. Either qualification failing means the tree is a real attempt
-    -- in progress, or finished and awaiting rework -- and it is left
-    exactly where that attempt left it. Deliberately conservative: this
-    must never be the thing that discards an agent's work."""
-    branch = ticket_branch(ticket_id)
-    if not _branch_exists(repo, branch):
-        return
-    base = integration_ref(project_id_for(ticket_id))
-    if base is None:
-        return
-
-    branch_head = _git(["rev-parse", branch], repo).stdout.strip()
-    tip = _git(["rev-parse", base], repo).stdout.strip()
-    if not branch_head or not tip or branch_head == tip:
-        return
-    own_commits = _git(["rev-list", "--count", f"{base}..{branch}"], repo).stdout.strip()
-    if own_commits != "0":
-        return  # a previous attempt's work: not ours to move
-    if _git(["status", "--porcelain"], worktree).stdout.strip():
-        return  # uncommitted work in the tree: in use, leave it alone
-
-    _git(["reset", "--hard", base], worktree)
-    _git(["clean", "-qfd"], worktree)
-
-
 def for_ticket(ticket_id: str) -> str:
     """The working tree an agent on this ticket is rooted in, created on
     first use and re-used afterwards.
 
     Re-used rather than recreated so a resumed or verifier-requeued ticket
     keeps the work already in its tree -- `_reset_thread` starts the agent
-    over, it does not throw the ticket's files away. A tree with no work of
-    its own is the exception: see _advance_unworked_tree.
+    over, it does not throw the ticket's files away. The dispatcher calls
+    reset_for_attempt on every pickup, which is what puts a ticket back on
+    the current integration tip before it is worked.
 
     Always returns a worktree: a project with no commits yet gets an empty
     base commit so it has a ref to branch from. Anything that stops the
@@ -278,7 +241,6 @@ def for_ticket(ticket_id: str) -> str:
     repo = ensure(project_id)
     worktree = worktree_path_for(ticket_id)
     if os.path.exists(os.path.join(worktree, ".git")):
-        _advance_unworked_tree(ticket_id, repo, worktree)
         return worktree
 
     base = integration_ref(project_id)
@@ -337,28 +299,29 @@ def head_for_ticket(ticket_id: str) -> str | None:
     return head(project_id_for(ticket_id))
 
 
-def reset_ticket_to_integration(ticket_id: str) -> str | None:
-    """Move a ticket's tree onto the current integration tip, returning the
-    commit its branch was on, or None if it had no branch.
+def reset_for_attempt(ticket_id: str) -> str | None:
+    """Put a ticket's tree back on the current integration tip, returning
+    the commit it was on, or None if it had no branch.
 
-    A requeued ticket's branch is frozen at the commit it forked from, so
-    re-running the agent on top of it still merges into a conflict over
-    whatever moved underneath in the meantime -- the barrel file in
-    particular, which is exactly what parked these tickets in the first
-    place. Starting from the tip is what makes the next attempt mergeable.
+    Every ticket is actioned from the state of the integration branch as it
+    stands when the ticket starts, so the dispatcher calls this on EVERY
+    pickup -- first attempt and rework alike. That is only safe because the
+    merge is gated on verification (verifier.land): the integration branch
+    holds work that passed review and nothing else, so re-basing onto it
+    cannot lose anything that was accepted.
 
-    The abandoned commits stay in the worktree's reflog, which is what the
-    returned sha is for -- log it. Deliberately NOT kept as a branch or a
-    tag: commits_for_ticket reads `git log --all`, so an archived ref would
-    put the rejected attempt straight back into the diff the verifier
-    judges, and the ticket would be re-failed on its own dead work."""
+    It is also what discards a rejected attempt, rather than letting it
+    accumulate under the next one. The abandoned commits stay in the
+    worktree's reflog, which is what the returned sha is for -- log it.
+    Deliberately NOT kept as a branch or a tag: commits_for_ticket reads
+    `git log --all`, so an archived ref would put the rejected attempt
+    straight back into the diff the verifier judges, and the ticket would
+    be re-failed on its own dead work."""
     project_id = project_id_for(ticket_id)
     repo = path_for(project_id)
     branch = ticket_branch(ticket_id)
-    if not _branch_exists(repo, branch):
-        return None
     base = integration_ref(project_id)
-    if base is None:
+    if base is None or not _branch_exists(repo, branch):
         return None
 
     previous = _git(["rev-parse", branch], repo).stdout.strip()
@@ -614,7 +577,29 @@ def diff_for_ticket(project_id: str, ticket_id: str, work_commit: str | None = N
     return ""
 
 
+def tree_for_ticket(ticket_id: str) -> str:
+    """The tree a ticket's work is judged IN.
+
+    Its own worktree while that exists, because the merge into the
+    integration branch now only happens once verification has approved --
+    so the integration checkout does NOT yet contain the change under
+    review, and reading it there would judge the ticket against a tree
+    without its own work."""
+    worktree = worktree_path_for(ticket_id)
+    if os.path.exists(os.path.join(worktree, ".git")):
+        return worktree
+    return path_for(project_id_for(ticket_id))
+
+
 def run_tests(project_id: str, timeout: int = 600) -> dict | None:
+    return _run_tests_at(path_for(project_id), timeout)
+
+
+def run_tests_for_ticket(ticket_id: str, timeout: int = 600) -> dict | None:
+    return _run_tests_at(tree_for_ticket(ticket_id), timeout)
+
+
+def _run_tests_at(path: str, timeout: int = 600) -> dict | None:
     """Best-effort mechanical run of a project's own test suite.
 
     Returns None when there is nothing to run -- no package.json, or no
@@ -636,7 +621,6 @@ def run_tests(project_id: str, timeout: int = 600) -> dict | None:
     should not be reported as the ticket's failure, and a verifier step
     should not reach the network.
     """
-    path = path_for(project_id)
     pkg = os.path.join(path, "package.json")
     if not os.path.isfile(pkg):
         return None
@@ -686,6 +670,14 @@ _CRITERIA_FILES = (
 
 
 def criteria_file_snapshot(project_id: str, max_chars: int = 6000) -> str:
+    return _criteria_file_snapshot_at(path_for(project_id), max_chars)
+
+
+def criteria_file_snapshot_for_ticket(ticket_id: str, max_chars: int = 6000) -> str:
+    return _criteria_file_snapshot_at(tree_for_ticket(ticket_id), max_chars)
+
+
+def _criteria_file_snapshot_at(path: str, max_chars: int = 6000) -> str:
     """Current contents of the project's configuration and readme files.
 
     A diff says what a ticket *changed*; it does not say what the project
@@ -698,7 +690,6 @@ def criteria_file_snapshot(project_id: str, max_chars: int = 6000) -> str:
     since the reviewed commit is no longer HEAD.
 
     Returns "" when the workspace has none of these files."""
-    path = path_for(project_id)
     parts, used = [], 0
     for name in _CRITERIA_FILES:
         p = os.path.join(path, name)

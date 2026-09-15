@@ -47,7 +47,7 @@ import time
 import psycopg
 from langgraph.checkpoint.postgres import PostgresSaver
 
-from . import beads, prompts, seats, slack, workspaces
+from . import beads, prompts, seats, slack, verifier, workspaces
 from .classifier import build_classifier_from_model
 from .dynamic_tools import build_dynamic_tools
 from .graph import build_graph_from_model
@@ -369,25 +369,15 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
         except Exception:
             log.exception("thread %s: could not commit workspace", thread_id)
 
-        # The work sits on the ticket's own branch until this lands it on
-        # the integration branch. That is load-bearing, not tidiness: the
-        # verifier runs the project's own test suite against the
-        # integration checkout, so a ticket left on its branch would be
-        # judged on a tree that does not contain the change under review
-        # -- and nothing later in the project could build on it.
-        try:
-            merged, reason = workspaces.merge_to_integration(thread_id)
-        except Exception as e:
-            merged, reason = False, str(e)
-        if not merged:
-            log.error("thread %s could not merge into integration: %s", thread_id, reason)
-            beads.flag_for_human(
-                thread_id,
-                f"the work is committed on branch {workspaces.ticket_branch(thread_id)} but "
-                f"could not be merged into the integration branch: {reason}. Someone has "
-                f"to resolve that before this ticket can be verified.",
-            )
-            return "flagged"
+        # A ticket with acceptance criteria is landed by the verifier, and
+        # only when it passes -- so the integration branch never carries
+        # work that failed review, and the next ticket starts from a tree
+        # of accepted work only. A ticket with NO criteria is never judged
+        # (verify_ticket returns None for it), so nothing else would ever
+        # land it: it merges here.
+        if not beads.acceptance_criteria(current):
+            if not verifier.land(thread_id):
+                return "flagged"
 
         try:
             beads.close(thread_id, reason=summary[:500])

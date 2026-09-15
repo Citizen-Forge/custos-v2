@@ -104,7 +104,7 @@ def main() -> None:
                 except Exception:
                     pass
             _reset_thread(conn, issue_id)
-            previous = workspaces.reset_ticket_to_integration(issue_id)
+            previous = workspaces.reset_for_attempt(issue_id)
             if previous:
                 print(f"    moved {workspaces.ticket_branch(issue_id)} to the tip "
                       f"(was {previous[:12]}; recoverable via the worktree reflog)")
