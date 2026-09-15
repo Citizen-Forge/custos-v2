@@ -80,7 +80,7 @@ def test_dispatch_refuses_a_ticket_whose_toolchain_is_missing(monkeypatch):
     monkeypatch.setattr(
         dispatcher, "next_assigned_ticket", lambda *a, **k: (beads.show(story["id"]), "tc-seat")
     )
-    monkeypatch.setattr(dispatcher, "next_unassigned_ticket", lambda: None)
+    monkeypatch.setattr(dispatcher, "next_unassigned_ticket", lambda *a, **k: None)
 
     d = dispatcher.Dispatcher("postgresql://unused", RoutingTable({}), max_agents=1)
     assert d.tick() == "blocked on toolchain"
