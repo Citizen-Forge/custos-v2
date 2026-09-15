@@ -150,6 +150,28 @@ def test_rework_reason_is_in_the_initial_prompt():
 
     prompt = captured["state"]["messages"][-1][1]
     assert "the suite never asserted determinism" in prompt
+
+
+def test_acceptance_criteria_are_in_the_initial_prompt():
+    """The criteria live in the ticket's metadata, and the agent has no
+    tool that reads a ticket -- only its own workspace. The escalation role
+    sets them THERE and tells the agent to "read them before implementing",
+    so if they never reach the opening prompt the agent refuses instead,
+    every time, until its escalation budget is gone. Found live 2026-09-15:
+    6.3, 6.5 and 13.5 parked with "no quotable acceptance criteria ...
+    anywhere in the turn"."""
+    story = _assigned_story("criteria-seat")
+    beads.set_acceptance_criteria(story["id"], "a saturated sink stops absorbing")
+
+    captured = {}
+    worker.work_one_ticket(
+        CapturingRuntime("criteria-seat", captured), beads.show(story["id"])
+    )
+
+    prompt = captured["state"]["messages"][-1][1]
+    assert "a saturated sink stops absorbing" in prompt
+
+
 # -- acceptance criteria ---------------------------------------------
 
 

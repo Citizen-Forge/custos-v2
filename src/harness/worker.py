@@ -244,7 +244,7 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
     # runs git itself, the tree is already clean and the ticket's diff
     # would otherwise be unrecoverable. See the commit block.
     try:
-        work_base = workspaces.head(workspaces.project_id_for(thread_id))
+        work_base = workspaces.head_for_ticket(thread_id)
     except Exception:  # a workspace that doesn't exist yet is not an error here
         work_base = None
 
@@ -259,17 +259,29 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
                 f":rocket: {runtime.who} is starting work on {thread_id}: {issue['title']}"
             )
             context = beads.prime()
+            # `issue` came from `bd list`, which carries no metadata, so the
+            # ticket's own record is fetched explicitly. That record is the
+            # ONLY place the acceptance criteria live for most escalated
+            # tickets -- the escalation role sets them there and tells the
+            # agent to "read them before implementing", and the agent cannot:
+            # it has no tool that reads a ticket, only its workspace. Found
+            # live 2026-09-15: 6.3, 6.5 and 13.5 re-refused on every
+            # escalation with "no quotable acceptance criteria ... anywhere
+            # in the turn", spent the escalation budget and parked for good.
+            record = beads.show(thread_id)
             prompt = (
                 f"{context}\n\n---\n\nTicket: {issue['title']}\n\n"
                 f"{issue.get('description', '')}"
             )
+            criteria = beads.acceptance_criteria(record)
+            if criteria:
+                prompt += f"\n\n---\n\nAcceptance criteria:\n\n{criteria}"
             # A ticket requeued by the verifier carries the finding that
             # failed it. Without this the agent re-attempts blind and
             # re-submits the same work (the verifier's idempotency is
             # per-commit, so that just fails again until the rework budget
-            # is gone). `issue` came from `bd list`, which carries no
-            # metadata, so the reason is fetched explicitly.
-            rework = (beads.show(thread_id).get("metadata") or {}).get("rework_reason")
+            # is gone).
+            rework = (record.get("metadata") or {}).get("rework_reason")
             if rework:
                 prompt += (
                     "\n\n---\n\nA previous attempt at this ticket was REJECTED by a "
@@ -324,10 +336,12 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
         # Commit the ticket's output so its diff is attributable to it
         # specifically, and record the sha -- that is what the verifier
         # judges against the acceptance criteria, rather than taking the
-        # agent's description of the work at face value.
+        # agent's description of the work at face value. This runs in the
+        # ticket's OWN worktree, so `git add -A` here cannot pick up
+        # another ticket's files.
         try:
-            sha = workspaces.commit_all(
-                workspaces.project_id_for(thread_id), f"{thread_id}: {summary[:200]}"
+            sha = workspaces.commit_all_for_ticket(
+                thread_id, f"{thread_id}: {summary[:200]}"
             )
             if sha:
                 beads.set_metadata(thread_id, "work_commit", sha)
@@ -342,7 +356,7 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
                 # change". 77 of 78 closed tickets had no work_commit.
                 # Anything committed since this run started is this
                 # ticket's output, whoever ran git.
-                head_now = workspaces.head(workspaces.project_id_for(thread_id))
+                head_now = workspaces.head_for_ticket(thread_id)
                 if work_base and head_now and head_now != work_base:
                     span = f"{work_base}..{head_now}"
                     beads.set_metadata(thread_id, "work_commit", span)
@@ -354,6 +368,26 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
                     log.warning("thread %s claimed completion but changed no files", thread_id)
         except Exception:
             log.exception("thread %s: could not commit workspace", thread_id)
+
+        # The work sits on the ticket's own branch until this lands it on
+        # the integration branch. That is load-bearing, not tidiness: the
+        # verifier runs the project's own test suite against the
+        # integration checkout, so a ticket left on its branch would be
+        # judged on a tree that does not contain the change under review
+        # -- and nothing later in the project could build on it.
+        try:
+            merged, reason = workspaces.merge_to_integration(thread_id)
+        except Exception as e:
+            merged, reason = False, str(e)
+        if not merged:
+            log.error("thread %s could not merge into integration: %s", thread_id, reason)
+            beads.flag_for_human(
+                thread_id,
+                f"the work is committed on branch {workspaces.ticket_branch(thread_id)} but "
+                f"could not be merged into the integration branch: {reason}. Someone has "
+                f"to resolve that before this ticket can be verified.",
+            )
+            return "flagged"
 
         try:
             beads.close(thread_id, reason=summary[:500])
