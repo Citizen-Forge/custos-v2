@@ -222,13 +222,52 @@ def ticket_branch(ticket_id: str) -> str:
     return f"ticket/{ticket_id}"
 
 
+def _advance_unworked_tree(ticket_id: str, repo: str, worktree: str) -> None:
+    """Move an untouched ticket tree up to the integration tip.
+
+    A tree is branched from the tip when it is first created, which is what
+    makes it contain everything already merged. But a tree can come to
+    exist without ever being worked -- created for a dispatch that then
+    died before the agent ran -- and reusing it leaves the ticket on a base
+    that predates every ticket that has landed since. With one ticket at a
+    time per project, that is the difference between a first attempt seeing
+    the previous ticket's work and not seeing it at all, which is the whole
+    point of serialising.
+
+    Only a branch with NOTHING of its own is moved, and only while the tree
+    is clean. Either qualification failing means the tree is a real attempt
+    -- in progress, or finished and awaiting rework -- and it is left
+    exactly where that attempt left it. Deliberately conservative: this
+    must never be the thing that discards an agent's work."""
+    branch = ticket_branch(ticket_id)
+    if not _branch_exists(repo, branch):
+        return
+    base = integration_ref(project_id_for(ticket_id))
+    if base is None:
+        return
+
+    branch_head = _git(["rev-parse", branch], repo).stdout.strip()
+    tip = _git(["rev-parse", base], repo).stdout.strip()
+    if not branch_head or not tip or branch_head == tip:
+        return
+    own_commits = _git(["rev-list", "--count", f"{base}..{branch}"], repo).stdout.strip()
+    if own_commits != "0":
+        return  # a previous attempt's work: not ours to move
+    if _git(["status", "--porcelain"], worktree).stdout.strip():
+        return  # uncommitted work in the tree: in use, leave it alone
+
+    _git(["reset", "--hard", base], worktree)
+    _git(["clean", "-qfd"], worktree)
+
+
 def for_ticket(ticket_id: str) -> str:
     """The working tree an agent on this ticket is rooted in, created on
     first use and re-used afterwards.
 
     Re-used rather than recreated so a resumed or verifier-requeued ticket
     keeps the work already in its tree -- `_reset_thread` starts the agent
-    over, it does not throw the ticket's files away.
+    over, it does not throw the ticket's files away. A tree with no work of
+    its own is the exception: see _advance_unworked_tree.
 
     Always returns a worktree: a project with no commits yet gets an empty
     base commit so it has a ref to branch from. Anything that stops the
@@ -239,6 +278,7 @@ def for_ticket(ticket_id: str) -> str:
     repo = ensure(project_id)
     worktree = worktree_path_for(ticket_id)
     if os.path.exists(os.path.join(worktree, ".git")):
+        _advance_unworked_tree(ticket_id, repo, worktree)
         return worktree
 
     base = integration_ref(project_id)
