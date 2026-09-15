@@ -297,6 +297,42 @@ def head_for_ticket(ticket_id: str) -> str | None:
     return head(project_id_for(ticket_id))
 
 
+def reset_ticket_to_integration(ticket_id: str) -> str | None:
+    """Move a ticket's tree onto the current integration tip, returning the
+    commit its branch was on, or None if it had no branch.
+
+    A requeued ticket's branch is frozen at the commit it forked from, so
+    re-running the agent on top of it still merges into a conflict over
+    whatever moved underneath in the meantime -- the barrel file in
+    particular, which is exactly what parked these tickets in the first
+    place. Starting from the tip is what makes the next attempt mergeable.
+
+    The abandoned commits stay in the worktree's reflog, which is what the
+    returned sha is for -- log it. Deliberately NOT kept as a branch or a
+    tag: commits_for_ticket reads `git log --all`, so an archived ref would
+    put the rejected attempt straight back into the diff the verifier
+    judges, and the ticket would be re-failed on its own dead work."""
+    project_id = project_id_for(ticket_id)
+    repo = path_for(project_id)
+    branch = ticket_branch(ticket_id)
+    if not _branch_exists(repo, branch):
+        return None
+    base = integration_ref(project_id)
+    if base is None:
+        return None
+
+    previous = _git(["rev-parse", branch], repo).stdout.strip()
+    worktree = worktree_path_for(ticket_id)
+    if os.path.exists(os.path.join(worktree, ".git")):
+        _git(["reset", "--hard", base], worktree)
+        # Untracked leftovers are a previous attempt's scratch, not work --
+        # `-d` without `-x`, so ignored trees like node_modules stay put.
+        _git(["clean", "-qfd"], worktree)
+    else:
+        _git(["branch", "-f", branch, base], repo)
+    return previous
+
+
 def diff_since(project_id: str, ref: str | None) -> str:
     """Changes in this project's workspace since `ref`, or the whole
     working tree's uncommitted diff when ref is None.

@@ -24,7 +24,12 @@ Requeueing these is not just clearing the label:
 - completion_summary and work_commit are cleared, or worker.work_one_ticket
   re-closes the ticket with the OLD claim the moment the graph runs;
 - the LangGraph thread is reset, so the next run is a real attempt rather
-  than a resume of a thread that already reached END.
+  than a resume of a thread that already reached END;
+- the ticket's git worktree is moved back onto the current integration
+  tip, because its branch is frozen at the commit it forked from and
+  re-running on top of that still merges into the same conflict it was
+  parked for. The abandoned commit is logged; it stays in the worktree's
+  reflog.
 
     docker compose run --rm harness python scripts/requeue_parked_tickets.py --dry-run <id> ...
     docker compose run --rm harness python scripts/requeue_parked_tickets.py <id> ...
@@ -35,7 +40,7 @@ import os
 
 import psycopg
 
-from harness import beads, verifications
+from harness import beads, verifications, workspaces
 from harness.verifier import _reset_thread
 
 # Kept rather than dropped: the evidence is worth having if anyone wants to
@@ -99,6 +104,10 @@ def main() -> None:
                 except Exception:
                     pass
             _reset_thread(conn, issue_id)
+            previous = workspaces.reset_ticket_to_integration(issue_id)
+            if previous:
+                print(f"    moved {workspaces.ticket_branch(issue_id)} to the tip "
+                      f"(was {previous[:12]}; recoverable via the worktree reflog)")
             beads.reopen(
                 issue_id,
                 "requeued: parked by the shared-workspace diff fault (workspace fix 2026-09-15)",

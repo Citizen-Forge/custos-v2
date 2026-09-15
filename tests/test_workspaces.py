@@ -191,6 +191,44 @@ def test_a_project_with_no_commits_yet_still_gets_a_worktree(projects_root):
     assert os.path.exists(os.path.join(path, ".git"))
 
 
+def test_reset_moves_a_ticket_back_onto_the_integration_tip(projects_root):
+    """A requeued ticket must start from the current work, not from the
+    commit it forked at -- re-running on the old base merges into the same
+    conflict it was parked for (workspace-9jg.1.3, 14.2, both appending to
+    src/index.ts from a stale base)."""
+    worktree = workspaces.for_ticket("workspace-9jg.1.1")
+    open(os.path.join(worktree, "attempt-one.ts"), "w").write("first try")
+    first = workspaces.commit_all_for_ticket("workspace-9jg.1.1", "workspace-9jg.1.1: first try")
+
+    # Another ticket's work lands while 1.1 is parked.
+    lander = workspaces.for_ticket("workspace-9jg.1.2")
+    open(os.path.join(lander, "landed.ts"), "w").write("x")
+    workspaces.commit_all_for_ticket("workspace-9jg.1.2", "workspace-9jg.1.2: landed")
+    workspaces.merge_to_integration("workspace-9jg.1.2")
+
+    previous = workspaces.reset_ticket_to_integration("workspace-9jg.1.1")
+
+    assert previous == first
+    assert workspaces.head_for_ticket("workspace-9jg.1.1") == workspaces.head("workspace-9jg")
+    assert os.path.exists(os.path.join(worktree, "landed.ts")), "it sees the merged work"
+    assert not os.path.exists(os.path.join(worktree, "attempt-one.ts")), "the old attempt is gone"
+
+
+def test_reset_does_not_leave_the_old_attempt_in_the_verifier_diff(projects_root):
+    """commits_for_ticket reads `git log --all`, so keeping the abandoned
+    attempt as an archive branch or tag would put it straight back into the
+    diff the verifier judges and the ticket would be re-failed on its own
+    dead work."""
+    worktree = workspaces.for_ticket("workspace-9jg.1.1")
+    open(os.path.join(worktree, "rejected.ts"), "w").write("x")
+    workspaces.commit_all_for_ticket("workspace-9jg.1.1", "workspace-9jg.1.1: rejected attempt")
+    assert len(workspaces.commits_for_ticket("workspace-9jg", "workspace-9jg.1.1")) == 1
+
+    workspaces.reset_ticket_to_integration("workspace-9jg.1.1")
+
+    assert workspaces.commits_for_ticket("workspace-9jg", "workspace-9jg.1.1") == []
+
+
 def test_two_projects_get_separate_directories(projects_root):
     a = workspaces.ensure("proj-a")
     b = workspaces.ensure("proj-b")
