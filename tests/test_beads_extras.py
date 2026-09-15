@@ -67,6 +67,35 @@ def test_create_with_parent_produces_hierarchical_id():
     assert subtask["id"].startswith(epic["id"] + ".")
 
 
+def test_reopen_releases_the_previous_claim():
+    """A reopened ticket has to be claimable by the seat it is now
+    assigned to.
+
+    `bd --claim` sets assignee and status together and is only idempotent
+    for the actor already holding the ticket, so an `open` ticket that
+    keeps its old assignee can never be claimed by anyone else -- and the
+    dispatcher retries that same highest-priority ticket every cycle
+    rather than moving on, wedging the whole queue. Found live
+    2026-09-15 on workspace-9jg.1.3. Reopening means "back in the pool",
+    so the claim has to go with it."""
+    beads.ensure_initialized()
+    ticket = beads.create("reopen must release the claim", "x")
+
+    beads.claim(ticket["id"], actor="seat-a")
+    claimed = beads.show(ticket["id"])
+    assert claimed["assignee"] == "seat-a"
+    assert claimed["status"] == "in_progress"
+
+    beads.reopen(ticket["id"], "rework: the criteria were wrong")
+
+    reopened = beads.show(ticket["id"])
+    assert reopened["status"] == "open"
+    assert reopened.get("assignee") in (None, ""), "reopen must release the old holder"
+
+    beads.claim(ticket["id"], actor="seat-b")
+    assert beads.show(ticket["id"])["assignee"] == "seat-b"
+
+
 class ProposesSubtaskThenDone:
     def invoke(self, messages):
         if messages and isinstance(messages[-1], ToolMessage):

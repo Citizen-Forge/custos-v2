@@ -241,9 +241,33 @@ def reopen(issue_id: str, reason: str, actor: str = DEFAULT_ACTOR) -> dict:
     back to open -- otherwise everything blocked on it proceeds against
     work that was never done. Found live 2026-09-09: workspace-9jg.1.6
     closed, failed verification, and stayed closed anyway -- releasing 73
-    dependents onto a scaffold whose test suite ran zero tests."""
+    dependents onto a scaffold whose test suite ran zero tests.
+
+    Reopening also has to RELEASE the claim, which is why `--assignee ""`
+    is here. `bd --claim` sets assignee *and* status together and is only
+    idempotent for the actor already holding the ticket, so an `open`
+    ticket that keeps its old assignee can never be claimed by the seat
+    it is now assigned to. That is worse than one stranded ticket: the
+    dispatcher's selector keeps returning the same highest-priority
+    ticket, the claim throws "already claimed by <other seat>", and it
+    retries that ticket every cycle instead of falling through to the
+    rest of the queue -- so a single reopened ticket whose seat later
+    changed wedges dispatch entirely. Found live 2026-09-15:
+    workspace-9jg.1.3 (assignee deterministic-tick, assigned_seat
+    crew-routing-ts) had stalled the dispatcher for ~16h with 83 open
+    tickets and three free agent slots, and workspace-9jg.4.2 was queued
+    to stall it next. Reopening means "back in the pool", so the previous
+    holder goes with it; the dispatcher re-claims under the assigned seat."""
     return json.loads(
-        _run(["update", issue_id, "--status", "open", "--append-notes", reason], actor=actor)
+        _run(
+            [
+                "update", issue_id,
+                "--status", "open",
+                "--append-notes", reason,
+                "--assignee", "",
+            ],
+            actor=actor,
+        )
     )[0]
 
 
