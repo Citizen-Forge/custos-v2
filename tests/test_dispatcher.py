@@ -431,6 +431,29 @@ def test_unassigned_work_in_an_engaged_project_is_not_brokered(monkeypatch):
     assert picked is None or picked["id"] != story["id"]
 
 
+def test_only_one_orphan_of_a_project_is_resumed(monkeypatch):
+    """The orphan pool is exempt from the engagement gate so a crashed run
+    is not stranded -- but a project whose crash left several `in_progress`
+    tickets must still resume only one of them. Observed live on restart:
+    1.2 and 1.3 both resumed into the same project."""
+    monkeypatch.setattr(dispatcher, "_order", lambda issue: ())
+    project = beads.create("orphan pair proj", "d", issue_type="epic", priority=1)
+    a = beads.create("orphan pair a", "d", parent=project["id"])
+    b = beads.create("orphan pair b", "d", parent=project["id"])
+    beads.assign_to_seat(a["id"], "orphan-pair-a-seat")
+    beads.assign_to_seat(b["id"], "orphan-pair-b-seat")
+    beads.claim(a["id"], actor="orphan-pair-a-seat")
+    beads.claim(b["id"], actor="orphan-pair-b-seat")
+
+    first, _ = dispatcher.next_assigned_ticket(running_tickets=set())
+    assert first is not None and first["id"] in (a["id"], b["id"])
+
+    other_id = b["id"] if first["id"] == a["id"] else a["id"]
+    second, _ = dispatcher.next_assigned_ticket(running_tickets={first["id"]})
+
+    assert second is None or second["id"] != other_id, "one orphan at a time"
+
+
 # -- verify on close --------------------------------------------------
 
 

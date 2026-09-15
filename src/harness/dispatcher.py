@@ -236,7 +236,9 @@ def engaged_projects() -> set[str]:
 
 
 def next_assigned_ticket(
-    busy_seats: set[str] | None = None, engaged: set[str] | None = None
+    busy_seats: set[str] | None = None,
+    engaged: set[str] | None = None,
+    running_tickets: set[str] | None = None,
 ) -> tuple[dict | None, str | None]:
     """A ticket the product-owner has already assigned that can start now.
 
@@ -256,15 +258,28 @@ def next_assigned_ticket(
 
     `engaged` (optional) is the set of projects already holding a ticket
     -- see engaged_projects. Computed when omitted so existing callers and
-    tests keep the serialisation without knowing about it."""
+    tests keep the serialisation without knowing about it.
+
+    `running_tickets` (optional) is what the dispatcher has actually got
+    running in-process. The orphan pool is exempt from `engaged` (see
+    _skip), which is right for a single orphan but would resume several
+    side by side when a crashed project left more than one `in_progress`
+    -- observed live on restart, with 1.2 and 1.3 both resuming into the
+    same project. A project with a ticket running is therefore skipped
+    outright, orphan or not."""
     held = held_projects()
     busy = busy_seats or set()
     forking = engaged_projects() if engaged is None else engaged
+    running_projects = {
+        toolchain.project_id_for(ticket_id) for ticket_id in (running_tickets or set())
+    }
 
     def _skip(issue, new_work: bool):
         project = toolchain.project_id_for(issue["id"])
         if project in held:
             return True
+        if project in running_projects:
+            return True  # this project is being worked right now
         # One ticket at a time per project only gates the START of work.
         # The ticket already in flight IS what the orphan pool exists to
         # resume -- a ticket left `in_progress` by a crash never comes back
@@ -297,7 +312,9 @@ def next_assigned_ticket(
     return _pick(beads.ready(), new_work=True)
 
 
-def next_unassigned_ticket(engaged: set[str] | None = None) -> dict | None:
+def next_unassigned_ticket(
+    engaged: set[str] | None = None, running_tickets: set[str] | None = None
+) -> dict | None:
     """The highest-priority ready ticket no seat has been earmarked for
     yet, subject to the same dispatchability and dispatch-hold filters as
     next_assigned_ticket.
@@ -308,6 +325,9 @@ def next_unassigned_ticket(engaged: set[str] | None = None) -> dict | None:
     preemption check in tick()."""
     held = held_projects()
     forking = engaged_projects() if engaged is None else engaged
+    running = {
+        toolchain.project_id_for(ticket_id) for ticket_id in (running_tickets or set())
+    }
     best: dict | None = None
     for issue in beads.ready():
         if not dispatchable(issue):
@@ -315,19 +335,21 @@ def next_unassigned_ticket(engaged: set[str] | None = None) -> dict | None:
         if beads.assigned_seat(issue) is not None:
             continue
         project_id = toolchain.project_id_for(issue["id"])
-        if project_id in held or project_id in forking:
+        if project_id in held or project_id in forking or project_id in running:
             continue
         if best is None or _priority(issue) < _priority(best):
             best = issue
     return best
 
 
-def has_unassigned_work(engaged: set[str] | None = None) -> bool:
+def has_unassigned_work(
+    engaged: set[str] | None = None, running_tickets: set[str] | None = None
+) -> bool:
     """Held projects are excluded so the product-owner is not woken to
     broker work no agent could start. Projects already running a ticket
     are excluded for the same reason: brokering more into them would only
     queue behind the serialisation gate."""
-    return next_unassigned_ticket(engaged) is not None
+    return next_unassigned_ticket(engaged, running_tickets) is not None
 
 
 def _priority(issue: dict) -> int:
@@ -713,11 +735,12 @@ class Dispatcher:
 
         with self._lock:
             busy = set(self._running)
+            running_tickets = {info["ticket_id"] for info in self._running.values()}
         # Read once and hand the same answer to every selector below: if
         # each re-read its own, a project could be admitted on one answer
         # and skipped on the next.
         engaged = engaged_projects()
-        assigned, seat_id = next_assigned_ticket(busy, engaged)
+        assigned, seat_id = next_assigned_ticket(busy, engaged, running_tickets)
 
         # Already-assigned work is drained before the product-owner is
         # woken to broker more -- UNLESS something unassigned strictly
@@ -730,7 +753,7 @@ class Dispatcher:
         # (P0, unassigned, rank 1 in `bd ready`) was starved for days
         # behind ~20 pre-assigned P2 stories.
         if assigned is not None:
-            challenger = next_unassigned_ticket(engaged)
+            challenger = next_unassigned_ticket(engaged, running_tickets)
             if not _outranks(challenger, assigned):
                 return self._start_assigned(assigned, seat_id)
             log.info(
@@ -738,7 +761,7 @@ class Dispatcher:
                 challenger["id"], _priority(challenger),
                 assigned["id"], _priority(assigned),
             )
-        elif not has_unassigned_work(engaged):
+        elif not has_unassigned_work(engaged, running_tickets):
             return "idle"
 
         log.info("capacity free and unassigned work waiting -- waking product-owner")
