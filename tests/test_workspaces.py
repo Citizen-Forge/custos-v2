@@ -86,9 +86,88 @@ def test_ensure_is_idempotent(projects_root):
     assert first == second
 
 
-def test_ticket_resolves_to_its_project_workspace(projects_root):
+def test_ticket_resolves_to_its_own_worktree(projects_root):
+    """A ticket is NOT rooted at the project directory. Every seat working
+    a project shared that one checkout, and `git add -A` at the end of a
+    ticket then swept the other agents' live files into its commit -- the
+    failure the worktrees exist to fix (2026-09-15: 31 tickets on the human
+    queue, ~14 of them rejected for judging another ticket's work)."""
     path = workspaces.for_ticket("workspace-9jg.1.5")
-    assert path.endswith("workspace-9jg"), "story maps to its project, not its epic"
+    assert path != workspaces.path_for("workspace-9jg"), "not the shared project tree"
+    assert path.endswith(
+        os.path.join("workspace-9jg", workspaces.WORKTREES_DIRNAME, "workspace-9jg.1.5")
+    )
+    assert os.path.exists(os.path.join(path, ".git")), "a real git worktree"
+
+
+def test_two_tickets_in_one_project_get_separate_trees(projects_root):
+    a = workspaces.for_ticket("workspace-9jg.1.1")
+    b = workspaces.for_ticket("workspace-9jg.1.2")
+
+    assert a != b
+    open(os.path.join(a, "only-in-a.ts"), "w").write("a")
+    assert not os.path.exists(os.path.join(b, "only-in-a.ts"))
+
+
+def test_reopening_a_ticket_reuses_its_tree(projects_root):
+    """Requeueing must not throw the ticket's files away -- the verifier's
+    rework path resets the graph thread, not the worktree."""
+    first = workspaces.for_ticket("workspace-9jg.1.1")
+    open(os.path.join(first, "partial.ts"), "w").write("half done")
+
+    assert workspaces.for_ticket("workspace-9jg.1.1") == first
+    assert os.path.exists(os.path.join(first, "partial.ts"))
+
+
+def test_a_ticket_commit_holds_only_that_tickets_files(projects_root):
+    """The regression this change exists for.
+
+    Two seats work the same project at once. In a shared tree `git add -A`
+    committed both sets of files under whichever ticket finished first, and
+    the verifier -- which reads that commit's diff -- failed the ticket for
+    "the diff under review is not this ticket's work at all"."""
+    a = workspaces.for_ticket("workspace-9jg.1.1")
+    b = workspaces.for_ticket("workspace-9jg.1.2")
+    open(os.path.join(a, "a.ts"), "w").write("a")
+    open(os.path.join(b, "b.ts"), "w").write("b")
+
+    sha = workspaces.commit_all_for_ticket("workspace-9jg.1.1", "workspace-9jg.1.1: did a")
+
+    assert sha
+    diff = workspaces.commit_diff("workspace-9jg", sha)
+    assert "a.ts" in diff
+    assert "b.ts" not in diff, "another ticket's live work must not be in this commit"
+
+
+def test_ticket_work_reaches_the_integration_checkout(projects_root):
+    worktree = workspaces.for_ticket("workspace-9jg.1.1")
+    open(os.path.join(worktree, "shipped.ts"), "w").write("x")
+    workspaces.commit_all_for_ticket("workspace-9jg.1.1", "workspace-9jg.1.1: shipped")
+
+    ok, reason = workspaces.merge_to_integration("workspace-9jg.1.1")
+
+    assert ok, reason
+    assert os.path.exists(os.path.join(workspaces.path_for("workspace-9jg"), "shipped.ts"))
+
+
+def test_a_new_ticket_branches_from_already_merged_work(projects_root):
+    """A ticket has to start on top of what has already landed, or every
+    ticket after the first would be built against the empty scaffold."""
+    a = workspaces.for_ticket("workspace-9jg.1.1")
+    open(os.path.join(a, "first.ts"), "w").write("x")
+    workspaces.commit_all_for_ticket("workspace-9jg.1.1", "workspace-9jg.1.1: first")
+    workspaces.merge_to_integration("workspace-9jg.1.1")
+
+    b = workspaces.for_ticket("workspace-9jg.1.2")
+
+    assert os.path.exists(os.path.join(b, "first.ts"))
+
+
+def test_the_worktree_directory_is_never_committed(projects_root):
+    """`.worktrees/` holds a whole checkout per ticket, so `git add -A` in
+    the integration tree would otherwise commit every ticket's tree."""
+    workspaces.for_ticket("workspace-9jg.1.1")
+    assert workspaces.diff_since("workspace-9jg", None).strip() == ""
 
 
 def test_two_projects_get_separate_directories(projects_root):

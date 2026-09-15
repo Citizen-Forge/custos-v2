@@ -19,10 +19,33 @@ Isolation rests on permissions.check_within_workspace, which compares
 path components rather than string prefixes -- a plain prefix test would
 let /projects/proj-a reach ../proj-abc, i.e. no isolation at all between
 sibling projects.
+
+One project is still shared by every seat working one of its tickets, and
+that is not enough on its own: commit_all stages with `git add -A`, so with
+more than one agent running it sweeps the OTHER agents' half-written files
+into whichever ticket happens to finish first. The commit is titled
+`<ticket-id>: ...` and its content is several tickets' work, which is what
+the verifier then judges -- it fails the ticket for "the diff under review
+is not this ticket's work at all", the fail requeues, and after
+MAX_VERIFIER_REWORKS the ticket parks. Found live 2026-09-15: 31 tickets on
+the human queue and ~14 of them rejected in exactly those words.
+
+So each ticket now gets its own `git worktree` (for_ticket), on its own
+branch off the project's integration branch, and merges back when the
+ticket completes (merge_to_integration). One writer per tree, so a
+ticket's commit contains that ticket's work. The project directory stays
+the integration checkout -- it is what the verifier reads and what a new
+worktree branches from, so a ticket still starts on top of everything
+already merged.
 """
 
 import os
 import subprocess
+
+try:  # Linux only; the harness runs in a container, but tests can run anywhere.
+    import fcntl
+except ImportError:  # pragma: no cover - not reachable in the deployment
+    fcntl = None  # type: ignore[assignment]
 
 from .config import PROJECTS_ROOT
 
@@ -62,6 +85,17 @@ __pycache__/
 .pytest_cache/
 target/
 .beads/
+.worktrees/
+"""
+
+# Added to workspaces that already carry _IGNORE_BLOCK. Kept separate
+# because the block's marker check below short-circuits, so every existing
+# project would otherwise never learn about the worktree directory -- and
+# `git add -A` would then commit every ticket's other checkout into the
+# integration branch.
+_WORKTREES_IGNORE = """
+# Added by the harness: per-ticket git worktrees live here.
+.worktrees/
 """
 
 
@@ -78,10 +112,14 @@ def _ensure_gitignore(path: str) -> None:
     p = os.path.join(path, ".gitignore")
     try:
         existing = open(p).read() if os.path.isfile(p) else ""
-        if "Added by the harness" in existing:
+        if "Added by the harness" not in existing:
+            addition = _IGNORE_BLOCK
+        elif ".worktrees/" not in existing:
+            addition = _WORKTREES_IGNORE
+        else:
             return
         with open(p, "a") as fh:
-            fh.write(_IGNORE_BLOCK)
+            fh.write(addition)
     except OSError:
         return  # a workspace we cannot write to is not worth failing a ticket over
 
@@ -122,6 +160,132 @@ def has_commits(project_id: str) -> bool:
     return out.returncode == 0
 
 
+# -- per-ticket worktrees ----------------------------------------------
+#
+# One working tree per ticket, so no two agents ever write into the same
+# checkout. See the module docstring for the live failure this exists to
+# stop.
+
+WORKTREES_DIRNAME = ".worktrees"
+
+
+def integration_branch() -> str:
+    """The branch tickets branch from and merge back into. Pinned by name
+    rather than taken from the repo's HEAD, because agents run `git
+    checkout -b` themselves and a stray branch left checked out in the
+    project directory would otherwise silently become the integration
+    point for every later ticket."""
+    return os.environ.get("HARNESS_INTEGRATION_BRANCH", "master")
+
+
+def _git(args: list[str], cwd: str, timeout: int = 120):
+    return subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout
+    )
+
+
+def _current_branch(path: str) -> str | None:
+    out = _git(["rev-parse", "--abbrev-ref", "HEAD"], path)
+    if out.returncode != 0:
+        return None
+    name = out.stdout.strip()
+    # A detached HEAD reports "HEAD", which is not a branch to merge into.
+    return name if name and name != "HEAD" else None
+
+
+def _branch_exists(path: str, branch: str) -> bool:
+    return _git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], path).returncode == 0
+
+
+def integration_ref(project_id: str) -> str | None:
+    """The ref a new ticket branches from, or None while the project has
+    no commits yet (nothing to branch from)."""
+    path = path_for(project_id)
+    if not os.path.isdir(path):
+        return None
+    if _branch_exists(path, integration_branch()):
+        return integration_branch()
+    # A repo created before this pin, or by a git whose default branch is
+    # named otherwise: fall back to whatever it is actually on.
+    return _current_branch(path) if has_commits(project_id) else None
+
+
+def worktrees_root(project_id: str) -> str:
+    return os.path.join(path_for(project_id), WORKTREES_DIRNAME)
+
+
+def worktree_path_for(ticket_id: str) -> str:
+    return os.path.join(worktrees_root(project_id_for(ticket_id)), ticket_id)
+
+
+def ticket_branch(ticket_id: str) -> str:
+    return f"ticket/{ticket_id}"
+
+
+def for_ticket(ticket_id: str) -> str:
+    """The working tree an agent on this ticket is rooted in, created on
+    first use and re-used afterwards.
+
+    Re-used rather than recreated so a resumed or verifier-requeued ticket
+    keeps the work already in its tree -- `_reset_thread` starts the agent
+    over, it does not throw the ticket's files away.
+
+    Falls back to the shared project workspace only when the project has no
+    commits at all yet, so there is no ref to branch from. Anything else
+    that stops the worktree being created is raised: quietly handing back
+    the shared tree would reinstate the exact bug this replaces."""
+    project_id = project_id_for(ticket_id)
+    repo = ensure(project_id)
+    worktree = worktree_path_for(ticket_id)
+    if os.path.exists(os.path.join(worktree, ".git")):
+        return worktree
+
+    base = integration_ref(project_id)
+    if base is None:
+        return repo
+
+    os.makedirs(worktrees_root(project_id), exist_ok=True)
+    # A directory left behind by a worktree git no longer knows about
+    # (removed by hand, or a container recreate) makes `worktree add` fail.
+    _git(["worktree", "prune"], repo)
+
+    branch = ticket_branch(ticket_id)
+    args = (
+        ["worktree", "add", worktree, branch]
+        if _branch_exists(repo, branch)
+        else ["worktree", "add", "-b", branch, worktree, base]
+    )
+    out = _git(args, repo)
+    if out.returncode != 0:
+        raise RuntimeError(
+            f"could not create a worktree for {ticket_id}: {out.stderr.strip()}"
+        )
+    return worktree
+
+
+def head_at(path: str) -> str | None:
+    out = _git(["rev-parse", "HEAD"], path)
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def head(project_id: str) -> str | None:
+    """Current commit of a project's integration checkout, or None if the
+    workspace has no commits yet."""
+    path = path_for(project_id)
+    if not os.path.isdir(path):
+        return None
+    return head_at(path)
+
+
+def head_for_ticket(ticket_id: str) -> str | None:
+    """Where a ticket's own tree stands -- the base its run started from
+    when read at the start of a run."""
+    worktree = worktree_path_for(ticket_id)
+    if os.path.exists(os.path.join(worktree, ".git")):
+        return head_at(worktree)
+    return head(project_id_for(ticket_id))
+
+
 def diff_since(project_id: str, ref: str | None) -> str:
     """Changes in this project's workspace since `ref`, or the whole
     working tree's uncommitted diff when ref is None.
@@ -150,18 +314,9 @@ def diff_since(project_id: str, ref: str | None) -> str:
     return "\n".join(parts)
 
 
-def head(project_id: str) -> str | None:
-    """Current commit, or None if the workspace has no commits yet."""
-    out = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=path_for(project_id), capture_output=True, text=True, timeout=60,
-    )
-    return out.stdout.strip() if out.returncode == 0 else None
-
-
-def commit_all(project_id: str, message: str) -> str | None:
-    """Commit everything currently in a project's workspace, returning the
-    new commit sha, or None if there was nothing to commit.
+def _commit_all_at(path: str, message: str) -> str | None:
+    """Commit everything currently in ONE working tree, returning the new
+    commit sha, or None if there was nothing to commit.
 
     The harness does this on the ticket's behalf rather than requiring the
     agent to run git. That keeps the useful property -- each ticket's
@@ -170,8 +325,11 @@ def commit_all(project_id: str, message: str) -> str | None:
     depending on an agent remembering to commit. It also gives the
     verifier something precise to judge: the diff of this commit is what
     this ticket did, rather than whatever happens to be lying around in
-    the working tree from earlier work."""
-    path = path_for(project_id)
+    the working tree from earlier work.
+
+    `git add -A` is only safe because `path` is a per-ticket worktree: run
+    in a tree two agents share, it stages their work as well as this
+    ticket's."""
     if not os.path.isdir(path):
         return None
     subprocess.run(["git", "add", "-A"], cwd=path, capture_output=True, text=True, timeout=120)
@@ -184,10 +342,11 @@ def commit_all(project_id: str, message: str) -> str | None:
     # and it hid whether any product work existed at all. Unstaged here as
     # well as ignored because .beads is already TRACKED in every existing
     # workspace, and .gitignore does not untrack a file.
-    subprocess.run(
-        ["git", "reset", "-q", "--", ".beads"],
-        cwd=path, capture_output=True, text=True, timeout=120,
-    )
+    for ignore in (".beads", WORKTREES_DIRNAME):
+        subprocess.run(
+            ["git", "reset", "-q", "--", ignore],
+            cwd=path, capture_output=True, text=True, timeout=120,
+        )
     staged = subprocess.run(
         ["git", "diff", "--cached", "--quiet"], cwd=path, capture_output=True, text=True, timeout=120
     )
@@ -199,7 +358,82 @@ def commit_all(project_id: str, message: str) -> str | None:
     )
     if done.returncode != 0:
         return None
-    return head(project_id)
+    return head_at(path)
+
+
+def commit_all(project_id: str, message: str) -> str | None:
+    """Commit a project's integration checkout. See _commit_all_at."""
+    return _commit_all_at(path_for(project_id), message)
+
+
+def commit_all_for_ticket(ticket_id: str, message: str) -> str | None:
+    """Commit the ticket's own worktree. This is the one a ticket's
+    completion goes through -- it can only see that ticket's files."""
+    return _commit_all_at(worktree_path_for(ticket_id), message)
+
+
+def _merge_lock(project_id: str):
+    """Serialise merges into the integration branch.
+
+    Three agents finish tickets concurrently and each merges back, and git
+    will not run two merges in one repository at once -- they share an
+    index, so the loser sees a corrupted tree. Held on a file inside the
+    (gitignored) worktrees directory so it never shows up as a pending
+    change. Degrades to a no-op if fcntl is unavailable, which is a
+    dev-on-Windows case only; the deployment is Linux."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _lock():
+        if fcntl is None:  # pragma: no cover - deployment is Linux
+            yield
+            return
+        os.makedirs(worktrees_root(project_id), exist_ok=True)
+        fd = os.open(os.path.join(worktrees_root(project_id), ".merge.lock"),
+                     os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    return _lock()
+
+
+def merge_to_integration(ticket_id: str) -> tuple[bool, str]:
+    """Merge the ticket's branch into the project's integration branch.
+
+    Until this runs the ticket's work exists only on its own branch, so
+    nothing else in the project can see it -- and the verifier, which runs
+    the project's test suite against the integration checkout, would be
+    judging a tree without the change under review.
+
+    Returns (ok, reason); a conflict is reported rather than resolved, so
+    the caller can park the ticket for a person instead of guessing."""
+    project_id = project_id_for(ticket_id)
+    repo = path_for(project_id)
+    base = integration_ref(project_id)
+    if base is None:
+        return True, ""
+    branch = ticket_branch(ticket_id)
+    if not _branch_exists(repo, branch):
+        return True, ""  # the ticket produced no branch: nothing to merge
+
+    with _merge_lock(project_id):
+        # The merge has to happen in the integration checkout, because that
+        # is the tree the project's own test suite runs in.
+        if _current_branch(repo) != base:
+            out = _git(["checkout", "-q", base], repo)
+            if out.returncode != 0:
+                return False, f"could not check out {base}: {out.stderr.strip()}"
+        out = _git(
+            ["merge", "--no-ff", "-m", f"{ticket_id}: merge into {base}", branch], repo
+        )
+        if out.returncode != 0:
+            _git(["merge", "--abort"], repo)
+            return False, (out.stderr.strip() or out.stdout.strip()).replace("\n", " ")[:400]
+        return True, ""
 
 
 def commit_diff(project_id: str, sha: str, max_chars: int = 20000) -> str:
