@@ -7,6 +7,7 @@ is a diff attributable to exactly that ticket.
 """
 
 import os
+import subprocess
 
 import pytest
 
@@ -51,6 +52,42 @@ def test_commit_all_records_a_ticket_diff(projects_root):
 def test_commit_all_returns_none_when_nothing_changed(projects_root):
     workspaces.ensure("proj-y")
     assert workspaces.commit_all("proj-y", "nothing") is None
+
+
+def test_commit_all_excludes_the_harness_beads_store(projects_root):
+    """The harness's own store must never enter a ticket's diff.
+
+    .beads lives INSIDE the project workspace, `bd init` does not ignore it,
+    and it ends up tracked -- so `git add -A` staged its bookkeeping into every
+    ticket's commit and the verifier judged that instead of the work. Found
+    live 2026-09-15: workspace-9jg.2.3 failed because its commits "touch only
+    .beads/interactions.jsonl and two one-line scaffolding" files. Unstaging is
+    needed as well as ignoring, because .gitignore cannot untrack.
+    """
+    path = workspaces.ensure("proj-g")
+    store = os.path.join(path, ".beads")
+    os.makedirs(store, exist_ok=True)
+    open(os.path.join(store, "interactions.jsonl"), "w").write("first\n")
+    # `-f`, and deliberately so: the workspace .gitignore now ignores .beads,
+    # but every PRODUCTION workspace has it already TRACKED (bd init added it
+    # before the ignore existed, and .gitignore cannot untrack). Tracking it
+    # by force here reproduces that state -- which is the only case the
+    # unstage in commit_all is needed for, so without the -f this test would
+    # pass for the wrong reason and never exercise the fix.
+    subprocess.run(["git", "add", "-f", ".beads"], cwd=path,
+                   capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-q", "-m", "bd init"], cwd=path,
+                   capture_output=True, text=True)
+
+    open(os.path.join(path, "real.ts"), "w").write("// real work\n")
+    open(os.path.join(store, "interactions.jsonl"), "a").write("second\n")
+
+    sha = workspaces.commit_all("proj-g", "proj-g.1.1: real work")
+
+    assert sha, "the product change must still be committed"
+    diff = workspaces.commit_diff("proj-g", sha)
+    assert "real.ts" in diff
+    assert "interactions.jsonl" not in diff, "harness bookkeeping must not reach the ticket's diff"
 
 
 def test_second_commit_diff_contains_only_the_second_ticket(projects_root):

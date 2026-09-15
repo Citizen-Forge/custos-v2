@@ -61,6 +61,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 target/
+.beads/
 """
 
 
@@ -174,6 +175,19 @@ def commit_all(project_id: str, message: str) -> str | None:
     if not os.path.isdir(path):
         return None
     subprocess.run(["git", "add", "-A"], cwd=path, capture_output=True, text=True, timeout=120)
+    # The harness's OWN Beads store lives inside the project workspace and
+    # `bd init` does not ignore it, so `git add -A` stages its bookkeeping
+    # (interactions.jsonl and friends) into every ticket's commit. That
+    # directly corrupts the evidence the verifier judges: found live
+    # 2026-09-15, workspace-9jg.2.3 failed because its commits "touch only
+    # .beads/interactions.jsonl and two one-line scaffolding" files -- true,
+    # and it hid whether any product work existed at all. Unstaged here as
+    # well as ignored because .beads is already TRACKED in every existing
+    # workspace, and .gitignore does not untrack a file.
+    subprocess.run(
+        ["git", "reset", "-q", "--", ".beads"],
+        cwd=path, capture_output=True, text=True, timeout=120,
+    )
     staged = subprocess.run(
         ["git", "diff", "--cached", "--quiet"], cwd=path, capture_output=True, text=True, timeout=120
     )
