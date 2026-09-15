@@ -38,6 +38,8 @@ tickets, request a new specialist), and future seats may too. Defaults to
 keeps working unchanged.
 """
 
+import os
+
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, StateGraph, START
 from langgraph.prebuilt import ToolNode
@@ -148,6 +150,76 @@ def _repair_dangling_tool_calls(messages: list) -> list:
     return repaired
 
 
+# The provider refuses a request that outgrows its window, and refuses it on
+# EVERY retry, because the request is rebuilt from the same checkpoint each
+# time -- so an over-long thread parks its ticket exactly the way a malformed
+# one does, and the human queue fills up with work that could not have failed
+# for a content reason.
+#
+# Measured live 2026-09-15: the threads that failed had 600-830 KB of
+# checkpointed messages while a 195 KB one ran fine, and the SAME message list
+# both succeeded and failed depending only on how much output budget the
+# request reserved -- which is the signature of input + output exceeding the
+# window rather than of a bad message shape.
+#
+# Tool results are what make threads grow (one `shell_exec` can return tens of
+# KB), so each is capped as well as the total. Both limits are deliberately
+# generous: this is a backstop against a request the provider will refuse, not
+# a context-management policy.
+HISTORY_MAX_CHARS = int(os.environ.get("HISTORY_MAX_CHARS", "400000"))
+TOOL_MESSAGE_MAX_CHARS = int(os.environ.get("TOOL_MESSAGE_MAX_CHARS", "20000"))
+
+
+def _cap_tool_message(message: ToolMessage) -> ToolMessage:
+    """Shorten one tool result, marking the cut so the model knows it is partial."""
+    content = getattr(message, "content", None)
+    if not isinstance(content, str) or len(content) <= TOOL_MESSAGE_MAX_CHARS:
+        return message
+    return ToolMessage(
+        content=(
+            content[:TOOL_MESSAGE_MAX_CHARS]
+            + f"\n... [truncated at {TOOL_MESSAGE_MAX_CHARS} characters]"
+        ),
+        tool_call_id=getattr(message, "tool_call_id", None),
+        name=getattr(message, "name", None),
+    )
+
+
+def _bound_history(messages: list) -> list:
+    """Drop the oldest messages until the request fits, cutting only at boundaries.
+
+    The retained window must never BEGIN on a tool message: a tool reply whose
+    assistant message was dropped is invalid on its own, which is the exact
+    failure this exists to prevent. Keeping a suffix (rather than a prefix plus
+    a suffix) is what makes that a one-line guarantee -- every assistant
+    tool_calls inside a suffix still has its replies directly after it.
+
+    A history that already fits is returned unchanged.
+    """
+    capped = [
+        _cap_tool_message(m) if isinstance(m, ToolMessage) else m for m in messages
+    ]
+    total = sum(len(str(getattr(m, "content", "") or "")) for m in capped)
+    if total <= HISTORY_MAX_CHARS:
+        return capped
+
+    head = [m for m in capped[:1] if getattr(m, "type", None) == "system"]
+    body = capped[len(head):]
+
+    kept: list = []
+    used = 0
+    for message in reversed(body):
+        size = len(str(getattr(message, "content", "") or ""))
+        if kept and used + size > HISTORY_MAX_CHARS:
+            break
+        kept.append(message)
+        used += size
+    kept.reverse()
+    while kept and isinstance(kept[0], ToolMessage):
+        kept.pop(0)
+    return head + kept
+
+
 def build_graph_from_model(model, checkpointer, tools=None, classify=None, interrupt_after=None, turn_budget=None, workspace_root=None, completion_gate=False):
     """Build the graph from an already-tool-bound model. Split out from
     `build_graph` so tests can pass a fake model without a real provider.
@@ -189,8 +261,10 @@ def build_graph_from_model(model, checkpointer, tools=None, classify=None, inter
         nudged = state.get("completion_nudged", False)
         # Repaired here rather than at each resume site so EVERY caller is
         # covered -- the worker, product-owner triage, overwatch and
-        # reflection all resume checkpointed threads through this node.
-        messages = _repair_dangling_tool_calls(state["messages"])
+        # reflection all resume checkpointed threads through this node. Then
+        # bounded, so a long thread cannot outgrow the provider's window and
+        # 400 on every retry.
+        messages = _bound_history(_repair_dangling_tool_calls(state["messages"]))
         extra = []
         if turn_budget is not None and turn_count == turn_budget:
             nudge = HumanMessage(content=HANDOFF_NUDGE)

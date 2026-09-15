@@ -13,6 +13,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from harness import beads
 from harness.graph import (
     COMPLETION_NUDGE,
+    _bound_history,
     _repair_dangling_tool_calls,
     build_graph_from_model,
 )
@@ -134,3 +135,45 @@ def test_a_thread_stopped_mid_tool_call_still_resumes():
     assert "call-a" in answered, "the dangling call must be answered before the model sees it"
     # And the run got PAST the model instead of being rejected by the provider.
     assert result["messages"][-1].content == "recovered"
+
+
+def test_bound_history_leaves_a_short_history_alone():
+    short = [HumanMessage(content="hi"), AIMessage(content="hello")]
+    assert _bound_history(short) == short
+
+
+def test_bound_history_drops_the_oldest_without_orphaning_a_tool_reply():
+    """Trimming must land on a group boundary.
+
+    Trimming at all is what stops the provider refusing an over-long request,
+    but cutting between an assistant tool_calls and its replies would recreate
+    the invalid shape this is meant to prevent -- so the retained window must
+    never begin on a tool message.
+    """
+    messages = [HumanMessage(content="go")]
+    for i in range(50):
+        messages.append(
+            AIMessage(content="", tool_calls=[
+                {"name": "shell_exec", "args": {}, "id": f"c{i}"},
+            ])
+        )
+        messages.append(ToolMessage(content="x" * 20_000, tool_call_id=f"c{i}"))
+    messages.append(AIMessage(content="done"))
+
+    bounded = _bound_history(messages)
+
+    assert len(bounded) < len(messages), "an over-long history must be trimmed"
+    assert not isinstance(bounded[0], ToolMessage), "must not start on an orphaned tool reply"
+    assert bounded[-1].content == "done", "the newest message must survive"
+    answered = {m.tool_call_id for m in bounded if isinstance(m, ToolMessage)}
+    for m in bounded:
+        for call in getattr(m, "tool_calls", None) or []:
+            assert call["id"] in answered, "no kept call may lose its reply"
+
+
+def test_bound_history_caps_a_single_huge_tool_result():
+    huge = ToolMessage(content="y" * 500_000, tool_call_id="c1")
+    bounded = _bound_history([HumanMessage(content="go"), huge])
+    kept = next(m for m in bounded if isinstance(m, ToolMessage))
+    assert len(kept.content) < 500_000
+    assert "truncated" in kept.content
