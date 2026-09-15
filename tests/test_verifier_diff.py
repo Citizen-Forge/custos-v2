@@ -109,6 +109,32 @@ def test_diff_falls_back_to_work_commit_without_ticket_commits(projects_root):
     assert "x.ts" in diff
 
 
+def test_diff_excludes_another_tickets_work_committed_in_between(projects_root):
+    """A ticket's diff must not include work committed by other tickets
+    between its own commits.
+
+    This is the normal case, not an edge case: the workspace is shared by
+    every seat on a project, so with several agents running, another ticket
+    commits between this one's commits all the time. Diffing the RANGE from
+    this ticket's first commit to its last drags all of it in. Found live
+    2026-09-15 -- it turned workspace-9jg.7.3's two-file change into a
+    206-file, 66k-line diff spanning 137 other commits, which the verifier
+    failed as "not isolated", parking that ticket and sixteen others.
+    """
+    path = workspaces.ensure("proj-f")
+    open(os.path.join(path, "a1.ts"), "w").write("// a1\n")
+    workspaces.commit_all("proj-f", "proj-f.1.1: first")
+    open(os.path.join(path, "b.ts"), "w").write("// b\n")
+    workspaces.commit_all("proj-f", "proj-f.1.2: another ticket")
+    open(os.path.join(path, "a2.ts"), "w").write("// a2\n")
+    workspaces.commit_all("proj-f", "proj-f.1.1: second")
+
+    diff = workspaces.diff_for_ticket("proj-f", "proj-f.1.1", None)
+
+    assert "a1.ts" in diff and "a2.ts" in diff, "this ticket's own work must be present"
+    assert "b.ts" not in diff, "another ticket's work must not be attributed to this one"
+
+
 def test_verifier_prompt_carries_the_diff(projects_root, monkeypatch):
     beads.ensure_initialized()
     project = beads.create("vdiff proj", "d", issue_type="epic", priority=1)

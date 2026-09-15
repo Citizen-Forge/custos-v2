@@ -249,17 +249,31 @@ def diff_for_ticket(project_id: str, ticket_id: str, work_commit: str | None = N
     agent ran git itself). Found live 2026-09-14: four tickets (1.6, 13.1,
     13.4, 1.5) were failed by the verifier on empty or wrong diffs because
     work_commit had never been recorded or pointed at another seat's
-    commit -- a false fail that parked real, present work."""
+    commit -- a false fail that parked real, present work.
+
+    Each of the ticket's commits is diffed SEPARATELY rather than diffing
+    the range from the first to the last. The workspace is shared by every
+    seat on a project, so other tickets commit in between, and a range
+    diff silently drags all of them in. Found live 2026-09-15:
+    workspace-9jg.7.3's real change is two files (commit f75c3dc), but the
+    range first^..last spanned 137 other commits and 206 files / 66,418
+    insertions -- so the verifier saw other tickets' work, failed it as
+    "not isolated" and "a huge multi-seat change", and the ticket parked
+    once its rework budget was gone. Seventeen tickets were closed that
+    way and had never once been judged on their own work."""
     shas = commits_for_ticket(project_id, ticket_id)
     if shas:
-        path = path_for(project_id)
-        parent = subprocess.run(
-            ["git", "rev-parse", f"{shas[0]}^"],
-            cwd=path, capture_output=True, text=True, timeout=60,
-        )
-        if parent.returncode == 0 and parent.stdout.strip():
-            return commit_diff(project_id, f"{parent.stdout.strip()}..{shas[-1]}", max_chars)
-        return commit_diff(project_id, shas[-1], max_chars)
+        parts: list[str] = []
+        remaining = max_chars
+        for sha in shas:
+            if remaining <= 0:
+                break
+            chunk = commit_diff(project_id, sha, remaining)
+            if chunk:
+                parts.append(chunk)
+                remaining -= len(chunk)
+        if parts:
+            return "\n".join(parts)
     if work_commit:
         return commit_diff(project_id, work_commit, max_chars)
     return ""
