@@ -97,6 +97,57 @@ def _stopped_without_terminal(messages: list) -> bool:
     return not _terminal_called(messages)
 
 
+def _repair_dangling_tool_calls(messages: list) -> list:
+    """Make a checkpointed history valid for the provider again.
+
+    A run that dies -- or is killed -- between the model returning tool_calls
+    and the tool results being recorded leaves an assistant message whose calls
+    nothing answers. The provider rejects the ENTIRE request over that
+    ("an assistant message with 'tool_calls' must be followed by tool messages
+    responding to each 'tool_call_id'"), and the malformed history is exactly
+    what got checkpointed, so every resume fails identically. A transient crash
+    therefore becomes a ticket permanently parked for a human -- the queue
+    quietly grows instead of draining.
+
+    Found live 2026-09-15: ten threads were in this state at once (five ticket
+    threads and five harness threads -- triage, dispatch, overwatch, reflect),
+    which is what "blocked tickets building up again" turned out to be.
+
+    The repair answers the missing calls in place, saying they never returned.
+    That keeps every other message in the thread -- the work the agent actually
+    did -- instead of throwing the thread away, and it is idempotent: a history
+    that is already valid comes back unchanged.
+    """
+    repaired: list = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        repaired.append(message)
+        index += 1
+        calls = getattr(message, "tool_calls", None) or []
+        if not calls:
+            continue
+        # The contiguous run of tool messages answering this assistant turn.
+        answered: set = set()
+        while index < len(messages) and isinstance(messages[index], ToolMessage):
+            answered.add(getattr(messages[index], "tool_call_id", None))
+            repaired.append(messages[index])
+            index += 1
+        for call in calls:
+            if call.get("id") not in answered:
+                repaired.append(
+                    ToolMessage(
+                        content=(
+                            "not executed: the run stopped before this tool call "
+                            "returned, so it has no result. Re-issue it if you still "
+                            "need it."
+                        ),
+                        tool_call_id=call["id"],
+                    )
+                )
+    return repaired
+
+
 def build_graph_from_model(model, checkpointer, tools=None, classify=None, interrupt_after=None, turn_budget=None, workspace_root=None, completion_gate=False):
     """Build the graph from an already-tool-bound model. Split out from
     `build_graph` so tests can pass a fake model without a real provider.
@@ -136,7 +187,10 @@ def build_graph_from_model(model, checkpointer, tools=None, classify=None, inter
     def call_model(state: HarnessState):
         turn_count = state.get("turn_count", 0) + 1
         nudged = state.get("completion_nudged", False)
-        messages = state["messages"]
+        # Repaired here rather than at each resume site so EVERY caller is
+        # covered -- the worker, product-owner triage, overwatch and
+        # reflection all resume checkpointed threads through this node.
+        messages = _repair_dangling_tool_calls(state["messages"])
         extra = []
         if turn_budget is not None and turn_count == turn_budget:
             nudge = HumanMessage(content=HANDOFF_NUDGE)
