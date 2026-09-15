@@ -98,15 +98,21 @@ def main() -> None:
                     beads.unset_metadata(issue_id, key)
                 except Exception:
                     pass
-            try:
-                beads.remove_human_flag(issue_id)
-            except Exception:
-                pass
             _reset_thread(conn, issue_id)
             beads.reopen(
                 issue_id,
                 "requeued: parked by the shared-workspace diff fault (workspace fix 2026-09-15)",
             )
+            # The flag comes off LAST. Between clearing it and reopening,
+            # the ticket would be back in `in_progress` with no completion
+            # claim, i.e. claimable by dispatch in a half-prepared state --
+            # and the dispatcher skips human-labelled tickets, so leaving
+            # the label on until everything else is done is what makes this
+            # sequence safe to run against a live board.
+            try:
+                beads.remove_human_flag(issue_id)
+            except Exception:
+                pass
 
         if args.dry_run:
             print(f"would requeue {len(args.ids)} ticket(s), nothing changed")
