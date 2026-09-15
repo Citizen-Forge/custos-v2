@@ -203,7 +203,19 @@ def _bound_history(messages: list) -> list:
     if total <= HISTORY_MAX_CHARS:
         return capped
 
-    head = [m for m in capped[:1] if getattr(m, "type", None) == "system"]
+    # Keep the LEAD-IN, which for a ticket thread is [system prompt, brief].
+    # Dropping the brief is not a tidy truncation: it removes the only copy of
+    # the ticket text, and agents then refuse with "no ticket text reached this
+    # turn". Found live 2026-09-15, after the first version of this bound
+    # shipped -- 6.1, 6.3, 6.5 and 9.4 were all parked saying exactly that.
+    # Only system/human messages are kept, never an assistant turn, so this can
+    # never separate a tool_calls message from its replies.
+    head: list = []
+    for message in capped[:2]:
+        if getattr(message, "type", None) in ("system", "human"):
+            head.append(message)
+        else:
+            break
     body = capped[len(head):]
 
     kept: list = []

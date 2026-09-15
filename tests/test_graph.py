@@ -7,7 +7,7 @@ Postgres checkpointer surviving across two separate process invocations.
 See scripts/enqueue_demo.py + PLAN.md's Phase 1 exit criteria for that.
 """
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from harness import beads
@@ -177,3 +177,29 @@ def test_bound_history_caps_a_single_huge_tool_result():
     kept = next(m for m in bounded if isinstance(m, ToolMessage))
     assert len(kept.content) < 500_000
     assert "truncated" in kept.content
+
+
+def test_bound_history_keeps_the_ticket_brief():
+    """The bound must never drop the ticket text.
+
+    Trimming the oldest messages is fine until it takes the only copy of the
+    brief, at which point the agent has nothing to work from and refuses with
+    "no ticket text reached this turn". Found live 2026-09-15, after the first
+    version of this bound shipped -- 6.1, 6.3, 6.5 and 9.4 were all parked
+    saying exactly that.
+    """
+    brief = "Ticket: Heat generation and accumulation\n\nPer-system heat output ..."
+    messages = [SystemMessage(content="seat rulebook"), HumanMessage(content=brief)]
+    for i in range(60):
+        messages.append(
+            AIMessage(content="", tool_calls=[
+                {"name": "shell_exec", "args": {}, "id": f"c{i}"},
+            ])
+        )
+        messages.append(ToolMessage(content="x" * 20_000, tool_call_id=f"c{i}"))
+
+    bounded = _bound_history(messages)
+
+    assert len(bounded) < len(messages), "an over-long history must be trimmed"
+    assert bounded[0].type == "system", "the system prompt stays first"
+    assert any(m.content == brief for m in bounded), "the ticket brief must survive"
