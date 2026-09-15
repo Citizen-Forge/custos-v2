@@ -8,6 +8,7 @@ second project would have written into the first one's files.
 """
 
 import os
+import subprocess
 
 import pytest
 
@@ -168,6 +169,26 @@ def test_the_worktree_directory_is_never_committed(projects_root):
     the integration tree would otherwise commit every ticket's tree."""
     workspaces.for_ticket("workspace-9jg.1.1")
     assert workspaces.diff_since("workspace-9jg", None).strip() == ""
+
+
+def test_a_project_with_no_commits_yet_still_gets_a_worktree(projects_root):
+    """The one case that could otherwise still share a tree: a repo with no
+    commit has no ref to branch from. ensure() only commits .gitignore when
+    it has something to add to it, so a project that already carries the
+    block reaches this with an empty history."""
+    repo = workspaces.path_for("workspace-bare")
+    os.makedirs(repo)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    with open(os.path.join(repo, ".gitignore"), "w") as fh:
+        fh.write(
+            "# Added by the harness: never commit dependencies or build output.\n"
+            "node_modules/\n.worktrees/\n"
+        )
+
+    path = workspaces.for_ticket("workspace-bare.1.1")
+
+    assert path != repo, "isolation must hold from the first ticket too"
+    assert os.path.exists(os.path.join(path, ".git"))
 
 
 def test_two_projects_get_separate_directories(projects_root):

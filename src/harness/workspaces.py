@@ -230,10 +230,11 @@ def for_ticket(ticket_id: str) -> str:
     keeps the work already in its tree -- `_reset_thread` starts the agent
     over, it does not throw the ticket's files away.
 
-    Falls back to the shared project workspace only when the project has no
-    commits at all yet, so there is no ref to branch from. Anything else
-    that stops the worktree being created is raised: quietly handing back
-    the shared tree would reinstate the exact bug this replaces."""
+    Always returns a worktree: a project with no commits yet gets an empty
+    base commit so it has a ref to branch from. Anything that stops the
+    worktree being created is raised rather than quietly handing back the
+    shared project tree, which would reinstate the exact bug this
+    replaces."""
     project_id = project_id_for(ticket_id)
     repo = ensure(project_id)
     worktree = worktree_path_for(ticket_id)
@@ -242,7 +243,17 @@ def for_ticket(ticket_id: str) -> str:
 
     base = integration_ref(project_id)
     if base is None:
-        return repo
+        # A project with no commits has no ref to branch from, which would
+        # otherwise be the one case that still shares a tree between two
+        # concurrent tickets. Give it an empty base instead, so isolation
+        # holds from the very first ticket.
+        _git(
+            ["commit", "-q", "--allow-empty", "-m", "harness: base commit for ticket worktrees"],
+            repo,
+        )
+        base = integration_ref(project_id)
+    if base is None:
+        raise RuntimeError(f"could not establish a base branch for {project_id}")
 
     os.makedirs(worktrees_root(project_id), exist_ok=True)
     # A directory left behind by a worktree git no longer knows about
