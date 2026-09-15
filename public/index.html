@@ -558,13 +558,19 @@ const KANBAN_COLUMNS = [
   { key: "closed", label: "Done" },
 ];
 
-// "human" is a label, not a status (beads.is_flagged_for_human). A ticket
-// only counts as Blocked while it is still live work: a CLOSED ticket keeps
-// the label after a verifier-exhausted rework, but it is not blocked work and
-// belongs in Done, not Blocked (found live 2026-09-14 -- the Blocked column
-// was showing closed tickets alongside genuinely-parked open ones).
+// "human" is a label, not a status (beads.is_flagged_for_human), and it means
+// "parked for a person" whatever the status is.
+//
+// This deliberately does NOT check status, reversing the 2026-09-14 change that
+// excluded closed tickets from Blocked on the grounds that a closed ticket
+// "belongs in Done". That premise turned out to be wrong: the only thing that
+// closes a ticket while leaving the human label is a verifier fail, after the
+// rework budget is gone -- so closed+human is FAILED work, not finished work.
+// Counting it as Done credited epics with stories that had not been done and
+// inflated their progress bars (found 2026-09-15, once the verifier's own
+// attribution bug was fixed and those fails turned out to be real).
 function isBlocked(story) {
-  return story.status !== "closed" && (story.labels || []).includes("human");
+  return (story.labels || []).includes("human");
 }
 
 function kanbanCard(story) {
@@ -618,13 +624,21 @@ function projectCard(project) {
 
 function roadmapEpicCard(epic) {
   const stories = epic.stories || [];
-  const closed = stories.filter(s => s.status === "closed").length;
-  const pct = stories.length ? Math.round((100 * closed) / stories.length) : 0;
+  // A `human`-labelled ticket is NOT done, even when it is closed: it closed
+  // because the verifier failed it and the rework budget ran out, so counting
+  // it here reported parked work as completed and inflated the epic's progress
+  // bar. Found 2026-09-15 -- the roadmap credited an epic with stories whose
+  // fails were mostly the verifier judging the wrong diff.
+  const isParked = s => (s.labels || []).includes("human");
+  const done = stories.filter(s => s.status === "closed" && !isParked(s)).length;
+  const parked = stories.filter(isParked).length;
+  const pct = stories.length ? Math.round((100 * done) / stories.length) : 0;
   return `<div class="roadmap-card">
     <div class="roadmap-card-title">${escapeHtml(epic.title)}</div>
     <div class="desc">${escapeHtml(epic.projectTitle)}</div>
     <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
-    <div class="story-seat">${closed}/${stories.length} stories done</div>
+    <div class="story-seat">${done}/${stories.length} stories done${
+      parked ? ` · ${parked} parked` : ""}</div>
   </div>`;
 }
 
