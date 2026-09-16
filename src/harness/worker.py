@@ -298,6 +298,25 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
                 config,
             )
 
+        # Anything the agent wrote into the project's integration checkout
+        # rather than its own tree -- shell_exec is not path-confined, and
+        # the harness's own notes in `bd prime` teach the absolute-path
+        # habit -- gets folded into the worktree here, and the integration
+        # checkout put back. Before the outcome is decided, not just before
+        # the commit: a refused or crashed run leaves files in the root
+        # too, and the next ticket's run would otherwise absorb them as its
+        # own. See workspaces.absorb_stray_edits.
+        try:
+            stray = workspaces.absorb_stray_edits(thread_id)
+            if stray:
+                log.warning(
+                    "thread %s: %d file(s) were written to the project root, not the "
+                    "ticket's tree -- folded in: %s",
+                    thread_id, len(stray), ", ".join(stray[:6]),
+                )
+        except Exception:
+            log.exception("thread %s: could not fold in stray edits", thread_id)
+
         current = beads.show(thread_id)
         # refuse_ticket already flagged+annotated the issue -- don't
         # also close it, that would erase the "needs a human" signal

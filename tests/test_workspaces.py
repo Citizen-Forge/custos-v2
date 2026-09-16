@@ -238,6 +238,77 @@ def test_reset_discards_uncommitted_leftovers(projects_root):
     assert not os.path.exists(os.path.join(worktree, "half-written.ts"))
 
 
+def test_stray_edits_in_the_project_root_are_folded_into_the_ticket_tree(projects_root):
+    """shell_exec is not path-confined, and the harness's own notes in
+    `bd prime` are full of absolute /projects/... commands, so agents do
+    write into the integration checkout. commit_all then finds nothing in
+    the worktree and the ticket is failed for an empty diff while its work
+    sits one directory up -- workspace-9jg.6.5 and 4.2 both parked that
+    way. With one ticket in flight per project, whatever appeared there can
+    only be that ticket's."""
+    tree = workspaces.for_ticket("workspace-9jg.1.1")
+    root = workspaces.path_for("workspace-9jg")
+    open(os.path.join(root, "stray.ts"), "w").write("written in the root")
+
+    absorbed = workspaces.absorb_stray_edits("workspace-9jg.1.1")
+
+    assert absorbed == ["stray.ts"]
+    assert os.path.exists(os.path.join(tree, "stray.ts")), "now in the ticket's tree"
+    assert not os.path.exists(os.path.join(root, "stray.ts")), "and out of the way"
+
+
+def test_the_harness_store_and_worktrees_are_never_absorbed(projects_root):
+    """They are not the ticket's work, and folding them in would judge the
+    ticket on the issue database and the other tickets' checkouts."""
+    workspaces.for_ticket("workspace-9jg.1.1")
+    root = workspaces.path_for("workspace-9jg")
+    os.makedirs(os.path.join(root, ".beads"), exist_ok=True)
+    open(os.path.join(root, ".beads", "interactions.jsonl"), "w").write("noise")
+
+    assert workspaces.absorb_stray_edits("workspace-9jg.1.1") == []
+    assert os.path.exists(os.path.join(root, ".beads", "interactions.jsonl")), "left alone"
+
+
+def test_a_stray_deletion_is_restored_not_absorbed(projects_root):
+    """A deletion is not work to copy anywhere; the integration checkout
+    just has to be put back."""
+    workspaces.for_ticket("workspace-9jg.1.1")
+    root = workspaces.path_for("workspace-9jg")
+    open(os.path.join(root, "tracked.ts"), "w").write("committed")
+    workspaces.commit_all("workspace-9jg", "workspace-9jg.1.0: seed")
+    os.remove(os.path.join(root, "tracked.ts"))
+
+    assert workspaces.absorb_stray_edits("workspace-9jg.1.1") == []
+    assert os.path.exists(os.path.join(root, "tracked.ts")), "put back"
+
+
+def test_a_worktree_gets_the_project_dependencies_linked_in(projects_root):
+    """Agents need the toolchain, but dependencies must never be part of a
+    ticket's committed work: a tracked node_modules is staged whole by
+    `git add -A` the moment an agent replaces it with a real directory."""
+    root = workspaces.path_for("workspace-9jg")
+    os.makedirs(os.path.join(root, "node_modules", "typescript"), exist_ok=True)
+
+    tree = workspaces.for_ticket("workspace-9jg.1.1")
+
+    link = os.path.join(tree, "node_modules")
+    assert os.path.islink(link), "linked in, not checked out"
+    assert os.path.realpath(link) == os.path.realpath(os.path.join(root, "node_modules"))
+    assert workspaces.diff_since("workspace-9jg", None).strip() == "", "git never sees it"
+
+
+def test_the_dependency_link_survives_a_reset(projects_root):
+    root = workspaces.path_for("workspace-9jg")
+    os.makedirs(os.path.join(root, "node_modules", "typescript"), exist_ok=True)
+    tree = workspaces.for_ticket("workspace-9jg.1.1")
+    open(os.path.join(tree, "scratch.ts"), "w").write("leftover")
+
+    workspaces.reset_for_attempt("workspace-9jg.1.1")
+
+    assert not os.path.exists(os.path.join(tree, "scratch.ts")), "scratch cleared"
+    assert os.path.islink(os.path.join(tree, "node_modules")), "dependencies still linked"
+
+
 def test_two_projects_get_separate_directories(projects_root):
     a = workspaces.ensure("proj-a")
     b = workspaces.ensure("proj-b")

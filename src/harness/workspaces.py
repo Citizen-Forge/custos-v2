@@ -40,6 +40,7 @@ already merged.
 """
 
 import os
+import shutil
 import subprocess
 
 try:  # Linux only; the harness runs in a container, but tests can run anywhere.
@@ -76,6 +77,7 @@ def exists(project_id: str) -> bool:
 _IGNORE_BLOCK = """
 # Added by the harness: never commit dependencies or build output.
 node_modules/
+node_modules
 dist/
 build/
 out/
@@ -88,20 +90,21 @@ target/
 .worktrees/
 """
 
-# Added to workspaces that already carry _IGNORE_BLOCK. Kept separate
-# because the block's marker check below short-circuits, so every existing
-# project would otherwise never learn about the worktree directory -- and
-# `git add -A` would then commit every ticket's other checkout into the
-# integration branch.
-_WORKTREES_IGNORE = """
-# Added by the harness: per-ticket git worktrees live here.
-.worktrees/
-"""
+# Lines every workspace needs but an older one will not have. Kept separate
+# because the block's marker check below short-circuits, so an existing
+# project would otherwise never learn about them.
+#
+# `.worktrees/` or `git add -A` commits every ticket's other checkout into
+# the integration branch. The bare `node_modules` (no slash) is not
+# redundant with the directory form above: the harness links the dependency
+# tree into each worktree as a SYMLINK, and git does not treat a symlink as
+# a directory, so `node_modules/` does not match it and it would be staged.
+_EXTRA_IGNORE_LINES = (".worktrees/", "node_modules")
 
 
 def _ensure_gitignore(path: str) -> None:
-    """Append the harness's ignore block if it isn't already there, and
-    commit it.
+    """Append the harness's ignore lines if they aren't already there, and
+    commit them.
 
     Committing immediately matters: ensure() runs before every ticket, so
     an uncommitted .gitignore left lying in the workspace would be swept
@@ -114,10 +117,14 @@ def _ensure_gitignore(path: str) -> None:
         existing = open(p).read() if os.path.isfile(p) else ""
         if "Added by the harness" not in existing:
             addition = _IGNORE_BLOCK
-        elif ".worktrees/" not in existing:
-            addition = _WORKTREES_IGNORE
         else:
-            return
+            missing = [
+                line for line in _EXTRA_IGNORE_LINES
+                if f"\n{line}\n" not in f"\n{existing}"
+            ]
+            if not missing:
+                return
+            addition = "\n# Added by the harness.\n" + "".join(f"{line}\n" for line in missing)
         with open(p, "a") as fh:
             fh.write(addition)
     except OSError:
@@ -222,6 +229,35 @@ def ticket_branch(ticket_id: str) -> str:
     return f"ticket/{ticket_id}"
 
 
+def _link_dependencies(project_id: str, worktree: str) -> None:
+    """Give a worktree a node_modules without git ever seeing it.
+
+    Dependencies are not the ticket's work. A tracked node_modules is worse
+    than useless: an agent that replaces the tracked symlink with a real
+    directory makes `git add -A` stage the whole tree into its commit and
+    bury the change -- the same failure the ignore block was added for.
+
+    It was tracked anyway, as a symlink whose target was ITSELF
+    (node_modules -> /projects/workspace-9jg/node_modules). That made
+    `npm test` and `npx tsc` exit 216 with empty output, which the verifier
+    reads as "0 tests run" and marks the ticket down for an environment
+    fault -- several verdicts on 2026-09-15 say exactly that, and it is why
+    the harness's own accumulated notes in `bd prime` tell agents to
+    "repair" it before measuring and put it back before committing, which
+    re-breaks it for the next ticket.
+
+    So the tree is linked in here, under the path .gitignore already
+    covers, and never committed."""
+    shared = os.path.join(path_for(project_id), "node_modules")
+    target = os.path.join(worktree, "node_modules")
+    if os.path.lexists(target) or not os.path.isdir(shared):
+        return
+    try:
+        os.symlink(shared, target)
+    except OSError:
+        pass  # a worktree without dependencies is not worth failing a ticket over
+
+
 def for_ticket(ticket_id: str) -> str:
     """The working tree an agent on this ticket is rooted in, created on
     first use and re-used afterwards.
@@ -273,6 +309,7 @@ def for_ticket(ticket_id: str) -> str:
         raise RuntimeError(
             f"could not create a worktree for {ticket_id}: {out.stderr.strip()}"
         )
+    _link_dependencies(project_id, worktree)
     return worktree
 
 
@@ -329,11 +366,113 @@ def reset_for_attempt(ticket_id: str) -> str | None:
     if os.path.exists(os.path.join(worktree, ".git")):
         _git(["reset", "--hard", base], worktree)
         # Untracked leftovers are a previous attempt's scratch, not work --
-        # `-d` without `-x`, so ignored trees like node_modules stay put.
-        _git(["clean", "-qfd"], worktree)
+        # `-d` without `-x`, so ignored trees stay put. node_modules is
+        # excluded explicitly because it is linked in as a SYMLINK and the
+        # ignore pattern's directory form does not match one.
+        _git(["clean", "-qfd", "-e", "node_modules"], worktree)
     else:
         _git(["branch", "-f", branch, base], repo)
     return previous
+
+
+def absorb_stray_edits(ticket_id: str) -> list[str]:
+    """Move changes an agent made in the project's integration checkout into
+    its own worktree, and put the integration checkout back.
+
+    read_file/write_file are confined to the worktree, but shell_exec is
+    not: it runs the command as written with the worktree as its cwd, and
+    a `cd /projects/<project>` or a heredoc to an absolute path lands in
+    the integration tree. commit_all then finds nothing in the worktree and
+    the ticket is failed for an empty diff while its work sits one
+    directory up -- found live 2026-09-15, workspace-9jg.6.5 and 4.2 both
+    parked that way, with 6.5's own test file sitting in the root.
+
+    It is also actively taught: `bd prime` is pasted into every ticket's
+    opening prompt, and the harness's own accumulated notes in it are full
+    of absolute /projects/... repair commands ("the reliable move: cd to an
+    ABSOLUTE path, mkdir -p .parts, write parts with cat > .parts/x
+    <<'TSEOF'").
+
+    Confining shell_exec properly is the other way to fix this, and the
+    repo has deliberately not done it -- there is no workspace-independent
+    invariant to enforce for an arbitrary shell command, which is why the
+    classifier judges them instead. This is the complement: recover the
+    work instead of losing it.
+
+    Attribution is unambiguous because one ticket is in flight per project:
+    whatever appeared there during this run can only be this ticket's.
+
+    Returns the relative paths absorbed, for logging. Also strips the
+    harness's own bookkeeping and the dependency tree, which are noise the
+    ticket must not be judged on."""
+    project_id = project_id_for(ticket_id)
+    root = path_for(project_id)
+    worktree = worktree_path_for(ticket_id)
+    if not os.path.isdir(root) or not os.path.exists(os.path.join(worktree, ".git")):
+        return []
+
+    out = _git(["status", "--porcelain", "-uall"], root)
+    if out.returncode != 0:
+        return []
+
+    absorbed: list[str] = []
+    restore: list[str] = []
+
+    for line in out.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        code = line[:2]
+        path = line[3:].strip()
+        # `git status` quotes paths with special characters.
+        if len(path) > 1 and path[0] == '"' and path[-1] == '"':
+            path = path[1:-1]
+        if not path or path == "node_modules" or path.startswith("node_modules/"):
+            continue
+        if path == ".beads" or path.startswith(".beads/"):
+            continue  # the harness's own issue database, not the ticket's work
+        if path == WORKTREES_DIRNAME or path.startswith(f"{WORKTREES_DIRNAME}/"):
+            continue  # the other tickets' trees
+
+        source = os.path.join(root, path)
+        if code.strip() == "D":
+            # A deletion is not work to absorb -- nothing to copy -- but the
+            # integration checkout still has to be put back.
+            restore.append(path)
+            continue
+        if code.strip() not in ("??", "M", "A"):
+            continue
+
+        destination = os.path.join(worktree, path)
+        try:
+            os.makedirs(os.path.dirname(destination) or worktree, exist_ok=True)
+            if os.path.isdir(source):
+                continue
+            shutil.copy2(source, destination)
+        except OSError:
+            continue
+        absorbed.append(path)
+        restore.append(path)
+
+    if restore:
+        # Tracked modifications/deletions go back to their committed state;
+        # untracked files are removed. `checkout` alone leaves the untracked
+        # ones behind, and they would accumulate run after run.
+        tracked = [
+            p for p in restore
+            if _git(["ls-files", "--error-unmatch", p], root).returncode == 0
+        ]
+        if tracked:
+            _git(["checkout", "--", *tracked], root)
+        for path in restore:
+            if path in tracked:
+                continue
+            target = os.path.join(root, path)
+            try:
+                os.remove(target)
+            except OSError:
+                pass
+
+    return absorbed
 
 
 def diff_since(project_id: str, ref: str | None) -> str:
