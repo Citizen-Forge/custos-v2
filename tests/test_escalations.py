@@ -11,12 +11,17 @@ import os
 import psycopg
 import pytest
 
-from harness import beads, escalations
+from harness import beads, escalations, verifications
 
 
 @pytest.fixture(autouse=True)
 def _workspace():
     beads.ensure_initialized()
+    # pending() reads a ticket's last verdict to decide whether a CLOSED
+    # escalation is still worth reconsidering.
+    conn = _conn()
+    verifications.init_table(conn)
+    conn.close()
 
 
 def _conn():
@@ -34,14 +39,36 @@ def _escalated(seat):
 
 def test_pending_includes_a_live_escalation():
     story = _escalated("esc-a")
-    assert story["id"] in {i["id"] for i in escalations.pending()}
+    assert story["id"] in {i["id"] for i in escalations.pending(_conn())}
 
 
-def test_closed_escalations_are_not_pending():
+def test_a_ticket_closed_without_a_verdict_is_not_pending():
+    """Closed is not on its own enough to re-open the queue: a ticket
+    dismissed by hand was answered, not left hanging."""
     story = _escalated("esc-b")
     beads.dismiss_human(story["id"], "resolved by hand")
 
-    assert story["id"] not in {i["id"] for i in escalations.pending()}
+    assert story["id"] not in {i["id"] for i in escalations.pending(_conn())}
+
+
+def test_a_closed_ticket_with_a_failing_verdict_is_pending():
+    """The case no agent can answer: the attempt refused because the
+    ticket's named deliverable is already in the project, so the ticket is
+    closed and verifier-exhausted and nothing an agent does can move it.
+    Someone with the authority to accept the delivery has to see it."""
+    story = _escalated("esc-e")
+    beads.close(story["id"], reason="already delivered")
+    verifications.record(_conn(), story["id"], "esc-e", "fail", "nothing left to do")
+
+    assert story["id"] in {i["id"] for i in escalations.pending(_conn())}
+
+
+def test_a_closed_ticket_that_passed_is_not_pending():
+    story = _escalated("esc-f")
+    beads.close(story["id"], reason="done")
+    verifications.record(_conn(), story["id"], "esc-f", "pass", "the criteria are met")
+
+    assert story["id"] not in {i["id"] for i in escalations.pending(_conn())}
 
 
 def test_requeue_spends_one_attempt_and_reopens():
@@ -60,4 +87,15 @@ def test_capped_escalations_drop_out_of_the_queue():
     story = _escalated("esc-d")
     beads.set_metadata(story["id"], "escalation_attempts", str(escalations.MAX_ESCALATION_ATTEMPTS))
 
-    assert story["id"] not in {i["id"] for i in escalations.pending()}
+    assert story["id"] not in {i["id"] for i in escalations.pending(_conn())}
+
+
+def test_a_closed_failing_escalation_still_respects_the_budget():
+    """Re-opening the queue to closed tickets must not make it unbounded:
+    the budget still applies, or the same ticket is reconsidered for ever."""
+    story = _escalated("esc-g")
+    beads.close(story["id"], reason="already delivered")
+    verifications.record(_conn(), story["id"], "esc-g", "fail", "nothing left to do")
+    beads.set_metadata(story["id"], "escalation_attempts", str(escalations.MAX_ESCALATION_ATTEMPTS))
+
+    assert story["id"] not in {i["id"] for i in escalations.pending(_conn())}

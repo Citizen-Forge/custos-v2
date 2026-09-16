@@ -389,14 +389,22 @@ def is_flagged_for_human(issue: dict) -> bool:
     return "human" in (issue.get("labels") or [])
 
 
-def parked_for_human() -> list[dict]:
+def parked_for_human(include_closed: bool = False) -> list[dict]:
     """Every human-flagged issue, WITH notes/metadata/labels.
 
     `list_all` returns the lean shape (`bd list --all` carries no notes,
     metadata or labels -- see its docstring), so recovering *why* something
     was parked needs this `--long` variant. Used by the maintenance script
-    that requeues failed verifications."""
-    return json.loads(_run(["list", "--label", "human", "--long", "--limit", "0"]))
+    that requeues failed verifications.
+
+    Closed tickets are excluded unless `include_closed` -- plain `bd list`
+    never returns them. The escalation queue needs them: a
+    verifier-exhausted ticket is closed AND human-labelled, and it is the
+    one case no agent can answer for itself."""
+    args = ["list", "--label", "human", "--long", "--limit", "0"]
+    if include_closed:
+        args.append("--all")
+    return json.loads(_run(args))
 
 
 def append_note(issue_id: str, text: str, actor: str = DEFAULT_ACTOR) -> dict:

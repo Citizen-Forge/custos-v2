@@ -22,9 +22,12 @@ should decide. Closed tickets are never in the queue: a closed,
 verifier-exhausted ticket is not live work.
 """
 
+import logging
 import os
 
-from . import beads, verifier
+from . import beads, verifications, verifier
+
+log = logging.getLogger(__name__)
 
 MAX_ESCALATION_ATTEMPTS = int(os.environ.get("MAX_ESCALATION_ATTEMPTS", "2"))
 
@@ -36,18 +39,54 @@ def attempts(issue: dict) -> int:
         return 0
 
 
-def pending() -> list[dict]:
+def pending(conn=None) -> list[dict]:
     """Live escalations the product-owner may still act on: human-labelled,
-    not closed, and not past their attempt budget.
+    inside their attempt budget, and either still open or closed on a
+    FAILING verdict.
+
+    Closed+human tickets used to be skipped outright, on the reasoning that
+    a closed, verifier-exhausted ticket is not live work. That left exactly
+    one case with nobody able to answer it: an attempt that refused because
+    the ticket's named deliverable is ALREADY in the project. Found live
+    2026-09-15 -- workspace-9jg.2.2.2 "the ticket's named defect is ALREADY
+    FIXED in HEAD", 2.4 "every artifact the ticket names ALREADY EXISTS AT
+    HEAD and is byte-identical to disk". The agent cannot close its own
+    ticket, and requeueing it just produces the same refusal, so the one
+    action that helps -- accepting a delivery that is already there -- needs
+    a caller with the authority to take it.
+
+    A ticket closed on a PASS is still not here: it is done.
+
+    `conn` is optional only so the two standalone entry points, which ask
+    this question before opening their own connection, keep working; the
+    verdict lookup is the sole reason it is needed at all.
 
     `parked_for_human` already returns the `--long` shape (notes + metadata
     + labels) in one `bd` call."""
+    if conn is None:
+        import os
+
+        import psycopg
+
+        with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as opened:
+            return pending(opened)
+
     out = []
-    for issue in beads.parked_for_human():
-        if issue.get("status") == "closed":
-            continue
+    for issue in beads.parked_for_human(include_closed=True):
         if attempts(issue) >= MAX_ESCALATION_ATTEMPTS:
             continue
+        if issue.get("status") == "closed":
+            try:
+                verdict = verifications.get_for_issue(conn, issue["id"])
+            except Exception:
+                # No verdict table (a fresh database). A closed ticket
+                # cannot then be told apart from one answered by hand, so
+                # it is left out rather than guessed at -- the same
+                # posture as verifier._reset_thread's absent-table case.
+                log.warning("no verdicts readable; skipping closed tickets this pass")
+                continue
+            if not verdict or verdict.get("verdict") != "fail":
+                continue
         out.append(issue)
     return out
 

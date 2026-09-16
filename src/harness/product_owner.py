@@ -59,6 +59,12 @@ first -- `set_acceptance_criteria`, `split_escalated_ticket`, or `assign_ticket`
 - A genuine product decision you can make: make it, recording it with \
 `set_acceptance_criteria` or `resolve_escalation` rather than leaving it.
 - Wrong specialist: `assign_ticket` (or `request_new_seat`) then `requeue_escalation`.
+- The ticket's own named deliverable is ALREADY in the project, and the attempt refused because \
+there is nothing honest left to do (it will say so, naming the file and the commit): \
+`resolve_escalation`, recording what is present and where. Do NOT requeue that one -- the next \
+attempt finds exactly the same thing and refuses again, which is now a dead end: the project \
+will not move past its front ticket until this is answered. Accept the delivery when the named \
+artifact really is there; requeue only if something the criteria ask for is genuinely missing.
 
 Leave a ticket untouched only if it truly needs a person and you cannot decide it. Do not requeue \
 a ticket whose project is on dispatch hold. Stop once every listed escalation has been actioned."""
@@ -231,7 +237,7 @@ def build_tools(conn, requesting_model):
     @tool
     def list_escalations() -> str:
         """Tickets other agents escalated and parked for a human, each with the reason they gave."""
-        items = escalations.pending()
+        items = escalations.pending(conn)
         if not items:
             return "no escalations pending"
         return "\n".join(
@@ -302,7 +308,7 @@ def build_escalation_tools(conn, requesting_model):
     @tool
     def list_escalations() -> str:
         """Tickets other agents escalated and parked for a human, each with the reason they gave."""
-        items = escalations.pending()
+        items = escalations.pending(conn)
         if not items:
             return "no escalations pending"
         return "\n".join(
