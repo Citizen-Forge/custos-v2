@@ -421,15 +421,20 @@ def test_a_closed_ticket_does_not_have_to_be_worked_first(monkeypatch):
     assert seat == "seat-a"
 
 
-def test_only_the_front_ticket_of_a_project_starts(monkeypatch):
-    """A ticket behind the front may be waiting on it, so nothing later
-    runs until the front is done -- even when it outranks the front."""
-    issues = [_issue("proj-x.1", priority=3), _issue("proj-x.2", priority=0)]
+def test_a_parked_front_stops_only_its_own_project(monkeypatch):
+    """Skipping past the front is what the gate stops; another project is
+    unaffected, so this is a per-project rule and not a global stall."""
+    issues = [
+        _issue("proj-a.1", labels=["human"], seat="seat-a"),
+        _issue("proj-a.2", seat="seat-a"),
+        _issue("proj-b.1", seat="seat-b"),
+    ]
     _project(monkeypatch, issues)
 
-    picked, _ = dispatcher.next_assigned_ticket()
+    picked, seat = dispatcher.next_assigned_ticket()
 
-    assert picked["id"] == "proj-x.1", "the roadmap front goes first"
+    assert picked["id"] == "proj-b.1"
+    assert seat == "seat-b"
 
 
 def test_a_parked_front_ticket_stops_the_project(monkeypatch):
@@ -478,7 +483,7 @@ def test_a_project_being_worked_starts_nothing_else(monkeypatch):
 def test_unassigned_work_behind_the_front_is_not_brokered(monkeypatch):
     """The product-owner brokers for the front ticket and nothing else, or
     it would assign work the front gate then refuses to start."""
-    issues = [_issue("proj-x.1", seat="seat-a"), _issue("proj-x.2", priority=0, seat=None)]
+    issues = [_issue("proj-x.1", priority=0, seat="seat-a"), _issue("proj-x.2", seat=None)]
     _project(monkeypatch, issues)
 
     assert dispatcher.next_unassigned_ticket() is None
