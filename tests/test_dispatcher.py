@@ -279,15 +279,18 @@ def test_next_assigned_ticket_skips_seats_already_running(monkeypatch):
     start", and dispatch stalls at a single agent however high the cap is.
     Found live 2026-09-13."""
     monkeypatch.setattr(dispatcher, "held_projects", lambda: {})
+    # One project each: a project runs one ticket at a time, so two in the
+    # SAME project would be decided by that rule rather than by busy_seats,
+    # which is what this is about.
     monkeypatch.setattr(dispatcher.beads, "in_progress", lambda: [
-        {"id": "busy.1", "issue_type": "task", "metadata": {"assigned_seat": "seat-1"}},
-        {"id": "busy.2", "issue_type": "task", "metadata": {"assigned_seat": "seat-2"}},
+        {"id": "busy-a.1", "issue_type": "task", "metadata": {"assigned_seat": "seat-1"}},
+        {"id": "busy-b.1", "issue_type": "task", "metadata": {"assigned_seat": "seat-2"}},
     ])
     monkeypatch.setattr(dispatcher.beads, "ready", lambda: [])
 
     issue, seat = dispatcher.next_assigned_ticket(busy_seats={"seat-1"})
 
-    assert issue["id"] == "busy.2"
+    assert issue["id"] == "busy-b.1"
     assert seat == "seat-2"
 
 
@@ -384,7 +387,10 @@ def _issue(ticket_id, *, priority=1, seat="seat-a", status="open", labels=None):
 
 
 def _project(monkeypatch, issues):
-    """Point the dispatcher at one synthetic project."""
+    """Point the dispatcher at one synthetic project.
+
+    `ready` mimics bd's: it returns only status=open, so a ticket standing
+    in for a dependency-blocked one is simply not in it."""
     monkeypatch.setattr(beads, "list_all", lambda: list(issues))
     monkeypatch.setattr(beads, "ready", lambda: [i for i in issues if i["status"] == "open"])
     monkeypatch.setattr(
@@ -399,6 +405,26 @@ def test_the_front_of_a_project_is_its_earliest_unfinished_ticket(monkeypatch):
     _project(monkeypatch, issues)
 
     assert dispatcher.roadmap_fronts() == {"proj-x": "proj-x.1"}
+
+
+def test_a_dependency_blocked_ticket_is_not_the_front(monkeypatch):
+    """Found the hard way, and it wedged the project dead: workspace-9jg's
+    front was 2.5, blocked by 14.1, so the gate refused everything in the
+    project -- 14.1 included -- and dispatch went silent.
+
+    Blocked is not "cannot be actioned", it is "not actionable". The ticket
+    to work is its blocker, which can be LATER in roadmap order."""
+    blocked = _issue("proj-a.1")
+    blocked["status"] = "blocked"
+    blocker = _issue("proj-a.9")
+    issues = [blocked, blocker]
+    _project(monkeypatch, issues)
+
+    assert dispatcher.roadmap_fronts() == {"proj-a": "proj-a.9"}
+
+    picked, _ = dispatcher.next_assigned_ticket()
+
+    assert picked["id"] == "proj-a.9", "the blocker takes its place"
 
 
 def test_a_closed_ticket_never_holds_its_project_up(monkeypatch):

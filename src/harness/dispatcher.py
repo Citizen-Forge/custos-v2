@@ -210,30 +210,35 @@ def project_hold(ticket_id: str) -> str | None:
     return held_projects().get(toolchain.project_id_for(ticket_id))
 
 
-def roadmap_fronts() -> dict[str, str]:
-    """Project id -> the id of the earliest UNFINISHED ticket it has.
+def _fronts_from(issues: list) -> dict[str, str]:
+    """Project id -> the ticket it must work next, out of `issues`.
 
-    A project works its roadmap in order and starts nothing else until the
-    ticket at the front is done. Skipping past a ticket that cannot be
-    actioned -- parked for a human, blocked on an open dependency -- would
-    hand the later tickets to agents that may be waiting on it, which is
-    what the ordering exists to prevent.
+    The earliest ticket a project can ACTUALLY BE ACTIONED ON, by roadmap
+    order. Nothing past it starts, because a ticket that cannot be actioned
+    may be exactly what the ones after it need.
 
-    "Unfinished" is deliberately not closed, and that distinction is
-    load-bearing in one direction only: a `closed` ticket never holds a
-    project up. Verifier-exhausted tickets are closed and human-labelled,
-    and the escalation role skips closed tickets by design, so gating on
-    them would stall the project for good rather than for a while.
+    Eligibility and order are two different things, and conflating them
+    wedged a project dead:
 
-    Fails open: a project whose tickets cannot be enumerated has no front
-    and anything of its own may start, the same posture as
-    project_hold and the toolchain preflight. A stall the operator cannot
-    see is worse than a ticket starting out of order.
+    - Blocked-by-a-dependency is not "not actioned", it is not ACTIONABLE,
+      and the ticket to work is the thing blocking it -- which can be
+      LATER in roadmap order. Found live 2026-09-15: workspace-9jg's front
+      was 2.5, blocked by 14.1, so the gate refused every ticket in the
+      project -- 14.1 included -- and dispatch went silent. So callers
+      pass bd's own answer to "can this be started": `bd ready` (open, no
+      open blocker) plus the in_progress orphans. A blocked ticket is in
+      neither, and its blocker takes its place.
+    - Parked for a human IS the front, and holds the project, which is the
+      point of the rule. `bd ready` returns human-labelled issues, so an
+      open one is naturally in the running; a closed one never is, and
+      verifier-exhausted tickets are closed, so they cannot stall anything
+      for good.
 
-    Shares the ordering cache -- it is the same `bd list --all`."""
-    keys = _order_keys()
+    Fails open: a project with no issue in the pool has no front here, and
+    _skip allows its candidates. A stall the operator cannot see is worse
+    than a ticket starting out of order."""
     front: dict[str, tuple] = {}
-    for issue in beads.list_all():
+    for issue in issues:
         if issue.get("status") == "closed":
             continue
         if not dispatchable(issue):
@@ -243,6 +248,11 @@ def roadmap_fronts() -> dict[str, str]:
         if project not in front or key < front[project][0]:
             front[project] = (key, issue["id"])
     return {project: value[1] for project, value in front.items()}
+
+
+def roadmap_fronts() -> dict[str, str]:
+    """The front of every project, from bd's own pools. See _fronts_from."""
+    return _fronts_from(list(beads.in_progress()) + list(beads.ready()))
 
 
 def next_assigned_ticket(
@@ -275,7 +285,11 @@ def next_assigned_ticket(
     woke up in the same project."""
     held = held_projects()
     busy = busy_seats or set()
-    fronts = roadmap_fronts()
+    # Fetched once and reused: these two lists ARE the pools below, and
+    # their union is what the front is chosen from.
+    in_progress_issues = beads.in_progress()
+    ready_issues = beads.ready()
+    fronts = _fronts_from(in_progress_issues + ready_issues)
     running_projects = {
         toolchain.project_id_for(ticket_id) for ticket_id in (running_tickets or set())
     }
@@ -307,10 +321,10 @@ def next_assigned_ticket(
                 best, best_seat = issue, seat_id
         return best, best_seat
 
-    orphaned = _pick(beads.in_progress())
+    orphaned = _pick(in_progress_issues)
     if orphaned[0] is not None:
         return orphaned
-    return _pick(beads.ready())
+    return _pick(ready_issues)
 
 
 def next_unassigned_ticket(running_tickets: set[str] | None = None) -> dict | None:
@@ -323,12 +337,13 @@ def next_unassigned_ticket(running_tickets: set[str] | None = None) -> dict | No
     so a change to bd's default ordering cannot silently break the
     preemption check in tick()."""
     held = held_projects()
-    fronts = roadmap_fronts()
+    ready_issues = beads.ready()
+    fronts = _fronts_from(list(beads.in_progress()) + ready_issues)
     running = {
         toolchain.project_id_for(ticket_id) for ticket_id in (running_tickets or set())
     }
     best: dict | None = None
-    for issue in beads.ready():
+    for issue in ready_issues:
         if not dispatchable(issue):
             continue
         if beads.assigned_seat(issue) is not None:
