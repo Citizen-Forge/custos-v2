@@ -33,6 +33,12 @@ Requeueing these is not just clearing the label:
 
     docker compose run --rm harness python scripts/requeue_parked_tickets.py --dry-run <id> ...
     docker compose run --rm harness python scripts/requeue_parked_tickets.py <id> ...
+    docker compose run --rm harness python scripts/requeue_parked_tickets.py <id> --reason "..."
+
+The directive a requeued ticket's next attempt opens with is REASON, below.
+`--reason` replaces it when one ticket needs something the others do not,
+which is the usual case for a ticket that has already been through the loop
+twice: what is outstanding is specific, and worth naming.
 """
 
 import argparse
@@ -77,6 +83,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("ids", nargs="+")
     parser.add_argument("--dry-run", action="store_true", help="print what would change, do nothing")
+    parser.add_argument(
+        "--reason", default=None, help="directive for the next attempt, in place of the default"
+    )
     args = parser.parse_args()
 
     beads.ensure_initialized()
@@ -92,7 +101,7 @@ def main() -> None:
             )
             if args.dry_run:
                 continue
-            beads.set_metadata(issue_id, "rework_reason", REASON)
+            beads.set_metadata(issue_id, "rework_reason", args.reason or REASON)
             # 0, not unset: the budgets were spent on failures this ticket
             # did not cause, and a restored budget must be visible to
             # verify_ticket rather than looking like "never attempted".

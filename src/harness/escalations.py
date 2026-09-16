@@ -31,6 +31,11 @@ log = logging.getLogger(__name__)
 
 MAX_ESCALATION_ATTEMPTS = int(os.environ.get("MAX_ESCALATION_ATTEMPTS", "2"))
 
+# Set once an escalation has been ANSWERED, so the queue cannot ask about
+# it again. Cleared by requeue(), because a ticket genuinely re-escalated
+# later does deserve another look.
+RESOLVED_KEY = "escalation_resolved"
+
 
 def attempts(issue: dict) -> int:
     try:
@@ -73,6 +78,8 @@ def pending(conn=None) -> list[dict]:
 
     out = []
     for issue in beads.parked_for_human(include_closed=True):
+        if (issue.get("metadata") or {}).get(RESOLVED_KEY):
+            continue  # already answered; see resolve()
         if attempts(issue) >= MAX_ESCALATION_ATTEMPTS:
             continue
         if issue.get("status") == "closed":
@@ -91,6 +98,20 @@ def pending(conn=None) -> list[dict]:
     return out
 
 
+def resolve(conn, issue_id: str, resolution: str, actor: str) -> None:
+    """Answer an escalation, and take it out of the queue for good.
+
+    `beads.respond_to_human` records the decision and closes the ticket,
+    but the queue only ever asked "is this parked?" -- so an answered
+    ticket came straight back on the next pass and could be requeued,
+    undoing the decision it had just made. Found live 2026-09-15:
+    workspace-9jg.2.4 was resolved as already-delivered and was still in
+    pending() minutes later, with the product-owner about to look at it
+    again."""
+    beads.respond_to_human(issue_id, resolution, actor=actor)
+    beads.set_metadata(issue_id, RESOLVED_KEY, "answered")
+
+
 def requeue(conn, issue_id: str, directive: str) -> int:
     """Send an escalated ticket back to an agent with `directive` in its
     opening prompt, clearing the human flag and the old completion claim.
@@ -104,4 +125,10 @@ def requeue(conn, issue_id: str, directive: str) -> int:
     n = attempts(issue) + 1
     verifier.requeue_for_rework(conn, issue_id, directive, attempt=n)
     beads.set_metadata(issue_id, "escalation_attempts", str(n))
+    try:
+        # A fresh attempt is not an answered one: if it escalates again,
+        # that is a new question and it should be considered.
+        beads.unset_metadata(issue_id, RESOLVED_KEY)
+    except Exception:
+        log.exception("could not clear %s on %s", RESOLVED_KEY, issue_id)
     return n

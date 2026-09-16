@@ -83,6 +83,31 @@ def test_requeue_spends_one_attempt_and_reopens():
     assert int((current.get("metadata") or {}).get("escalation_attempts")) == 1
 
 
+def test_a_resolved_escalation_leaves_the_queue_for_good():
+    """An answered escalation must not come back. The queue only ever asked
+    "is this parked?", so a resolved ticket was reconsidered on the next
+    pass and could be requeued -- undoing the decision. Found live
+    2026-09-15: workspace-9jg.2.4, resolved as already delivered and still
+    pending minutes later."""
+    story = _escalated("esc-h")
+
+    escalations.resolve(_conn(), story["id"], "accepted as already delivered", actor="product-owner")
+
+    assert story["id"] not in {i["id"] for i in escalations.pending(_conn())}
+
+
+def test_requeueing_clears_the_resolved_marker():
+    """A ticket that genuinely escalates again later should be considered
+    again, so requeueing drops the marker."""
+    story = _escalated("esc-i")
+    conn = _conn()
+    escalations.resolve(conn, story["id"], "accepted", actor="product-owner")
+
+    escalations.requeue(conn, story["id"], "cause fixed; try again")
+
+    assert (beads.show(story["id"]).get("metadata") or {}).get("escalation_resolved") is None
+
+
 def test_capped_escalations_drop_out_of_the_queue():
     story = _escalated("esc-d")
     beads.set_metadata(story["id"], "escalation_attempts", str(escalations.MAX_ESCALATION_ATTEMPTS))

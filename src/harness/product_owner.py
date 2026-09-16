@@ -274,8 +274,10 @@ def build_tools(conn, requesting_model):
     @tool
     def resolve_escalation(issue_id: str, resolution: str) -> str:
         """Close an escalated ticket with a decision recorded -- for escalations that are answered
-        rather than requeued (accept a refusal, decide an ambiguity, cancel the work)."""
-        beads.respond_to_human(issue_id, resolution, actor=ROLE)
+        rather than requeued (accept a refusal, decide an ambiguity, cancel the work). The answer
+        is final: the ticket leaves the escalation queue, so a later session does not reconsider
+        it and undo the decision."""
+        escalations.resolve(conn, issue_id, resolution, actor=ROLE)
         return f"resolved {issue_id}"
 
     return [
@@ -345,8 +347,10 @@ def build_escalation_tools(conn, requesting_model):
     @tool
     def resolve_escalation(issue_id: str, resolution: str) -> str:
         """Close an escalated ticket with a decision recorded -- for escalations that are answered
-        rather than requeued (accept a refusal, decide an ambiguity, cancel the work)."""
-        beads.respond_to_human(issue_id, resolution, actor=ROLE)
+        rather than requeued (accept a refusal, decide an ambiguity, cancel the work). The answer
+        is final: the ticket leaves the escalation queue, so a later session does not reconsider
+        it and undo the decision."""
+        escalations.resolve(conn, issue_id, resolution, actor=ROLE)
         return f"resolved {issue_id}"
 
     return reused + [
