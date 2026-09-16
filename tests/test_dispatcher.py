@@ -354,104 +354,112 @@ def test_running_agents_reports_claimed_work():
     assert running[active["id"]]["seat_id"] == "seat-r"
 
 
-# -- one ticket at a time per project ---------------------------------
+# -- one ticket at a time per project, in roadmap order ----------------
 #
 # Agents on a project share its git history, so two at once fork from the
 # same commit and both edit what every ticket edits. Found live
 # 2026-09-15, with per-ticket worktrees already in place: src/index.ts is
 # the barrel every new module is re-exported from, and workspace-9jg.1.3
 # and 14.2 both appended to it from the same base, so neither merged.
+#
+# And a project works its roadmap in order: nothing past the front ticket
+# starts, because a ticket that cannot be actioned -- parked, or blocked
+# on an open dependency -- may be exactly what the ones after it need.
 
 
-def test_engaged_projects_reports_a_project_with_a_ticket_in_flight(monkeypatch):
-    monkeypatch.setattr(
-        beads, "in_progress",
-        lambda: [{"id": "workspace-abc.1.1", "assignee": "seat-a", "labels": []}],
-    )
+def test_the_front_of_a_project_is_its_earliest_unfinished_ticket():
+    project = beads.create("front proj", "d", issue_type="epic", priority=1)
+    first = beads.create("front one", "d", parent=project["id"], priority=1)
+    beads.create("front two", "d", parent=project["id"], priority=1)
 
-    assert dispatcher.engaged_projects() == {"workspace-abc"}
-
-
-def test_a_human_flagged_ticket_does_not_engage_its_project(monkeypatch):
-    """Parked is not in flight. A ticket waiting on a person must not hold
-    its project's other work up."""
-    monkeypatch.setattr(
-        beads, "in_progress",
-        lambda: [{"id": "workspace-abc.1.1", "assignee": "seat-a", "labels": ["human"]}],
-    )
-
-    assert dispatcher.engaged_projects() == set()
+    assert dispatcher.roadmap_fronts()[project["id"]] == first["id"]
 
 
-def test_a_project_already_running_a_ticket_starts_no_second_one(monkeypatch):
+def test_a_closed_ticket_never_holds_its_project_up():
+    """Verifier-exhausted tickets are closed AND human-labelled, and the
+    escalation role skips closed tickets by design -- gating on them would
+    stall the project for good rather than for a while."""
+    project = beads.create("front closed proj", "d", issue_type="epic", priority=1)
+    done = beads.create("front closed one", "d", parent=project["id"], priority=1)
+    next_up = beads.create("front closed two", "d", parent=project["id"], priority=1)
+    beads.close(done["id"], reason="done")
+
+    assert dispatcher.roadmap_fronts()[project["id"]] == next_up["id"]
+
+
+def test_only_the_front_ticket_of_a_project_starts(monkeypatch):
+    """A ticket behind the front may be waiting on it, so nothing later
+    runs until the front is done."""
     monkeypatch.setattr(beads, "in_progress", lambda: [])
-    project = beads.create("serial proj", "d", issue_type="epic", priority=1)
-    beads.create("serial running", "d", parent=project["id"])
-    waiting = beads.create("serial waiting", "d", parent=project["id"], priority=0)
-    other_project = beads.create("serial other proj", "d", issue_type="epic", priority=3)
-    beads.create("serial other story", "d", parent=other_project["id"], priority=3)
-    beads.assign_to_seat(waiting["id"], "serial-seat")
+    project = beads.create("ordered proj", "d", issue_type="epic", priority=1)
+    front = beads.create("ordered front", "d", parent=project["id"], priority=3)
+    behind = beads.create("ordered behind", "d", parent=project["id"], priority=0)
+    for issue in (front, behind):
+        beads.assign_to_seat(issue["id"], "ordered-seat")
 
-    # With no gate at all, the engaged project's own ticket is what runs --
-    # it is P0 and outranks everything else on the board.
-    monkeypatch.setattr(dispatcher, "engaged_projects", lambda: set())
-    without_gate, _ = dispatcher.next_assigned_ticket()
-    assert without_gate["id"] == waiting["id"], "test setup: this is the ticket at stake"
+    # `behind` outranks `front` on priority, and must still wait.
+    picked, _ = dispatcher.next_assigned_ticket()
 
-    issue, _ = dispatcher.next_assigned_ticket(engaged={project["id"]})
-
-    assert issue is None or issue["id"] != waiting["id"], "the engaged project must be skipped"
+    assert picked is not None
+    assert picked["id"] != behind["id"], "the roadmap front goes first"
 
 
-def test_in_flight_work_engages_its_project_without_being_told(monkeypatch):
-    """The default path: no caller passes `engaged`, and the gate still
-    holds."""
-    monkeypatch.setattr(dispatcher, "_order", lambda issue: ())
-    project = beads.create("auto serial proj", "d", issue_type="epic", priority=1)
-    running = beads.create("auto serial running", "d", parent=project["id"])
-    waiting = beads.create("auto serial waiting", "d", parent=project["id"])
-    beads.assign_to_seat(running["id"], "auto-seat")
-    beads.assign_to_seat(waiting["id"], "auto-seat")
-    beads.claim(running["id"], actor="auto-seat")
+def test_a_parked_front_ticket_stops_the_project(monkeypatch):
+    """The point of the rule: the front cannot be worked, so nothing of
+    that project is worked -- the later tickets may need it."""
+    monkeypatch.setattr(beads, "in_progress", lambda: [])
+    project = beads.create("parked front proj", "d", issue_type="epic", priority=1)
+    front = beads.create("parked front", "d", parent=project["id"], priority=1)
+    behind = beads.create("parked behind", "d", parent=project["id"], priority=1)
+    for issue in (front, behind):
+        beads.assign_to_seat(issue["id"], "parked-front-seat")
+    beads.flag_for_human(front["id"], "needs a decision")
 
-    issue, _ = dispatcher.next_assigned_ticket()
+    picked, _ = dispatcher.next_assigned_ticket()
 
-    assert issue is None or issue["id"] != waiting["id"]
-
-
-def test_unassigned_work_in_an_engaged_project_is_not_brokered(monkeypatch):
-    """The product-owner must not be woken to broker work into a project
-    that is already busy -- it would only queue behind the gate."""
-    monkeypatch.setattr(dispatcher, "_order", lambda issue: ())
-    project = beads.create("engaged proj", "d", issue_type="epic", priority=1)
-    story = beads.create("engaged story", "d", parent=project["id"], priority=0)
-
-    picked = dispatcher.next_unassigned_ticket(engaged={project["id"]})
-
-    assert picked is None or picked["id"] != story["id"]
+    assert picked is None or picked["id"] != behind["id"]
+    assert picked is None or picked["id"] == front["id"]
 
 
-def test_only_one_orphan_of_a_project_is_resumed(monkeypatch):
-    """The orphan pool is exempt from the engagement gate so a crashed run
-    is not stranded -- but a project whose crash left several `in_progress`
-    tickets must still resume only one of them. Observed live on restart:
-    1.2 and 1.3 both resumed into the same project."""
-    monkeypatch.setattr(dispatcher, "_order", lambda issue: ())
-    project = beads.create("orphan pair proj", "d", issue_type="epic", priority=1)
-    a = beads.create("orphan pair a", "d", parent=project["id"])
-    b = beads.create("orphan pair b", "d", parent=project["id"])
-    beads.assign_to_seat(a["id"], "orphan-pair-a-seat")
-    beads.assign_to_seat(b["id"], "orphan-pair-b-seat")
-    beads.claim(a["id"], actor="orphan-pair-a-seat")
-    beads.claim(b["id"], actor="orphan-pair-b-seat")
+def test_an_orphan_behind_the_front_does_not_jump_it(monkeypatch):
+    """A crashed run's leftover is still behind the front. Resuming it
+    first would work a later ticket while the front is untouched."""
+    monkeypatch.setattr(beads, "in_progress", lambda: [])
+    project = beads.create("orphan order proj", "d", issue_type="epic", priority=1)
+    front = beads.create("orphan order front", "d", parent=project["id"], priority=1)
+    later = beads.create("orphan order later", "d", parent=project["id"], priority=1)
+    beads.assign_to_seat(front["id"], "orphan-order-a")
+    beads.assign_to_seat(later["id"], "orphan-order-b")
+    beads.claim(later["id"], actor="orphan-order-b")  # crashed, left in_progress
 
-    first, _ = dispatcher.next_assigned_ticket(running_tickets=set())
-    assert first is not None and first["id"] in (a["id"], b["id"])
+    picked, _ = dispatcher.next_assigned_ticket()
 
-    other_id = b["id"] if first["id"] == a["id"] else a["id"]
-    second, _ = dispatcher.next_assigned_ticket(running_tickets={first["id"]})
+    assert picked is None or picked["id"] != later["id"]
 
-    assert second is None or second["id"] != other_id, "one orphan at a time"
+
+def test_a_project_being_worked_starts_nothing_else(monkeypatch):
+    monkeypatch.setattr(beads, "in_progress", lambda: [])
+    project = beads.create("running proj2", "d", issue_type="epic", priority=1)
+    front = beads.create("running front2", "d", parent=project["id"], priority=1)
+    beads.assign_to_seat(front["id"], "running-front-seat")
+
+    picked, _ = dispatcher.next_assigned_ticket(running_tickets={front["id"]})
+
+    assert picked is None or picked["id"] != front["id"], "already running"
+
+
+def test_unassigned_work_behind_the_front_is_not_brokered(monkeypatch):
+    """The product-owner brokers for the front ticket and nothing else, or
+    it would assign work the front gate then refuses to start."""
+    monkeypatch.setattr(beads, "in_progress", lambda: [])
+    project = beads.create("broker order proj", "d", issue_type="epic", priority=1)
+    front = beads.create("broker order front", "d", parent=project["id"], priority=3)
+    behind = beads.create("broker order behind", "d", parent=project["id"], priority=0)
+    beads.assign_to_seat(front["id"], "broker-order-seat")
+
+    picked = dispatcher.next_unassigned_ticket()
+
+    assert picked is None or picked["id"] != behind["id"]
 
 
 # -- verify on close --------------------------------------------------
