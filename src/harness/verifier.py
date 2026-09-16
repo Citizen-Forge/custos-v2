@@ -250,36 +250,53 @@ def requeue_for_rework(conn, issue_id: str, reasoning: str, attempt: int) -> Non
     _reset_thread(conn, issue_id)
 
 
-def verify_ticket(conn, issue_id: str, model) -> dict | None:
-    """The recorded verdict dict, or None when the ticket isn't a candidate:
-    no acceptance criteria, not closed, or already verified for this commit.
+def awaiting_verdict(conn, issue: dict) -> bool:
+    """Whether `verify_ticket` would judge this issue now: closed, carrying
+    acceptance criteria, and with no verdict standing for the commit
+    currently under judgement.
 
-    The idempotency check is per-commit, not per-issue: a verdict already
-    recorded for the commit under judgement is skipped, but a ticket whose
-    work_commit has changed since (i.e. it was requeued after a fail and
-    produced new work) is judged again. An unparseable model response
-    fails closed to "fail", same posture as reviewer.py -- an unverifiable
-    verdict is not a pass."""
-    issue = beads.show(issue_id)
-    criteria = beads.acceptance_criteria(issue)
-    if not criteria:
-        return None
+    Split out of verify_ticket so the scheduler can ask the same question
+    WITHOUT building a session -- it asks once per cycle to detect a cycle
+    with nothing to do (run_scheduler._nothing_to_do, 2026-09-16). A second
+    copy of this rule would let the two drift, and the failure that causes
+    is the bad direction: an idle-guard that believes nothing awaits a
+    verdict silently stops verifying.
+
+    The idempotency is per-commit, not per-issue: a verdict already recorded
+    for the commit under judgement means the question is answered, but a
+    ticket whose work_commit has changed since (i.e. it was requeued after a
+    fail and produced new work) is judged again. A verdict recorded before
+    work_commit existed (NULL) is trusted as-is: re-judging every
+    already-verified legacy ticket would reopen settled work and re-block
+    its dependents for no reason. The one exception is a ticket explicitly
+    requeued for rework -- its old verdict must not stand in the way of
+    judging the new work."""
+    if not beads.acceptance_criteria(issue):
+        return False
     if issue.get("status") != "closed":
-        return None
+        return False
     current_commit = (issue.get("metadata") or {}).get("work_commit")
-    rework_count = (issue.get("metadata") or {}).get("rework_count")
-    existing = verifications.get_for_issue(conn, issue_id)
-    if existing:
-        if existing.get("work_commit") == current_commit:
-            return None
-        # A verdict recorded before work_commit existed (NULL) is trusted
-        # as-is: re-judging every already-verified legacy ticket would
-        # reopen settled work and re-block its dependents for no reason.
-        # The one exception is a ticket that was explicitly requeued for
-        # rework -- its old verdict must not stand in the way of judging
-        # the new work.
-        if existing.get("work_commit") is None and not rework_count:
-            return None
+    existing = verifications.get_for_issue(conn, issue["id"])
+    if not existing:
+        return True
+    if existing.get("work_commit") == current_commit:
+        return False
+    if existing.get("work_commit") is None and not (issue.get("metadata") or {}).get("rework_count"):
+        return False
+    return True
+
+
+def verify_ticket(conn, issue_id: str, model) -> dict | None:
+    """The recorded verdict dict, or None when the ticket isn't a candidate
+    -- see awaiting_verdict for what counts as one.
+
+    An unparseable model response fails closed to "fail", same posture as
+    reviewer.py -- an unverifiable verdict is not a pass."""
+    issue = beads.show(issue_id)
+    if not awaiting_verdict(conn, issue):
+        return None
+    criteria = beads.acceptance_criteria(issue)
+    current_commit = (issue.get("metadata") or {}).get("work_commit")
 
     seat_id = beads.assigned_seat(issue) or issue.get("assignee") or "unknown"
     tests = _tests_for(issue)

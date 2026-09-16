@@ -54,7 +54,7 @@ from harness.product_owner import build_tools as build_product_owner_tools
 from harness.product_owner import run_triage_session
 from harness.providers import ProviderConfig
 from harness.routing import ConcurrencyGate, RoutedModel, RoutingTable
-from harness.verifier import verify_ticket
+from harness.verifier import awaiting_verdict, verify_ticket
 
 log = logging.getLogger("scheduler")
 logging.basicConfig(level=logging.INFO)
@@ -157,6 +157,23 @@ def _routed(role: str, name: str, max_tokens: int, tools=None) -> RoutedModel:
 
 
 def run_product_owner_job(conn_string: str) -> None:
+    # Triage's entire tool set acts on the unassigned queue (list_seats,
+    # list_unassigned_tickets, assign_ticket, request_new_seat), so with
+    # nothing unassigned it can only report that it found nothing -- which
+    # it did, every 30 minutes, for the 3.5h the front gate held
+    # workspace-9jg (2026-09-16): "Triage complete -- nothing to do", while
+    # the account drained.
+    #
+    # This is narrower than the cycle-wide _nothing_to_do on purpose, and it
+    # cannot lose work: it skips only when the dispatcher's own brokering
+    # queue is empty. A parked ticket is the case the two disagree on -- it
+    # gives the escalation role work while leaving triage with none.
+    from harness import dispatcher
+
+    if not dispatcher.has_unassigned_work():
+        log.info("product-owner: nothing unassigned to broker; skipping the session")
+        return
+
     routing = RoutingTable({PRODUCT_OWNER_ROLE: _chain("product-owner", 4000)})
     gate = ConcurrencyGate()
     with psycopg.connect(conn_string, autocommit=True) as conn:
@@ -298,12 +315,75 @@ def run_progress_job(conn_string: str) -> None:
             log.exception("could not annotate %s", report["ticket_id"])
 
 
+# Jobs that cost a full agent session even when the answer is "nothing to
+# do", so a cycle with no work skips them outright (see _nothing_to_do).
+# Every job NOT listed here checks for work of its own before it reaches a
+# model: escalations returns on an empty queue, the verifier only calls the
+# model for a ticket awaiting a verdict, and progress only asks about an
+# agent that has taken no graph step for an hour.
+CYCLE_GATED_JOBS = {"product_owner", "overwatch", "meta_agent"}
+
+
+def _nothing_to_do(conn_string: str) -> bool:
+    """True when this cycle's model-backed jobs have nothing to act on.
+
+    Three independent things give a cycle a reason to run, and all three
+    are readable without a model call:
+
+    - work the dispatcher could start, which the product-owner brokers;
+    - a ticket parked for a human, which the escalation role answers;
+    - a closed ticket carrying acceptance criteria that no verdict covers
+      for the commit that closed it, which the verifier judges.
+
+    When none of them holds, every remaining session can only report that
+    it found nothing -- and each report is a full agent round trip. Found
+    live 2026-09-16: one parked ticket held its whole project for 3.5h (46
+    dispatchable tickets frozen behind the front gate) while the scheduler
+    went on running product_owner, overwatch and meta_agent every 30
+    minutes -- the product-owner logging "Triage complete -- nothing to do"
+    each time, and the account draining for no work.
+
+    Fails OPEN, the same posture as the dispatcher's toolchain preflight and
+    for the same reason: if the board cannot be read, run the cycle. A cycle
+    nobody needed is cheaper than a job that silently never runs again."""
+    try:
+        # Imported here rather than at module scope: this module is imported
+        # by tests that only exercise run_one_cycle, and neither of these is
+        # needed to reach it.
+        from harness import dispatcher, escalations
+
+        if dispatcher.has_unassigned_work():
+            return False
+        if escalations.pending():
+            return False
+        with psycopg.connect(conn_string, autocommit=True) as conn:
+            seats.init_table(conn)
+            verifications.init_table(conn)
+            for seat in seats.list_all(conn):
+                for issue in beads.list_by_assignee(seat["seat_id"]):
+                    if awaiting_verdict(conn, issue):
+                        return False
+        return True
+    except Exception:
+        log.exception("could not tell whether this cycle has work; running it")
+        return False
+
+
 JOBS = [
+    # Escalations first, and deliberately. A ticket parked for a human is
+    # its project's FRONT, and the front gate holds every other ticket in
+    # that project until it is dealt with (dispatcher._fronts_from). Running
+    # this job LAST put five agent sessions' worth of latency and spend
+    # between a blocked project and the one job that can clear it -- so a
+    # project whose front escalated waited the better part of an hour to be
+    # looked at, and its whole backlog waited with it. Found live
+    # 2026-09-16: workspace-9jg.1.1 had been parked for 3.5h with 46
+    # dispatchable tickets behind it, and the cycle never reached this job.
+    ("escalations", run_escalations_job),
     ("product_owner", run_product_owner_job),
     ("overwatch", run_overwatch_job),
     ("meta_agent", run_meta_agent_job),
     ("verifier", run_verifier_job),
-    ("escalations", run_escalations_job),
     ("progress", run_progress_job),
 ]
 
@@ -312,8 +392,17 @@ def run_one_cycle(conn_string: str, jobs=JOBS) -> None:
     """One pass through every job, in order. Split out from main()'s
     infinite loop specifically so it's testable without needing to
     actually run forever -- a test can call this once with fake jobs and
-    assert on what happened."""
+    assert on what happened.
+
+    The cycle is asked once, up front, whether it has any work at all (see
+    _nothing_to_do), and a cycle that does not skips its model-backed jobs.
+    Asked only when the cycle actually contains one, so a caller passing
+    its own jobs -- as the tests do -- never pays for the lookup."""
+    idle = any(name in CYCLE_GATED_JOBS for name, _ in jobs) and _nothing_to_do(conn_string)
     for name, job in jobs:
+        if idle and name in CYCLE_GATED_JOBS:
+            log.info("job %s skipped: this cycle has nothing to do", name)
+            continue
         try:
             log.info("running job: %s", name)
             job(conn_string)
