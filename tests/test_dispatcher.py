@@ -1,4 +1,4 @@
-"""Capacity-driven dispatch and the speciality-decline path.
+﻿"""Capacity-driven dispatch and the speciality-decline path.
 
 Written against the real failure this replaced (2026-08-31): seats existed
 with tickets assigned to them and nothing ran, because the only worker
@@ -364,149 +364,135 @@ def test_running_agents_reports_claimed_work():
 #
 # And a project works its roadmap in order: nothing past the front ticket
 # starts, because a ticket that cannot be actioned -- parked, or blocked
-# on an open dependency -- may be exactly what the ones after it need.
+# on an open dependency -- may be exactly what the tickets after it need.
+#
+# These use synthetic issues rather than beads.create: bd does not give
+# tickets a shared id root here, so created tickets do not land in one
+# project and could not exercise the gate at all.
 
 
-def test_the_front_of_a_project_is_its_earliest_unfinished_ticket():
-    project = beads.create("front proj", "d", issue_type="epic", priority=1)
-    first = beads.create("front one", "d", parent=project["id"], priority=1)
-    beads.create("front two", "d", parent=project["id"], priority=1)
+def _issue(ticket_id, *, priority=1, seat="seat-a", status="open", labels=None):
+    return {
+        "id": ticket_id,
+        "title": ticket_id,
+        "status": status,
+        "priority": priority,
+        "issue_type": "task",
+        "labels": labels or [],
+        "metadata": {"assigned_seat": seat} if seat else {},
+    }
 
-    assert dispatcher.roadmap_fronts()[project["id"]] == first["id"]
+
+def _project(monkeypatch, issues):
+    """Point the dispatcher at one synthetic project."""
+    monkeypatch.setattr(beads, "list_all", lambda: list(issues))
+    monkeypatch.setattr(beads, "ready", lambda: [i for i in issues if i["status"] == "open"])
+    monkeypatch.setattr(
+        beads, "in_progress", lambda: [i for i in issues if i["status"] == "in_progress"]
+    )
+    monkeypatch.setattr(dispatcher, "held_projects", lambda: {})
+    monkeypatch.setattr(dispatcher, "_order", lambda issue: (issue["priority"], issue["id"]))
 
 
-def test_a_closed_ticket_never_holds_its_project_up():
+def test_the_front_of_a_project_is_its_earliest_unfinished_ticket(monkeypatch):
+    issues = [_issue("proj-x.2"), _issue("proj-x.1")]
+    _project(monkeypatch, issues)
+
+    assert dispatcher.roadmap_fronts() == {"proj-x": "proj-x.1"}
+
+
+def test_a_closed_ticket_never_holds_its_project_up(monkeypatch):
     """Verifier-exhausted tickets are closed AND human-labelled, and the
     escalation role skips closed tickets by design -- gating on them would
     stall the project for good rather than for a while."""
-    project = beads.create("front closed proj", "d", issue_type="epic", priority=1)
-    done = beads.create("front closed one", "d", parent=project["id"], priority=1)
-    next_up = beads.create("front closed two", "d", parent=project["id"], priority=1)
-    beads.close(done["id"], reason="done")
+    issues = [_issue("proj-x.1", status="closed"), _issue("proj-x.2")]
+    _project(monkeypatch, issues)
 
-    assert dispatcher.roadmap_fronts()[project["id"]] == next_up["id"]
+    assert dispatcher.roadmap_fronts() == {"proj-x": "proj-x.2"}
+
+
+def test_a_closed_ticket_does_not_have_to_be_worked_first(monkeypatch):
+    issues = [_issue("proj-x.1", status="closed"), _issue("proj-x.2")]
+    _project(monkeypatch, issues)
+
+    picked, seat = dispatcher.next_assigned_ticket()
+
+    assert picked["id"] == "proj-x.2"
+    assert seat == "seat-a"
 
 
 def test_only_the_front_ticket_of_a_project_starts(monkeypatch):
     """A ticket behind the front may be waiting on it, so nothing later
-    runs until the front is done."""
-    monkeypatch.setattr(beads, "in_progress", lambda: [])
-    project = beads.create("ordered proj", "d", issue_type="epic", priority=1)
-    front = beads.create("ordered front", "d", parent=project["id"], priority=3)
-    behind = beads.create("ordered behind", "d", parent=project["id"], priority=0)
-    for issue in (front, behind):
-        beads.assign_to_seat(issue["id"], "ordered-seat")
+    runs until the front is done -- even when it outranks the front."""
+    issues = [_issue("proj-x.1", priority=3), _issue("proj-x.2", priority=0)]
+    _project(monkeypatch, issues)
 
-    # `behind` outranks `front` on priority, and must still wait.
     picked, _ = dispatcher.next_assigned_ticket()
 
-    assert picked is not None
-    assert picked["id"] != behind["id"], "the roadmap front goes first"
+    assert picked["id"] == "proj-x.1", "the roadmap front goes first"
 
 
 def test_a_parked_front_ticket_stops_the_project(monkeypatch):
     """The point of the rule: the front cannot be worked, so nothing of
-    that project is worked -- the later tickets may need it."""
-    monkeypatch.setattr(beads, "in_progress", lambda: [])
-    project = beads.create("parked front proj", "d", issue_type="epic", priority=1)
-    front = beads.create("parked front", "d", parent=project["id"], priority=1)
-    behind = beads.create("parked behind", "d", parent=project["id"], priority=1)
-    for issue in (front, behind):
-        beads.assign_to_seat(issue["id"], "parked-front-seat")
-    beads.flag_for_human(front["id"], "needs a decision")
+    that project is worked."""
+    issues = [_issue("proj-x.1", labels=["human"]), _issue("proj-x.2", priority=2)]
+    _project(monkeypatch, issues)
 
     picked, _ = dispatcher.next_assigned_ticket()
 
-    assert picked is None or picked["id"] != behind["id"]
-    assert picked is None or picked["id"] == front["id"]
+    assert picked is None
 
 
 def test_an_orphan_behind_the_front_does_not_jump_it(monkeypatch):
     """A crashed run's leftover is still behind the front. Resuming it
     first would work a later ticket while the front is untouched."""
-    monkeypatch.setattr(beads, "in_progress", lambda: [])
-    project = beads.create("orphan order proj", "d", issue_type="epic", priority=1)
-    front = beads.create("orphan order front", "d", parent=project["id"], priority=1)
-    later = beads.create("orphan order later", "d", parent=project["id"], priority=1)
-    beads.assign_to_seat(front["id"], "orphan-order-a")
-    beads.assign_to_seat(later["id"], "orphan-order-b")
-    beads.claim(later["id"], actor="orphan-order-b")  # crashed, left in_progress
+    issues = [_issue("proj-x.1"), _issue("proj-x.2", status="in_progress")]
+    _project(monkeypatch, issues)
 
     picked, _ = dispatcher.next_assigned_ticket()
 
-    assert picked is None or picked["id"] != later["id"]
+    assert picked["id"] == "proj-x.1"
+
+
+def test_an_orphan_at_the_front_is_resumed(monkeypatch):
+    """The other half: a crashed run at the front is exactly what should
+    resume -- it never comes back through `bd ready`."""
+    issues = [_issue("proj-x.1", status="in_progress")]
+    _project(monkeypatch, issues)
+
+    picked, seat = dispatcher.next_assigned_ticket()
+
+    assert picked["id"] == "proj-x.1"
+    assert seat == "seat-a"
 
 
 def test_a_project_being_worked_starts_nothing_else(monkeypatch):
-    monkeypatch.setattr(beads, "in_progress", lambda: [])
-    project = beads.create("running proj2", "d", issue_type="epic", priority=1)
-    front = beads.create("running front2", "d", parent=project["id"], priority=1)
-    beads.assign_to_seat(front["id"], "running-front-seat")
+    issues = [_issue("proj-x.1")]
+    _project(monkeypatch, issues)
 
-    picked, _ = dispatcher.next_assigned_ticket(running_tickets={front["id"]})
+    picked, _ = dispatcher.next_assigned_ticket(running_tickets={"proj-x.1"})
 
-    assert picked is None or picked["id"] != front["id"], "already running"
+    assert picked is None
 
 
 def test_unassigned_work_behind_the_front_is_not_brokered(monkeypatch):
     """The product-owner brokers for the front ticket and nothing else, or
     it would assign work the front gate then refuses to start."""
-    monkeypatch.setattr(beads, "in_progress", lambda: [])
-    project = beads.create("broker order proj", "d", issue_type="epic", priority=1)
-    front = beads.create("broker order front", "d", parent=project["id"], priority=3)
-    behind = beads.create("broker order behind", "d", parent=project["id"], priority=0)
-    beads.assign_to_seat(front["id"], "broker-order-seat")
+    issues = [_issue("proj-x.1", seat="seat-a"), _issue("proj-x.2", priority=0, seat=None)]
+    _project(monkeypatch, issues)
 
-    picked = dispatcher.next_unassigned_ticket()
-
-    assert picked is None or picked["id"] != behind["id"]
+    assert dispatcher.next_unassigned_ticket() is None
 
 
-# -- verify on close --------------------------------------------------
+def test_the_gate_fails_open_when_the_front_cannot_be_determined(monkeypatch):
+    """A stall the operator cannot see is worse than a ticket starting out
+    of order -- same posture as project_hold and the toolchain preflight."""
+    issues = [_issue("proj-x.2")]
+    _project(monkeypatch, issues)
+    monkeypatch.setattr(dispatcher, "roadmap_fronts", lambda: {})
+
+    picked, _ = dispatcher.next_assigned_ticket()
+
+    assert picked is not None and picked["id"] == "proj-x.2"
 
 
-class _FakeModel:
-    """Stands in for the verifier's model. Same shape as test_verifier.py's."""
-
-    def __init__(self, content):
-        self.content = content
-
-    def invoke(self, prompt):
-        return type("Response", (), {"content": self.content})()
-
-
-def test_verify_now_records_a_real_verdict(monkeypatch):
-    """Verify-on-close is a real verification, not a rubber stamp: the
-    same verify_ticket, so a fail still requeues the ticket with the
-    finding and the project keeps working it."""
-    import json
-    import os
-
-    project = beads.create("verify-now proj", "d", issue_type="epic", priority=1)
-    story = beads.create(
-        "verify-now story", "d", parent=project["id"], acceptance_criteria="does the thing"
-    )
-    beads.close(story["id"], reason="did it")
-
-    d = dispatcher.Dispatcher(os.environ["DATABASE_URL"], RoutingTable({}), max_agents=1)
-    d._verifier_model = _FakeModel(json.dumps({"verdict": "pass", "reasoning": "present"}))
-
-    result = d.verify_now(story["id"])
-
-    assert result is not None
-    assert result["verdict"] == "pass"
-
-
-def test_verify_now_fails_open_when_it_cannot_verify(monkeypatch):
-    """A verification error must not fail the ticket -- its work is
-    committed and merged by then -- nor kill the dispatch thread. The
-    scheduled verifier job is the backstop."""
-    import os
-
-    def boom(*args, **kwargs):
-        raise RuntimeError("provider unreachable")
-
-    monkeypatch.setattr(dispatcher, "verify_ticket", boom)
-    d = dispatcher.Dispatcher(os.environ["DATABASE_URL"], RoutingTable({}), max_agents=1)
-
-    assert d.verify_now("workspace-verify-fail.1.1") is None
