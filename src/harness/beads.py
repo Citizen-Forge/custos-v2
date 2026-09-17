@@ -426,16 +426,32 @@ def respond_to_human(issue_id: str, response: str, actor: str = DEFAULT_ACTOR) -
     list` (the read path) works fine. This composes the same documented
     effect ("adds the response as a comment[-equivalent note] and closes
     with reason 'Responded'") out of append_note + close, both already
-    verified working, rather than depending on the broken subcommand."""
+    verified working, rather than depending on the broken subcommand.
+
+    Also drops the `human` label, because the label means "parked for a
+    person" and a person has now answered. Leaving it on made an ANSWERED
+    ticket indistinguishable from a parked one: the dashboard's Blocked
+    column is nothing but "carries the human label" (public/index.html,
+    isBlocked -- deliberately status-independent, so that a closed ticket
+    is not credited as done), so work that had been decided and closed went
+    on being reported as blocked. Found live 2026-09-17: workspace-9jg.2.4
+    was answered by the product-owner as already delivered and still sat in
+    Blocked. Verifier-exhausted tickets never come through here -- they are
+    parked by flag_for_human and only ever answered by this call -- so they
+    are unaffected and still read as blocked, which is the whole point."""
     append_note(issue_id, f"human response: {response}", actor=actor)
+    remove_human_flag(issue_id, actor=actor)
     return close(issue_id, reason="Responded")
 
 
 def dismiss_human(issue_id: str, reason: str | None = None, actor: str = DEFAULT_ACTOR) -> dict:
     """See respond_to_human's docstring -- same "bd human dismiss is
-    broken on embedded Dolt" workaround, composed from close() alone."""
+    broken on embedded Dolt" workaround, composed from close() alone, and
+    the same rule about the label: a dismissed ticket has been dealt with,
+    so it must stop reading as blocked."""
     if reason:
         append_note(issue_id, f"dismissed: {reason}", actor=actor)
+    remove_human_flag(issue_id, actor=actor)
     return close(issue_id, reason="Dismissed")
 
 

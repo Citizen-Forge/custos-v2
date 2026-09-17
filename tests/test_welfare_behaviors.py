@@ -41,6 +41,37 @@ def test_respond_to_human_closes_with_response_recorded():
     assert "go with option A" in result["notes"]
 
 
+def test_answering_a_ticket_takes_it_out_of_the_blocked_column():
+    """The `human` label means "parked for a person", and the dashboard's
+    Blocked column is nothing but that label -- no status check. So an
+    answered ticket sat in Blocked forever, indistinguishable from one
+    still waiting. Found live 2026-09-17: workspace-9jg.2.4, answered as
+    already delivered by the product-owner and still reported as blocked."""
+    beads.ensure_initialized()
+    issue = beads.create("answered test", "x")
+    beads.claim(issue["id"])
+    beads.flag_for_human(issue["id"], "which approach?")
+
+    beads.respond_to_human(issue["id"], "go with option A")
+
+    assert issue["id"] not in {
+        i["id"] for i in beads.parked_for_human(include_closed=True)
+    }
+
+
+def test_dismissing_a_ticket_also_clears_the_human_label():
+    beads.ensure_initialized()
+    issue = beads.create("dismissed test", "x")
+    beads.claim(issue["id"])
+    beads.flag_for_human(issue["id"], "not sure about this")
+
+    beads.dismiss_human(issue["id"], reason="no longer needed")
+
+    assert issue["id"] not in {
+        i["id"] for i in beads.parked_for_human(include_closed=True)
+    }
+
+
 def test_dismiss_human_closes_with_reason_recorded():
     beads.ensure_initialized()
     issue = beads.create("dismiss test", "x")

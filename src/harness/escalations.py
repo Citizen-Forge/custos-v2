@@ -34,6 +34,12 @@ MAX_ESCALATION_ATTEMPTS = int(os.environ.get("MAX_ESCALATION_ATTEMPTS", "2"))
 # Set once an escalation has been ANSWERED, so the queue cannot ask about
 # it again. Cleared by requeue(), because a ticket genuinely re-escalated
 # later does deserve another look.
+#
+# Belt and braces with the `human` label: resolve() drops the label too
+# (via respond_to_human), and parked_for_human is what feeds this queue, so
+# an answered ticket leaves by either route. Kept because the two can come
+# apart -- anything that re-labels a ticket would otherwise silently put a
+# settled escalation back in the queue.
 RESOLVED_KEY = "escalation_resolved"
 
 
