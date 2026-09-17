@@ -370,6 +370,57 @@ def has_unassigned_work(running_tickets: set[str] | None = None) -> bool:
     return next_unassigned_ticket(running_tickets) is not None
 
 
+def project_seat(project_id: str) -> str | None:
+    """The one seat already working this project, or None if that is not a
+    single, unambiguous answer.
+
+    Read from ticket metadata (`assigned_seat`), which `bd list --all`
+    returns. Exactly one seat across the project's stories is the common
+    case -- a project's specialist. Zero means the project has never been
+    seated (creating one is the product-owner's job), and more than one is
+    a real choice about which specialist a piece of work belongs to; both
+    are left to the product-owner."""
+    seen: set[str] = set()
+    for issue in beads.list_all():
+        if issue.get("issue_type") != WORK_ITEM_TYPE:
+            continue
+        if toolchain.project_id_for(issue["id"]) != project_id:
+            continue
+        seat = beads.assigned_seat(issue)
+        if seat:
+            seen.add(seat)
+            if len(seen) > 1:
+                return None
+    return seen.pop() if seen else None
+
+
+def assign_front(issue: dict) -> str | None:
+    """Assign a project's front ticket to its established seat, with no
+    model call. Returns the seat id, or None when the choice needs the
+    product-owner.
+
+    The ticket itself is already deterministic -- next_unassigned_ticket
+    picks the project's roadmpa front, highest priority, bd-ready. The only
+    thing a roadmpa cannot answer is which seat, so this is a fast path for
+    the case where the project already has exactly one: assigning it is not
+    a judgment call, and skipping the session removes minutes of latency
+    and ~40 model calls between every ticket (observed live 2026-09-17).
+    A seat that already declined this specific ticket is not eligible --
+    the product-owner's own rule -- so that opens the door to a session."""
+    seat_id = project_seat(toolchain.project_id_for(issue["id"]))
+    if not seat_id:
+        return None
+    if seat_id in beads.declined_by(issue):
+        return None
+    try:
+        beads.assign_to_seat(issue["id"], seat_id)
+    except Exception:
+        log.exception("could not auto-assign %s to %s", issue["id"], seat_id)
+        return None
+    return seat_id
+
+
+
 def _priority(issue: dict) -> int:
     """bd-native priority, 0 = highest. A missing or non-int value sorts
     last, so a ticket that has never been triaged can never preempt one
@@ -830,8 +881,24 @@ class Dispatcher:
                 challenger["id"], _priority(challenger),
                 assigned["id"], _priority(assigned),
             )
-        elif not has_unassigned_work(running_tickets):
+
+        # The ticket is already deterministic (the project's roadmpa front,
+        # highest priority, bd-ready). Whether a model is needed depends
+        # only on the seat: a project with no seat yet (create a
+        # specialist) or several (choose between them) is a judgment call,
+        # but a project with exactly one seat already working it is not --
+        # see assign_front.
+        front = next_unassigned_ticket(running_tickets)
+        if front is None:
             return "idle"
+        picked = assign_front(front)
+        if picked:
+            log.info(
+                "%s (front of %s) assigned to its project seat %s without a "
+                "product-owner session",
+                front["id"], toolchain.project_id_for(front["id"]), picked,
+            )
+            return "assigned"
 
         log.info("capacity free and unassigned work waiting -- waking product-owner")
         message = self.wake_product_owner()

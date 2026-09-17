@@ -88,10 +88,11 @@ def test_next_unassigned_ticket_prefers_higher_priority():
 
 
 def test_higher_priority_unassigned_work_preempts_assigned_backlog(monkeypatch):
-    """A P0 ticket no seat has been earmarked for must be brokered ahead
-    of a seat's already-assigned P2 backlog -- otherwise it sits at the
-    top of `bd ready` forever while lower-priority assigned work runs.
-    Regression for the Silent Run scaffolding starvation, 2026-09-04."""
+    """A P0 ticket no seat has been earmarked for must not sit behind a
+    seat's already-assigned P2 backlog. The project has exactly one seat, so
+    dispatch assigns it deterministically -- no product-owner session -- and
+    the next tick starts it ahead of the backlog. Regression for the Silent
+    Run scaffolding starvation, 2026-09-04."""
     project = beads.create("preempt proj", "d", issue_type="epic", priority=0)
     backlog = beads.create("assigned p2", "d", parent=project["id"], priority=2)
     beads.assign_to_seat(backlog["id"], "busy-seat")
@@ -107,15 +108,91 @@ def test_higher_priority_unassigned_work_preempts_assigned_backlog(monkeypatch):
         dispatcher, "next_unassigned_ticket", lambda *a, **k: beads.show(urgent["id"])
     )
     monkeypatch.setattr(
-        dispatcher.Dispatcher, "wake_product_owner", lambda self: "brokered urgent p0"
+        dispatcher.Dispatcher, "wake_product_owner",
+        lambda self: (_ for _ in ()).throw(AssertionError("no session expected")),
     )
 
     try:
         d = _dispatcher(max_agents=1)
-        assert d.tick() == "brokered"
+        assert d.tick() == "assigned"
+        assert beads.assigned_seat(beads.show(urgent["id"])) == "busy-seat", (
+            "the front ticket goes to the project's one seat without a model call"
+        )
         assert beads.show(backlog["id"])["status"] == "open", "assigned P2 must not be claimed"
     finally:
         beads.close(urgent["id"])
+
+
+# -- deterministic assignment (no product-owner session for the easy case)
+
+
+def test_project_seat_is_the_single_seat(monkeypatch):
+    _project(monkeypatch, [
+        _issue("proj-x.1", seat="seat-a"),
+        _issue("proj-x.2", seat=None),
+    ])
+    assert dispatcher.project_seat("proj-x") == "seat-a"
+
+
+def test_project_seat_is_none_with_no_seat(monkeypatch):
+    _project(monkeypatch, [_issue("proj-x.1", seat=None), _issue("proj-x.2", seat=None)])
+    assert dispatcher.project_seat("proj-x") is None
+
+
+def test_project_seat_is_none_with_more_than_one_seat(monkeypatch):
+    _project(monkeypatch, [
+        _issue("proj-x.1", seat="seat-a"),
+        _issue("proj-x.2", seat="seat-b"),
+    ])
+    assert dispatcher.project_seat("proj-x") is None
+
+
+def test_assign_front_skips_a_seat_that_declined_the_ticket(monkeypatch):
+    """The product-owner's own rule -- don't hand a ticket back to the seat
+    that declined it -- must hold on the deterministic path too, which then
+    opens the door to a session."""
+    declined = _issue("proj-x.1", seat=None)
+    declined["metadata"] = {"declined_by": "seat-a"}
+    _project(monkeypatch, [_issue("proj-x.2", seat="seat-a"), declined])
+
+    assert dispatcher.assign_front(declined) is None
+
+
+def test_a_single_seat_project_is_assigned_without_a_session(monkeypatch):
+    issues = [
+        _issue("proj-x.1", seat="seat-a", status="closed"),
+        _issue("proj-x.2", seat=None),
+    ]
+    _project(monkeypatch, issues)
+    calls = []
+    monkeypatch.setattr(
+        dispatcher.beads, "assign_to_seat", lambda tid, seat: calls.append((tid, seat))
+    )
+    monkeypatch.setattr(
+        dispatcher.Dispatcher, "wake_product_owner",
+        lambda self: (_ for _ in ()).throw(AssertionError("no session expected")),
+    )
+
+    d = _dispatcher(max_agents=1)
+
+    assert d.tick() == "assigned"
+    assert calls == [("proj-x.2", "seat-a")]
+
+
+def test_a_multi_seat_project_falls_back_to_the_product_owner(monkeypatch):
+    """Two established seats is a real choice about which specialist a piece
+    of work belongs to, so that stays a product-owner judgment call."""
+    issues = [
+        _issue("proj-x.1", seat="seat-a", status="closed"),
+        _issue("proj-x.2", seat="seat-b", status="closed"),
+        _issue("proj-x.3", seat=None, priority=2),
+    ]
+    _project(monkeypatch, issues)
+    monkeypatch.setattr(dispatcher.Dispatcher, "wake_product_owner", lambda self: "brokered")
+
+    d = _dispatcher(max_agents=1)
+
+    assert d.tick() == "brokered"
 
 
 def test_equal_priority_assigned_work_is_not_preempted(monkeypatch):

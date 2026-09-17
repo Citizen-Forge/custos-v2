@@ -135,11 +135,35 @@ def build_tools(conn, requesting_model):
 
     @tool
     def list_unassigned_tickets() -> str:
-        """List ready tickets not yet assigned to any seat."""
+        """Ready tickets not yet assigned to any seat, summarised as the
+        highest-priority one per project plus a count of the rest.
+
+        Deliberately summarised: a full dump runs past the harness's 20k
+        tool-output cap and arrives truncated mid-list (observed live
+        2026-09-17 with 79 unassigned tickets -- the model could not see the
+        tail and had to guess). Dispatch assigns one ticket, and the
+        project's front is the one that matters, so one line per project is
+        the actionable view."""
         tickets = beads.unassigned_ready()
         if not tickets:
             return "no unassigned tickets"
-        return "\n".join(f"{t['id']}: {t['title']} -- {t.get('description', '')}" for t in tickets)
+        by_project: dict[str, list] = {}
+        for t in tickets:
+            by_project.setdefault(t["id"].split(".", 1)[0], []).append(t)
+        lines = []
+        for project_id in sorted(
+            by_project,
+            key=lambda p: (min(t.get("priority", 99) for t in by_project[p]), p),
+        ):
+            group = sorted(
+                by_project[project_id], key=lambda t: (t.get("priority", 99), t["id"])
+            )
+            head = group[0]
+            extra = f" (+{len(group) - 1} more here)" if len(group) > 1 else ""
+            lines.append(f"{head['id']} [P{head.get('priority')}] {head['title']}{extra}")
+        if len(lines) > 40:
+            lines = lines[:40] + [f"... (+{len(lines) - 40} more projects)"]
+        return "\n".join(lines)
 
     @tool
     def assign_ticket(issue_id: str, seat_id: str) -> str:
