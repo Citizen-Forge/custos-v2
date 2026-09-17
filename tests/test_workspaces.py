@@ -501,3 +501,84 @@ def test_diff_reports_new_files(projects_root):
 def test_diff_is_empty_for_an_untouched_workspace(projects_root):
     workspaces.ensure("proj-empty")
     assert workspaces.diff_since("proj-empty", None).strip() == ""
+
+
+# -- the project's own test command -----------------------------------
+#
+# workspaces._run_tests_at was hardcoded to npm: a Godot project declares
+# `test_command` instead, and the mechanical result must still carry real
+# counts so a green exit with zero tests cannot pass as verification.
+
+
+def _marker_command(ran: int, passed: int, failed: int, exit_code: int = 0) -> str:
+    import sys
+    code = "; ".join([
+        f"print('# tests {ran}')",
+        f"print('# pass {passed}')",
+        f"print('# fail {failed}')",
+        f"raise SystemExit({exit_code})" if exit_code else "pass",
+    ])
+    return f'"{sys.executable}" -c "{code}"'
+
+
+def test_declared_test_command_is_run_and_parsed(projects_root, monkeypatch, tmp_path):
+    workspaces.ensure("proj-godot")
+    command = _marker_command(ran=3, passed=2, failed=1, exit_code=1)
+    monkeypatch.setattr(workspaces.toolchain, "test_command_for", lambda pid: command)
+
+    result = workspaces.run_tests("proj-godot")
+
+    assert result["ran"] == 3
+    assert result["passed"] == 2
+    assert result["failed"] == 1
+    assert result["exit"] == 1
+
+
+def test_declared_command_runs_with_the_workspace_as_cwd(projects_root, monkeypatch):
+    import sys
+    path = workspaces.ensure("proj-cwd")
+    open(os.path.join(path, "sentinel.txt"), "w").write("here")
+    command = (
+        f'"{sys.executable}" -c "'
+        "import os; print('# tests 1'); print('# pass 1'); print('# fail 0'); "
+        "print('CWD', os.path.basename(os.getcwd()))"
+        '"'
+    )
+    monkeypatch.setattr(workspaces.toolchain, "test_command_for", lambda pid: command)
+
+    result = workspaces.run_tests("proj-cwd")
+
+    assert result["ran"] == 1
+    assert "CWD proj-cwd" in result["tail"]
+
+
+def test_a_missing_test_command_is_reported_not_crashed(projects_root, monkeypatch):
+    workspaces.ensure("proj-missing")
+    monkeypatch.setattr(
+        workspaces.toolchain, "test_command_for",
+        lambda pid: "definitely-not-a-real-command-xyz --run",
+    )
+
+    result = workspaces.run_tests("proj-missing")
+
+    assert result["ran"] == 0
+    assert result["exit"] == -1
+    assert "not found" in result["tail"]
+
+
+def test_no_declared_command_and_no_package_json_runs_nothing(projects_root, monkeypatch):
+    """The absence of a suite must stay a None the verifier's model weighs,
+    not an invented empty result."""
+    workspaces.ensure("proj-none")
+    monkeypatch.setattr(workspaces.toolchain, "test_command_for", lambda pid: None)
+
+    assert workspaces.run_tests("proj-none") is None
+
+
+def test_parse_test_counts_reads_node_markers():
+    text = "# tests 12\n# pass 11\n# fail 1\nsome other output\n"
+    assert workspaces._parse_test_counts(text) == (12, 11, 1)
+
+
+def test_parse_test_counts_is_zero_when_no_markers_ran():
+    assert workspaces._parse_test_counts("nothing relevant") == (0, 0, 0)

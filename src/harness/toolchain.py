@@ -72,6 +72,35 @@ def set_for_project(project_id: str, commands: list[str]) -> dict:
     return beads.set_metadata(project_id, METADATA_KEY, ",".join(commands))
 
 
+# A project's own test command, declared the same way as its toolchain.
+# Exists because workspaces._run_tests_at was hardcoded to Node/npm: it
+# only recognised a package.json with a `test` script, so a Godot project
+# (Subspatial) had no mechanical suite for the verifier to run -- the
+# verifier would get None and judge every ticket without ever executing
+# its tests. A declared command keeps the harness engine-agnostic rather
+# than adding a Godot branch to workspaces: whatever a project's tests
+# are, it names the command. The command runs with the workspace as its
+# cwd, and should print "# tests N" / "# pass N" / "# fail N" (Node's
+# own markers) so the existing parser reads it unchanged.
+TEST_COMMAND_KEY = "test_command"
+
+
+def test_command_for(project_id: str) -> str | None:
+    """The command that runs a project's test suite, or None if it has
+    none declared. Fails open like check_ticket: an unreadable project
+    simply has no declared command."""
+    try:
+        project = beads.show(project_id)
+    except Exception:
+        return None
+    return (project.get("metadata") or {}).get(TEST_COMMAND_KEY) or None
+
+
+def set_test_command_for_project(project_id: str, command: str) -> dict:
+    """Declare the command that runs a project's tests."""
+    return beads.set_metadata(project_id, TEST_COMMAND_KEY, command)
+
+
 def report() -> list[dict]:
     """Every project with a declared toolchain and whether it is satisfied
     -- so an operator can see a gap before agents run into it."""

@@ -48,6 +48,7 @@ try:  # Linux only; the harness runs in a container, but tests can run anywhere.
 except ImportError:  # pragma: no cover - not reachable in the deployment
     fcntl = None  # type: ignore[assignment]
 
+from . import toolchain
 from .config import PROJECTS_ROOT
 
 
@@ -805,20 +806,86 @@ def tree_for_ticket(ticket_id: str) -> str:
 
 
 def run_tests(project_id: str, timeout: int = 600) -> dict | None:
-    return _run_tests_at(path_for(project_id), timeout)
+    return _run_tests_at(
+        path_for(project_id), timeout, toolchain.test_command_for(project_id)
+    )
 
 
 def run_tests_for_ticket(ticket_id: str, timeout: int = 600) -> dict | None:
-    return _run_tests_at(tree_for_ticket(ticket_id), timeout)
+    return _run_tests_at(
+        tree_for_ticket(ticket_id), timeout,
+        toolchain.test_command_for(project_id_for(ticket_id)),
+    )
 
 
-def _run_tests_at(path: str, timeout: int = 600) -> dict | None:
+def _parse_test_counts(text: str) -> tuple[int, int, int]:
+    """(ran, passed, failed) from a suite's `# tests N` markers.
+
+    Node's test runner prints these; a project with its own test command
+    is asked to print them too so one parser serves every engine. Missing
+    markers read as zero -- which, with a non-zero exit or a command that
+    never ran, is exactly the "green command that verified nothing" the
+    caller has to be able to distinguish."""
+    def _count(label: str) -> int:
+        for line in text.splitlines():
+            if line.startswith(f"# {label} "):
+                try:
+                    return int(line.split()[-1])
+                except ValueError:
+                    return 0
+        return 0
+    return _count("tests"), _count("pass"), _count("fail")
+
+
+def _run_declared_command(path: str, command: str, timeout: int) -> dict:
+    """Run a project's own declared test command in its workspace.
+
+    Generic on purpose: the harness should not know what Godot is. The
+    command is split without a shell (so a metadata value cannot smuggle
+    shell metacharacters into execution) and run with the workspace as
+    cwd, which is the root a ticket's tests expect."""
+    import shlex
+
+    try:
+        argv = shlex.split(command)
+    except ValueError as e:
+        return {"ran": 0, "passed": 0, "failed": 0, "exit": -1,
+                "tail": f"unparseable test_command ({e}): {command}"}
+    if not argv:
+        return {"ran": 0, "passed": 0, "failed": 0, "exit": -1,
+                "tail": "empty test_command"}
+    try:
+        out = subprocess.run(
+            argv, cwd=path, capture_output=True, text=True, timeout=timeout
+        )
+    except FileNotFoundError:
+        return {"ran": 0, "passed": 0, "failed": 0, "exit": -1,
+                "tail": f"test_command not found: {argv[0]}"}
+    except subprocess.TimeoutExpired:
+        return {"ran": 0, "passed": 0, "failed": 0, "exit": -1,
+                "tail": f"test_command timed out: {command}"}
+
+    text = (out.stdout or "") + (out.stderr or "")
+    ran, passed, failed = _parse_test_counts(text)
+    return {
+        "ran": ran,
+        "passed": passed,
+        "failed": failed,
+        "exit": out.returncode,
+        "tail": "\n".join(text.splitlines()[-15:]),
+    }
+
+
+def _run_tests_at(path: str, timeout: int = 600,
+                  test_command: str | None = None) -> dict | None:
     """Best-effort mechanical run of a project's own test suite.
 
-    Returns None when there is nothing to run -- no package.json, or no
-    `test` script in it. Absence of a suite is something the verifier's
-    model should weigh against the acceptance criteria, not something to
-    decide mechanically here.
+    Returns None when there is nothing to run. If the project declares a
+    `test_command`, that is the suite. Otherwise the legacy Node path
+    applies: no package.json, or no `test` script in it, means nothing to
+    run. Absence of a suite is something the verifier's model should weigh
+    against the acceptance criteria, not something to decide mechanically
+    here.
 
     Otherwise returns {"ran", "passed", "failed", "exit", "tail"}.
 
@@ -828,12 +895,16 @@ def _run_tests_at(path: str, timeout: int = 600) -> dict | None:
     `node --test dist/test/*.js` alongside a tsconfig that only ever
     emitted src/, so `npm test` printed "# tests 0" and exited 0 -- a
     green command that verified nothing, on the ticket 73 others were
-    blocked behind.
+    blocked behind. The same trap is why a declared command's counts --
+    not just its exit code -- are what get returned.
 
     Deliberately does NOT install dependencies: a missing node_modules
     should not be reported as the ticket's failure, and a verifier step
     should not reach the network.
     """
+    if test_command:
+        return _run_declared_command(path, test_command, timeout)
+
     pkg = os.path.join(path, "package.json")
     if not os.path.isfile(pkg):
         return None
@@ -854,20 +925,11 @@ def _run_tests_at(path: str, timeout: int = 600) -> dict | None:
         return {"ran": 0, "passed": 0, "failed": 0, "exit": -1, "tail": "npm test timed out"}
 
     text = (out.stdout or "") + (out.stderr or "")
-
-    def _count(label: str) -> int:
-        for line in text.splitlines():
-            if line.startswith(f"# {label} "):
-                try:
-                    return int(line.split()[-1])
-                except ValueError:
-                    return 0
-        return 0
-
+    ran, passed, failed = _parse_test_counts(text)
     return {
-        "ran": _count("tests"),
-        "passed": _count("pass"),
-        "failed": _count("fail"),
+        "ran": ran,
+        "passed": passed,
+        "failed": failed,
         "exit": out.returncode,
         "tail": "\n".join(text.splitlines()[-15:]),
     }
@@ -879,6 +941,7 @@ def _run_tests_at(path: str, timeout: int = 600) -> dict | None:
 _CRITERIA_FILES = (
     "package.json", "tsconfig.json", "README.md", "readme.md",
     "pyproject.toml", "setup.cfg", "Makefile", "Cargo.toml", "go.mod",
+    "project.godot",
 )
 
 
