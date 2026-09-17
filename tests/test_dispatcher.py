@@ -45,6 +45,12 @@ def test_next_assigned_ticket_finds_assigned_work(monkeypatch):
     project = beads.create("assigned proj", "d", issue_type="epic", priority=1)
     story = beads.create("assigned story", "d", parent=project["id"])
     beads.assign_to_seat(story["id"], "some-seat")
+    # Pin the selector's ready pool to this test's ticket. The project holds
+    # no other ticket, but earlier tests in the same session leave their own
+    # ready assigned tickets in the shared DB, and a constant _order makes
+    # them all tie -- so the min was decided by a leftover, not by the
+    # ticket under test.
+    monkeypatch.setattr(beads, "ready", lambda: [beads.show(story["id"])])
 
     issue, seat_id = dispatcher.next_assigned_ticket()
 
