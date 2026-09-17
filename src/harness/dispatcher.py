@@ -513,6 +513,21 @@ class Dispatcher:
                     "%s: tree reset to the integration tip (was %s)",
                     issue["id"], previous[:12],
                 )
+            # And the integration checkout itself, before the agent touches
+            # anything: a run that was killed outright never got to file
+            # what it left in there, and absorb_stray_edits would otherwise
+            # hand it to THIS ticket as its own work. See
+            # workspaces.discard_stray_edits for the live case.
+            try:
+                stray = workspaces.discard_stray_edits(issue["id"])
+                if stray:
+                    log.warning(
+                        "%s: cleared %d stray file(s) left in the project root by an "
+                        "earlier run that never filed them: %s",
+                        issue["id"], len(stray), ", ".join(stray[:8]),
+                    )
+            except Exception:
+                log.exception("could not clear stray files for %s", issue["id"])
             with PostgresSaver.from_conn_string(self.conn_string) as checkpointer:
                 checkpointer.setup()
                 with psycopg.connect(self.conn_string, autocommit=True) as conn:

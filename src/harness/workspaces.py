@@ -375,6 +375,80 @@ def reset_for_attempt(ticket_id: str) -> str | None:
     return previous
 
 
+def discard_stray_edits(ticket_id: str) -> list[str]:
+    """Clear the project's integration checkout of anything an EARLIER run
+    left in it. Returns the paths cleared, for logging.
+
+    The mirror of absorb_stray_edits, and added because that function's
+    central assumption is not true of a run that is killed outright.
+    absorb_stray_edits credits every dirty path in the root to whichever
+    ticket runs next, justified as "whatever appeared there during this run
+    can only be this ticket's" -- but a run that is SIGKILLed (a container
+    restart, an OOM, an operator's docker stop) never reaches that step, so
+    its files stay in the root and the NEXT ticket inherits them as its own
+    work.
+
+    That is not theoretical. Found live 2026-09-17: workspace-9jg.2.1's
+    commit carries src/OrderQueueSystem.ts (another ticket's delivered
+    file, DELETED), oq_new.ts, oqtest_new.ts and failnow.txt, while the two
+    emission files its own commit message names are absent from it. They
+    were workspace-9jg.1.3's leftovers -- that run was killed by the
+    container restart at 09:29:28 and 2.1 absorbed them ninety minutes
+    later. The verifier then failed 2.1 on evidence that was never its
+    work, twice, and parked it; the same shape accounts for 1.1, 1.1.1 and
+    1.3, whose stored records cannot be repaired by re-running anything.
+
+    So an attempt starts from a pristine checkout: tracked edits return to
+    their committed state and untracked files are removed. The work is
+    NOT rescued first, and cannot be -- a dead run's files carry nothing
+    that says which ticket they were for, which is precisely the problem --
+    so the paths are returned for the caller to log loudly rather than
+    vanish quietly.
+
+    Exclusions mirror absorb_stray_edits exactly: the harness's issue
+    database, the other tickets' trees and the dependency tree are not
+    strays, and clearing them would break what the recovery exists to
+    protect."""
+    project_id = project_id_for(ticket_id)
+    root = path_for(project_id)
+    if not os.path.isdir(root):
+        return []
+
+    out = _git(["status", "--porcelain", "-uall"], root)
+    if out.returncode != 0:
+        return []
+
+    cleared: list[str] = []
+    tracked: list[str] = []
+    for line in out.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:].strip()
+        # `git status` quotes paths with special characters.
+        if len(path) > 1 and path[0] == '"' and path[-1] == '"':
+            path = path[1:-1]
+        if not path or path == "node_modules" or path.startswith("node_modules/"):
+            continue
+        if path == ".beads" or path.startswith(".beads/"):
+            continue
+        if path == WORKTREES_DIRNAME or path.startswith(f"{WORKTREES_DIRNAME}/"):
+            continue
+
+        if _git(["ls-files", "--error-unmatch", path], root).returncode == 0:
+            tracked.append(path)
+        else:
+            target = os.path.join(root, path)
+            try:
+                os.remove(target)
+            except OSError:
+                continue
+        cleared.append(path)
+
+    if tracked:
+        _git(["checkout", "--", *tracked], root)
+    return cleared
+
+
 def absorb_stray_edits(ticket_id: str) -> list[str]:
     """Move changes an agent made in the project's integration checkout into
     its own worktree, and put the integration checkout back.

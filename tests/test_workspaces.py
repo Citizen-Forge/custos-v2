@@ -282,6 +282,57 @@ def test_a_stray_deletion_is_restored_not_absorbed(projects_root):
     assert os.path.exists(os.path.join(root, "tracked.ts")), "put back"
 
 
+def test_an_attempt_clears_strays_a_killed_run_left_in_the_root(projects_root):
+    """absorb_stray_edits credits whatever is dirty in the root to the ticket
+    that runs next, which is only true if every run files what it leaves
+    there. A run that is SIGKILLed -- a container restart, an OOM, an
+    operator's docker stop -- never does, so its files would be inherited by
+    the next ticket as its own work.
+
+    Found live 2026-09-17: workspace-9jg.2.1's commit carries
+    workspace-9jg.1.3's src/OrderQueueSystem.ts (DELETED), oq_new.ts,
+    oqtest_new.ts and failnow.txt, and none of the emission files its own
+    commit message names -- leftovers from a run killed by a container
+    restart ninety minutes earlier. The verifier failed 2.1 on that
+    evidence, twice, and parked it."""
+    workspaces.for_ticket("workspace-9jg.1.1")
+    root = workspaces.path_for("workspace-9jg")
+    open(os.path.join(root, "dead_run_scratch.ts"), "w").write("left by a killed run")
+
+    cleared = workspaces.discard_stray_edits("workspace-9jg.1.1")
+
+    assert cleared == ["dead_run_scratch.ts"]
+    assert not os.path.exists(os.path.join(root, "dead_run_scratch.ts")), "not inherited"
+
+
+def test_clearing_strays_leaves_the_harness_store_and_worktrees(projects_root):
+    """Same exclusions as the absorb step they mirror: the issue database and
+    the other tickets' trees are not strays."""
+    workspaces.for_ticket("workspace-9jg.1.1")
+    root = workspaces.path_for("workspace-9jg")
+    os.makedirs(os.path.join(root, ".beads"), exist_ok=True)
+    open(os.path.join(root, ".beads", "interactions.jsonl"), "w").write("noise")
+
+    assert workspaces.discard_stray_edits("workspace-9jg.1.1") == []
+    assert os.path.exists(os.path.join(root, ".beads", "interactions.jsonl")), "left alone"
+
+
+def test_an_attempt_puts_a_stray_tracked_edit_back(projects_root):
+    """An untracked leftover is not the only thing a killed run leaves: it can
+    edit tracked files too, and absorb_stray_edits would copy those into the
+    next ticket's tree just the same."""
+    workspaces.for_ticket("workspace-9jg.1.1")
+    root = workspaces.path_for("workspace-9jg")
+    open(os.path.join(root, "tracked.ts"), "w").write("committed")
+    workspaces.commit_all("workspace-9jg", "workspace-9jg.1.0: seed")
+    open(os.path.join(root, "tracked.ts"), "w").write("edited by a killed run")
+
+    cleared = workspaces.discard_stray_edits("workspace-9jg.1.1")
+
+    assert cleared == ["tracked.ts"]
+    assert open(os.path.join(root, "tracked.ts")).read() == "committed"
+
+
 def test_a_worktree_gets_the_project_dependencies_linked_in(projects_root):
     """Agents need the toolchain, but dependencies must never be part of a
     ticket's committed work: a tracked node_modules is staged whole by
