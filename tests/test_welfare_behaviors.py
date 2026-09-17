@@ -72,6 +72,31 @@ def test_dismissing_a_ticket_also_clears_the_human_label():
     }
 
 
+def test_answering_records_the_decision_so_the_verifier_defers():
+    """The label says "parked"; the decision says "judged". Without the
+    latter the verifier re-litigated answered tickets -- see
+    verifier.awaiting_verdict and beads.DECISION_KEY."""
+    beads.ensure_initialized()
+    issue = beads.create("decision test", "x")
+    beads.claim(issue["id"])
+    beads.flag_for_human(issue["id"], "which approach?")
+
+    beads.respond_to_human(issue["id"], "go with option A")
+
+    assert beads.human_decision(beads.show(issue["id"])) == "answered"
+
+
+def test_dismissing_records_the_decision_too():
+    beads.ensure_initialized()
+    issue = beads.create("decision test 2", "x")
+    beads.claim(issue["id"])
+    beads.flag_for_human(issue["id"], "not sure about this")
+
+    beads.dismiss_human(issue["id"], reason="no longer needed")
+
+    assert beads.human_decision(beads.show(issue["id"])) == "dismissed"
+
+
 def test_dismiss_human_closes_with_reason_recorded():
     beads.ensure_initialized()
     issue = beads.create("dismiss test", "x")

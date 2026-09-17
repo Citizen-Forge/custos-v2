@@ -42,6 +42,32 @@ def test_ticket_with_no_acceptance_criteria_is_not_a_candidate():
     assert verifications.get_for_issue(conn, issue["id"]) is None
 
 
+def test_an_answered_ticket_is_never_re_judged():
+    """A person's decision ends the question. Without this the verifier judged
+    accepted tickets again on their own contaminated commit record, failed
+    them, and reopened them -- so the one path that could end this class of
+    ticket was undone within minutes. Found live 2026-09-17 on
+    workspace-9jg.1.1.1, whose notes read, in order: "human response:
+    Accepted as already delivered / no-op by construction. Ruling:
+    src/TickLoop.ts is the single canonical fixed-step loop...", then
+    "verifier fail #1: The acceptance criteria claim src/FixedStepLoop.ts
+    does not exist at HEAD...". The ticket had two more agent runs in front
+    of it, for the same refusal."""
+    conn = _conn()
+    beads.ensure_initialized()
+    issue = beads.create(
+        "already accepted", "x", acceptance_criteria="must do the thing"
+    )
+    beads.claim(issue["id"])
+    beads.flag_for_human(issue["id"], "was this ever delivered?")
+    beads.respond_to_human(issue["id"], "accepted as already delivered")
+
+    result = verify_ticket(conn, issue["id"], FakeModel("should never be called"))
+
+    assert result is None
+    assert verifications.get_for_issue(conn, issue["id"]) is None
+
+
 def test_ticket_not_yet_closed_is_not_a_candidate():
     conn = _conn()
     beads.ensure_initialized()

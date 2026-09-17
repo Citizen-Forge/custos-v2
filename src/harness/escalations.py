@@ -131,10 +131,13 @@ def requeue(conn, issue_id: str, directive: str) -> int:
     n = attempts(issue) + 1
     verifier.requeue_for_rework(conn, issue_id, directive, attempt=n)
     beads.set_metadata(issue_id, "escalation_attempts", str(n))
-    try:
-        # A fresh attempt is not an answered one: if it escalates again,
-        # that is a new question and it should be considered.
-        beads.unset_metadata(issue_id, RESOLVED_KEY)
-    except Exception:
-        log.exception("could not clear %s on %s", RESOLVED_KEY, issue_id)
+    for key in (RESOLVED_KEY, beads.DECISION_KEY):
+        try:
+            # A fresh attempt is not an answered one: if it escalates again,
+            # that is a new question and it should be considered -- and the
+            # verifier must judge the new work rather than deferring to a
+            # decision this requeue has just superseded.
+            beads.unset_metadata(issue_id, key)
+        except Exception:
+            log.exception("could not clear %s on %s", key, issue_id)
     return n

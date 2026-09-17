@@ -389,6 +389,31 @@ def is_flagged_for_human(issue: dict) -> bool:
     return "human" in (issue.get("labels") or [])
 
 
+# Set when a person -- or the product-owner answering for one -- has JUDGED
+# a ticket, as opposed to merely parking it. The verifier defers to it.
+#
+# Without this, an acceptance was not durable: the verifier judged the
+# ticket again on its next pass, failed it on the ticket's own
+# contaminated commit record, and reopened it. Found live 2026-09-17 on
+# workspace-9jg.1.1.1, whose notes read, in order:
+#     human response: Accepted as already delivered / no-op by construction.
+#     Ruling: src/TickLoop.ts is the single canonical fixed-step loop...
+#     verifier fail #1: The acceptance criteria claim src/FixedStepLoop.ts
+#     does not exist at HEAD, but the diff's deletion of that file is not
+#     reflected in the live working tree...
+# So the one path that could end this class of ticket was being undone
+# within minutes, and the ticket went round again -- another agent run, the
+# same refusal, the same fail. A decision by a person is not evidence the
+# model gets to re-weigh.
+DECISION_KEY = "human_decision"
+
+
+def human_decision(issue: dict) -> str | None:
+    """`answered` or `dismissed` when a person has judged this ticket, else
+    None. See DECISION_KEY."""
+    return (issue.get("metadata") or {}).get(DECISION_KEY)
+
+
 def parked_for_human(include_closed: bool = False) -> list[dict]:
     """Every human-flagged issue, WITH notes/metadata/labels.
 
@@ -441,6 +466,9 @@ def respond_to_human(issue_id: str, response: str, actor: str = DEFAULT_ACTOR) -
     are unaffected and still read as blocked, which is the whole point."""
     append_note(issue_id, f"human response: {response}", actor=actor)
     remove_human_flag(issue_id, actor=actor)
+    # Record that a PERSON judged this ticket, so the verifier does not
+    # re-litigate it. See DECISION_KEY.
+    set_metadata(issue_id, DECISION_KEY, "answered")
     return close(issue_id, reason="Responded")
 
 
@@ -452,6 +480,7 @@ def dismiss_human(issue_id: str, reason: str | None = None, actor: str = DEFAULT
     if reason:
         append_note(issue_id, f"dismissed: {reason}", actor=actor)
     remove_human_flag(issue_id, actor=actor)
+    set_metadata(issue_id, DECISION_KEY, "dismissed")
     return close(issue_id, reason="Dismissed")
 
 

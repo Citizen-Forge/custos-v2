@@ -237,7 +237,10 @@ def requeue_for_rework(conn, issue_id: str, reasoning: str, attempt: int) -> Non
     instead of skipping it."""
     beads.set_metadata(issue_id, "rework_count", str(attempt))
     beads.set_metadata(issue_id, "rework_reason", reasoning[:4000])
-    for key in ("completion_summary", "work_commit"):
+    # human_decision goes with them: requeueing means the decision that
+    # stood is superseded, and the next attempt's work has to be judged on
+    # its own merits rather than skipped as already-answered.
+    for key in ("completion_summary", "work_commit", beads.DECISION_KEY):
         try:
             beads.unset_metadata(issue_id, key)
         except Exception:
@@ -271,6 +274,12 @@ def awaiting_verdict(conn, issue: dict) -> bool:
     its dependents for no reason. The one exception is a ticket explicitly
     requeued for rework -- its old verdict must not stand in the way of
     judging the new work."""
+    if beads.human_decision(issue):
+        # A person has judged it. Re-weighing a decision is not judging
+        # work, and doing it here reopened tickets that were already
+        # accepted on the strength of a contaminated commit record -- see
+        # beads.DECISION_KEY for the live case.
+        return False
     if not beads.acceptance_criteria(issue):
         return False
     if issue.get("status") != "closed":

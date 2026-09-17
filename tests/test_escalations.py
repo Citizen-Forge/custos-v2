@@ -83,6 +83,19 @@ def test_requeue_spends_one_attempt_and_reopens():
     assert int((current.get("metadata") or {}).get("escalation_attempts")) == 1
 
 
+def test_requeueing_supersedes_the_decision_that_stood():
+    """A requeue is the product-owner saying "do more work", which
+    supersedes the answer that was there -- so the next attempt must be
+    judged on its own merits rather than skipped as already-answered."""
+    story = _escalated("esc-l")
+    beads.respond_to_human(story["id"], "accepted as delivered")
+    assert beads.human_decision(beads.show(story["id"])) == "answered"
+
+    escalations.requeue(_conn(), story["id"], "cause fixed; try again")
+
+    assert beads.human_decision(beads.show(story["id"])) is None
+
+
 def test_a_resolved_escalation_leaves_the_queue_for_good():
     """An answered escalation must not come back. The queue only ever asked
     "is this parked?", so a resolved ticket was reconsidered on the next
