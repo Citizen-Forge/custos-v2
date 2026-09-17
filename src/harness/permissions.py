@@ -120,6 +120,54 @@ _GIT_REMOTE_SUBCOMMANDS = {
     "credential", "http-fetch", "http-push", "imap-send",
 }
 
+# Commands that break the harness's own bookkeeping if an agent runs them,
+# regardless of what the classifier thinks. Unlike the allow-list filters
+# above (which only decide whether to SKIP the classifier), these are hard
+# denials in the same class as check_within_workspace: an integrity
+# boundary, not a task-semantic judgment, so they are not the classifier's
+# call to override.
+#
+# Found live 2026-09-17: an agent closed its own ticket and ran
+# `git update-ref refs/heads/master HEAD` from its worktree, putting
+# unverified work on the integration branch and leaving the integration
+# checkout's working tree stale (HEAD had the files, the index did not).
+# The classifier allowed both -- neither is a remote, network or privilege
+# operation, and the completion gate assumes the agent reports completion
+# through complete_ticket rather than running the raw mutation. A verb
+# blacklist is bypassable (sh -c, python -c), which is why
+# workspaces.revert_unexpected_integration_move exists as the mechanical
+# backstop; this closes the direct path.
+_FORBIDDEN_GIT_SUBCOMMANDS = {
+    # move/create/delete refs directly -- the integration branch is the
+    # harness's to advance (verifier.land), never an agent's
+    "update-ref", "symbolic-ref", "pack-refs",
+    # change HEAD, the index or the working tree: the harness owns the trees
+    "reset", "checkout", "switch", "rebase", "cherry-pick", "revert",
+    "stash", "worktree", "filter-branch", "replace", "gc", "prune",
+}
+
+# `git branch`/`git tag` are read-only without these; with them they move
+# or delete refs.
+_FORBIDDEN_GIT_FLAGS = {
+    "branch": {"-f", "-D", "-d", "-m", "-M", "--force", "--delete", "--move"},
+    "tag": {"-f", "-d", "--force", "--delete"},
+}
+
+# git global options that consume the next token, so the subcommand is the
+# token after their value (e.g. `git -C /repo update-ref ...`).
+_GIT_VALUE_FLAGS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
+
+# bd subcommands that mutate the board. An agent reports completion through
+# the harness's own tools (complete_ticket/refuse_ticket/decline_ticket),
+# which record it correctly; the raw mutation bypasses the completion gate
+# and the verifier.
+_FORBIDDEN_BD_SUBCOMMANDS = {
+    "close", "delete", "reopen", "update", "assign", "set-state", "label",
+    "tag", "dep", "link", "duplicate", "supersede", "promote", "undo",
+    "restore", "compact", "dolt", "sync", "init", "bootstrap", "hooks",
+    "import", "gate", "merge-slot", "swarm", "federation", "branch", "vc",
+}
+
 # Inline-code flags for interpreters: `node -e "..."`, `python -c "..."`.
 # The verb is allowed (running the project's code IS the job), but an
 # ad-hoc snippet that bypasses the project's own scripts is exactly the
@@ -281,6 +329,95 @@ def _shell_is_allowlisted(command: str, workspace_root: str | None) -> bool:
             seg.append(tok)
         i += 1
     return _segment_ok(seg, workspace_root)
+
+
+def _git_subcommand(rest: list[str]) -> str | None:
+    """The git subcommand, skipping global options and their values."""
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a in _GIT_VALUE_FLAGS:
+            i += 2
+            continue
+        if a.startswith("--") and "=" in a:
+            i += 1
+            continue
+        if a.startswith("-"):
+            i += 1
+            continue
+        return a
+    return None
+
+
+def _segment_forbidden(seg: list[str]) -> str | None:
+    i = 0
+    while i < len(seg) and _is_env_assignment(seg[i]):
+        i += 1
+    if i >= len(seg):
+        return None
+    verb = os.path.basename(seg[i])
+    rest = seg[i + 1:]
+
+    if verb == "git":
+        sub = _git_subcommand(rest)
+        if sub in _FORBIDDEN_GIT_SUBCOMMANDS:
+            return (
+                f"`git {sub}` edits the repository's own refs or working tree, which the "
+                "harness owns; ticket work is landed by the verifier-gated merge. Use the "
+                "file tools and report completion with complete_ticket."
+            )
+        flags = _FORBIDDEN_GIT_FLAGS.get(sub or "", set())
+        if flags and any(a in flags for a in rest):
+            return f"`git {sub}` with a force/delete/move flag rewrites refs, which is not allowed."
+    elif verb == "bd":
+        sub = next((a for a in rest if not a.startswith("-")), None)
+        if sub in _FORBIDDEN_BD_SUBCOMMANDS:
+            return (
+                "`bd` board mutations are not run directly by agents; report completion with "
+                "complete_ticket/refuse_ticket/decline_ticket and let the harness record it."
+            )
+    return None
+
+
+def forbidden_reason(tool_name: str, tool_args: dict) -> str | None:
+    """A hard, non-classifier-overridable reason this call must not run, or None.
+
+    Applied before `is_statically_safe`/the classifier in the graph's
+    permission_gate. Deliberately narrow: only the commands that would move
+    the integration branch or mutate the board outside the harness's own
+    pathways (see _FORBIDDEN_GIT_SUBCOMMANDS / _FORBIDDEN_BD_SUBCOMMANDS).
+    Compound commands are split, so `cd x && git update-ref ...` is caught
+    too."""
+    if tool_name != "shell_exec":
+        return None
+    try:
+        command = tool_args.get("command", "")
+    except Exception:
+        return None
+    tokens = _tokenize(command)
+    if not tokens:
+        return None
+    segments: list[list[str]] = [[]]
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in _SEGMENT_SEPARATORS or tok in _GROUPING:
+            segments.append([])
+        elif tok in _REDIRECT_OPS or (
+            tok.rstrip("0123456789") in _REDIRECT_OPS and any(c.isdigit() for c in tok)
+        ):
+            if segments[-1] and segments[-1][-1].isdigit():
+                segments[-1].pop()
+            i += 2
+            continue
+        else:
+            segments[-1].append(tok)
+        i += 1
+    for seg in segments:
+        reason = _segment_forbidden(seg)
+        if reason:
+            return reason
+    return None
 
 
 def is_statically_safe(tool_name: str, tool_args: dict, workspace_root: str | None) -> bool:

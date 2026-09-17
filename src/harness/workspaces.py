@@ -152,6 +152,11 @@ def ensure(project_id: str) -> str:
         # The container sets a system-wide git identity (see Dockerfile),
         # so commits work without further configuration here.
     _ensure_gitignore(path)
+    # Seed the integration-tip bookkeeping for a repo that predates it (or
+    # was just created). Never overwrites a recorded tip -- that record is
+    # what revert_unexpected_integration_move compares against.
+    if known_integration_tip(project_id) is None:
+        record_integration_tip(project_id)
     return path
 
 
@@ -335,6 +340,73 @@ def head_for_ticket(ticket_id: str) -> str | None:
     if os.path.exists(os.path.join(worktree, ".git")):
         return head_at(worktree)
     return head(project_id_for(ticket_id))
+
+
+# -- integration-tip bookkeeping --------------------------------------
+#
+# The integration branch may only be advanced by merge_to_integration
+# (verifier.land). Found live 2026-09-17: an agent ran
+# `git update-ref refs/heads/master HEAD` from its worktree, putting
+# unverified work straight onto the integration branch and leaving the
+# integration checkout's working tree stale (HEAD had the files, the index
+# did not). permissions.forbidden_reason blocks the direct command; this is
+# the mechanical backstop that does not care HOW the ref moved, because a
+# verb blacklist is bypassable (`sh -c`, a script, `python -c`).
+
+_TIP_MARKER = ".integration_tip"
+
+
+def _tip_marker_path(project_id: str) -> str:
+    return os.path.join(worktrees_root(project_id), _TIP_MARKER)
+
+
+def record_integration_tip(project_id: str) -> str | None:
+    """Remember the integration branch's current commit as the one the
+    harness put there. Called after every gated merge, and to seed a repo
+    that predates this bookkeeping."""
+    tip = head(project_id)
+    if not tip:
+        return None
+    try:
+        os.makedirs(worktrees_root(project_id), exist_ok=True)
+        with open(_tip_marker_path(project_id), "w") as fh:
+            fh.write(tip)
+    except OSError:
+        return None
+    return tip
+
+
+def known_integration_tip(project_id: str) -> str | None:
+    try:
+        with open(_tip_marker_path(project_id)) as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
+def revert_unexpected_integration_move(project_id: str) -> str | None:
+    """Restore the integration branch if it moved outside the gated merge.
+
+    Returns the rogue commit it had been moved to, or None when nothing
+    moved or the move cannot be safely undone (a rewritten, non-forward
+    history -- reported by the caller, never force-reset). On a forward
+    move the ref and the checkout go back to the recorded tip, so the
+    ticket's own commit stays on its ticket branch and the normal
+    verify-then-land path still runs.
+
+    Fails open: no recorded tip (an older repo) means no check, not a
+    reason to touch anything."""
+    marker = known_integration_tip(project_id)
+    current = head(project_id)
+    if not marker or not current or marker == current:
+        return None
+    repo = path_for(project_id)
+    if _git(["merge-base", "--is-ancestor", marker, current], repo).returncode != 0:
+        return current  # history rewritten: caller flags, we do not reset
+    branch = _current_branch(repo) or integration_branch()
+    _git(["update-ref", f"refs/heads/{branch}", marker], repo)
+    _git(["reset", "--hard", marker], repo)
+    return current
 
 
 def reset_for_attempt(ticket_id: str) -> str | None:
@@ -697,6 +769,10 @@ def merge_to_integration(ticket_id: str) -> tuple[bool, str]:
         if out.returncode != 0:
             _git(["merge", "--abort"], repo)
             return False, (out.stderr.strip() or out.stdout.strip()).replace("\n", " ")[:400]
+        # This is the harness's own advance of the integration branch; the
+        # marker is what tells a later revert_unexpected_integration_move
+        # apart a gated merge from an agent moving the ref itself.
+        record_integration_tip(project_id)
         return True, ""
 
 

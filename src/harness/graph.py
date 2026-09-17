@@ -301,7 +301,14 @@ def build_graph_from_model(model, checkpointer, tools=None, classify=None, inter
 
         verdicts = {}
         for call in tool_calls:
-            if permissions.is_statically_safe(call["name"], call["args"], workspace_root):
+            forbidden = permissions.forbidden_reason(call["name"], call["args"])
+            if forbidden:
+                # Hard denial, ahead of both the allow-list and the
+                # classifier: these commands move the integration branch or
+                # mutate the board outside the harness's own pathways, so
+                # they are not a judgment the classifier gets to make.
+                verdicts[call["id"]] = Verdict("deny", forbidden)
+            elif permissions.is_statically_safe(call["name"], call["args"], workspace_root):
                 verdicts[call["id"]] = Verdict("allow", "allow-listed dev command")
             elif classify is not None:
                 verdicts[call["id"]] = classify(call["name"], call["args"])

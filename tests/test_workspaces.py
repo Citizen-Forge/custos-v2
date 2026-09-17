@@ -582,3 +582,61 @@ def test_parse_test_counts_reads_node_markers():
 
 def test_parse_test_counts_is_zero_when_no_markers_ran():
     assert workspaces._parse_test_counts("nothing relevant") == (0, 0, 0)
+
+
+# -- integration-tip bookkeeping --------------------------------------
+#
+# The integration branch may only be advanced by the gated merge
+# (verifier.land). Found live 2026-09-17: an agent ran
+# `git update-ref refs/heads/master HEAD` from its worktree.
+# permissions.forbidden_reason denies that command; these prove the
+# mechanical backstop that does not care HOW the ref moved.
+
+
+def _git_commit(path, name):
+    with open(os.path.join(path, name), "w") as fh:
+        fh.write(name + "\n")
+    subprocess.run(["git", "add", "-A"], cwd=path, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-q", "-m", name], cwd=path, capture_output=True, text=True)
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=path, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def test_recorded_integration_tip_round_trips(projects_root):
+    path = workspaces.ensure("proj-tip")
+    base = _git_commit(path, "base.txt")
+    workspaces.record_integration_tip("proj-tip")
+
+    assert workspaces.known_integration_tip("proj-tip") == base
+
+
+def test_a_gated_move_is_not_reverted(projects_root):
+    path = workspaces.ensure("proj-tip-ok")
+    _git_commit(path, "base.txt")
+    workspaces.record_integration_tip("proj-tip-ok")
+    tip = _git_commit(path, "more.txt")
+    workspaces.record_integration_tip("proj-tip-ok")  # a merge records its result
+
+    assert workspaces.revert_unexpected_integration_move("proj-tip-ok") is None
+    assert workspaces.head("proj-tip-ok") == tip
+
+
+def test_an_ungated_move_is_reverted(projects_root):
+    path = workspaces.ensure("proj-tip-bad")
+    base = _git_commit(path, "base.txt")
+    workspaces.record_integration_tip("proj-tip-bad")
+    rogue = _git_commit(path, "rogue.txt")  # advanced without the harness
+
+    reverted = workspaces.revert_unexpected_integration_move("proj-tip-bad")
+
+    assert reverted == rogue
+    assert workspaces.head("proj-tip-bad") == base
+    assert not os.path.exists(os.path.join(path, "rogue.txt"))
+    # idempotent: nothing left to do
+    assert workspaces.revert_unexpected_integration_move("proj-tip-bad") is None
+
+
+def test_no_recorded_tip_means_no_action(projects_root):
+    workspaces.ensure("proj-tip-none")
+    assert workspaces.revert_unexpected_integration_move("proj-tip-none") is None

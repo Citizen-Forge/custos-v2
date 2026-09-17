@@ -234,3 +234,83 @@ def test_gate_still_denies_a_non_allowlisted_command_via_classifier(tmp_path):
         {"configurable": {"thread_id": "gate-deny"}},
     )
     assert "permission denied: classifier says no" in result["messages"][-1].content
+
+
+# -- hard denials: ref/board mutations the classifier may not override -----
+#
+# Found live 2026-09-17: an agent ran `git update-ref refs/heads/master
+# HEAD` and `bd close` from shell_exec; the classifier allowed both, so the
+# refusal is mechanical (permissions.forbidden_reason), applied in the gate
+# ahead of the allow-list and the classifier.
+
+
+FORBIDDEN = [
+    "git update-ref refs/heads/master HEAD",
+    "git -C /projects/proj-a update-ref refs/heads/master HEAD",
+    "git symbolic-ref HEAD refs/heads/main",
+    "git branch -f master HEAD",
+    "git branch -D feature",
+    "git branch -M master",
+    "git tag -f v1 HEAD",
+    "git tag -d v1",
+    "git reset --hard HEAD~1",
+    "git checkout master",
+    "git switch main",
+    "git worktree remove .worktrees/x",
+    "cd src && git update-ref refs/heads/master HEAD",
+    "bd close abc-123 --reason done",
+    "bd update abc-123 --claim",
+    "bd update abc-123 --set-metadata assigned_seat=x",
+    "bd delete abc-123",
+    "bd reopen abc-123",
+    "bd dep add a b",
+]
+
+NOT_FORBIDDEN = [
+    "git status",
+    "git log --oneline -5",
+    "git diff HEAD",
+    "git show 9332f45",
+    "git add -A",
+    "git commit -m 'scaffold the project'",
+    "git branch",
+    "git tag",
+    "git rev-parse HEAD",
+    "bd ready",
+    "bd show abc-123",
+    "bd prime",
+    "bd remember a durable fact",
+    "bd note abc-123 a note",
+    "npm test",
+    "node --version",
+]
+
+
+@pytest.mark.parametrize("cmd", FORBIDDEN)
+def test_forbidden_commands_are_hard_denied(cmd):
+    assert permissions.forbidden_reason("shell_exec", {"command": cmd}), cmd
+
+
+@pytest.mark.parametrize("cmd", NOT_FORBIDDEN)
+def test_ordinary_commands_are_not_hard_denied(cmd):
+    assert permissions.forbidden_reason("shell_exec", {"command": cmd}) is None, cmd
+
+
+def _allow_everything(name, args):
+    return Verdict("allow", "classifier says yes")
+
+
+def test_gate_hard_denies_a_ref_move_even_when_classifier_allows(tmp_path):
+    graph = build_graph_from_model(
+        RunsThenReports("git update-ref refs/heads/master HEAD"),
+        InMemorySaver(),
+        classify=_allow_everything,
+        workspace_root=str(tmp_path),
+    )
+    result = graph.invoke(
+        {"messages": [("user", "move master")], "ticket_id": "gate-forbidden"},
+        {"configurable": {"thread_id": "gate-forbidden"}},
+    )
+    final = result["messages"][-1].content
+    assert "permission denied" in final
+    assert "refs" in final.lower()

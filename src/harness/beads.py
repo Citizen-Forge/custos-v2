@@ -226,14 +226,35 @@ def show(issue_id: str) -> dict:
     return json.loads(_run(["show", issue_id]))[0]
 
 
-def close(issue_id: str, reason: str | None = None) -> dict:
+def _actor_for_issue(issue_id: str, actor: str | None) -> str:
+    """The actor to act as: an explicit one, else the issue's current
+    assignee, else DEFAULT_ACTOR.
+
+    bd enforces that only the assignee may close/reopen a claimed issue --
+    checked live against the shipped bd: `cannot close <id>: assignee is
+    "seat-x", actor is "custos-worker"; reclaim or use --force`. The
+    dispatcher claims a ticket AS the seat (start_agent, `beads.claim(actor=
+    seat_id)`), while worker.close ran as the system, so a normal completion
+    hit that refusal. Resolving the assignee keeps completion working and
+    records the actor that actually held the ticket, rather than reaching
+    for --force and erasing who did the work."""
+    if actor:
+        return actor
+    try:
+        assignee = (show(issue_id).get("assignee") or "").strip()
+    except Exception:
+        assignee = ""
+    return assignee or DEFAULT_ACTOR
+
+
+def close(issue_id: str, reason: str | None = None, actor: str | None = None) -> dict:
     args = ["close", issue_id]
     if reason:
         args += ["--reason", reason]
-    return json.loads(_run(args))[0]
+    return json.loads(_run(args, actor=_actor_for_issue(issue_id, actor)))[0]
 
 
-def reopen(issue_id: str, reason: str, actor: str = DEFAULT_ACTOR) -> dict:
+def reopen(issue_id: str, reason: str, actor: str | None = None) -> dict:
     """Put a wrongly-closed ticket back into the queue.
 
     Closing is what releases a ticket's dependents, so a ticket that
@@ -266,7 +287,7 @@ def reopen(issue_id: str, reason: str, actor: str = DEFAULT_ACTOR) -> dict:
                 "--append-notes", reason,
                 "--assignee", "",
             ],
-            actor=actor,
+            actor=_actor_for_issue(issue_id, actor),
         )
     )[0]
 

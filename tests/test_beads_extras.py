@@ -125,3 +125,32 @@ def test_create_subtask_tool_parents_under_current_ticket():
 
     children = beads.search("part 2")
     assert any(c["id"].startswith(thread_id + ".") for c in children)
+
+
+# -- acting as the ticket's holder ------------------------------------
+#
+# bd refuses close/reopen by an actor other than the assignee. The
+# dispatcher claims a ticket as the seat while worker.close ran as the
+# system, so a normal completion would have been refused -- these pin the
+# assignee-resolving behaviour that keeps completion working.
+
+
+def test_close_acts_as_the_assignee():
+    beads.ensure_initialized()
+    ticket = beads.create("close as assignee", "x")
+    beads.claim(ticket["id"], actor="test-seat-close")
+
+    beads.close(ticket["id"], reason="done")
+
+    assert beads.show(ticket["id"])["status"] == "closed"
+
+
+def test_reopen_acts_as_the_assignee():
+    beads.ensure_initialized()
+    ticket = beads.create("reopen as assignee", "x")
+    beads.claim(ticket["id"], actor="test-seat-reopen")
+    beads.close(ticket["id"], reason="done")
+
+    beads.reopen(ticket["id"], "the criteria were wrong")
+
+    assert beads.show(ticket["id"])["status"] == "open"

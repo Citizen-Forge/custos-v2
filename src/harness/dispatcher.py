@@ -488,6 +488,38 @@ class Dispatcher:
         with self._lock:
             return dict(self._running)
 
+    def _restore_integration_if_moved(self, issue: dict) -> None:
+        """Put the integration branch back if an agent moved it itself.
+
+        The gated merge (verifier.land) is the only legitimate writer; a
+        ref that moved without it means unverified work reached the
+        integration branch. The rogue commit stays on the ticket's own
+        branch, so verification and landing still run normally afterwards.
+        """
+        try:
+            rogue = workspaces.revert_unexpected_integration_move(
+                workspaces.project_id_for(issue["id"])
+            )
+        except Exception:
+            log.exception("could not check the integration tip for %s", issue["id"])
+            return
+        if not rogue:
+            return
+        log.error(
+            "%s: the integration branch was moved outside the gated merge (to %s); "
+            "restored the ref -- the work stays on %s",
+            issue["id"], rogue[:12], workspaces.ticket_branch(issue["id"]),
+        )
+        try:
+            beads.append_note(
+                issue["id"],
+                "the integration branch was advanced outside the verifier-gated merge "
+                f"(commit {rogue[:12]}); the ref was restored. The work remains on "
+                f"{workspaces.ticket_branch(issue['id'])} and is judged normally.",
+            )
+        except Exception:
+            log.exception("could not annotate %s about the restored ref", issue["id"])
+
     def _agent_thread(self, seat_id: str, issue: dict) -> None:
         """One agent, one ticket. Whatever happens -- success, refusal,
         decline, crash -- the capacity slot is released in `finally`, so a
@@ -528,6 +560,7 @@ class Dispatcher:
                     )
             except Exception:
                 log.exception("could not clear stray files for %s", issue["id"])
+            self._restore_integration_if_moved(issue)
             with PostgresSaver.from_conn_string(self.conn_string) as checkpointer:
                 checkpointer.setup()
                 with psycopg.connect(self.conn_string, autocommit=True) as conn:
@@ -538,6 +571,13 @@ class Dispatcher:
                 outcome = work_one_ticket(runtime, issue)
             log.info("seat %r finished %s: %s", seat_id, issue["id"], outcome)
             self._record_outcome(issue["id"], outcome)
+
+            # The agent gets a hard denial for moving the integration
+            # branch (permissions.forbidden_reason) and this is the
+            # mechanical backstop for an evasion: check BEFORE anything is
+            # verified, so a ref the agent advanced is put back and the
+            # normal verify-then-land path still runs.
+            self._restore_integration_if_moved(issue)
 
             # Judge it before anything else in this project is dispatched.
             if outcome == "closed":
