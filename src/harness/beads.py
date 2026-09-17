@@ -65,11 +65,16 @@ def ensure_initialized() -> None:
 
 
 def ready() -> list[dict]:
-    return json.loads(_run(["ready"]))
+    # `--limit 0` is not optional: `bd ready` defaults to 100 and `bd list`
+    # to 50, and a silent cap is exactly the "green command that verified
+    # nothing" class of bug this module exists to avoid -- found live
+    # 2026-09-17, after the tests' shared workspace passed 100 ready
+    # tickets and fresh tickets stopped appearing in `bd ready` at all.
+    return json.loads(_run(["ready", "--limit", "0"]))
 
 
 def in_progress() -> list[dict]:
-    return json.loads(_run(["list", "--status=in_progress"]))
+    return json.loads(_run(["list", "--status=in_progress", "--limit", "0"]))
 
 
 def assign_to_seat(issue_id: str, seat_id: str, actor: str = DEFAULT_ACTOR) -> dict:
@@ -215,7 +220,7 @@ def list_by_assignee(actor: str) -> list[dict]:
     """Every issue ever assigned to `actor`, any status including closed
     -- Phase 5's outcome tracking reads this directly rather than
     maintaining a separate metrics store."""
-    return json.loads(_run(["list", "--assignee", actor, "--all"]))
+    return json.loads(_run(["list", "--assignee", actor, "--all", "--limit", "0"]))
 
 
 def claim(issue_id: str, actor: str = DEFAULT_ACTOR) -> dict:
@@ -328,7 +333,9 @@ def children_of(issue_id: str) -> list[dict]:
     project's epics, and each epic's stories, without needing a second
     data store to track the tree shape (Beads' own hierarchy already is
     the tree)."""
-    return json.loads(_run(["list", "--all", "--parent", issue_id, "--sort", "priority"]))
+    return json.loads(
+        _run(["list", "--all", "--parent", issue_id, "--sort", "priority", "--limit", "0"])
+    )
 
 
 def list_top_level(issue_type: str | None = None) -> list[dict]:
@@ -340,7 +347,7 @@ def list_top_level(issue_type: str | None = None) -> list[dict]:
     shape). Sorted by priority (0=highest) so the highest-priority
     project/epic naturally comes first -- what the product-owner's
     time-slicing logic reads to decide what to work next."""
-    args = ["list", "--all", "--no-parent", "--sort", "priority"]
+    args = ["list", "--all", "--no-parent", "--sort", "priority", "--limit", "0"]
     if issue_type:
         args += ["--type", issue_type]
     return json.loads(_run(args))
@@ -361,7 +368,7 @@ def list_all() -> list[dict]:
     owner, priority, status, title, updated_at), so callers rebuild the
     hierarchy from the dotted id convention instead -- see
     api._tree_from_flat and the test that guards that assumption."""
-    return json.loads(_run(["list", "--all"]))
+    return json.loads(_run(["list", "--all", "--limit", "0"]))
 
 
 def update_priority(issue_id: str, priority: int, actor: str = DEFAULT_ACTOR) -> dict:

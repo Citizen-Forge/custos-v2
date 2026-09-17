@@ -154,3 +154,29 @@ def test_reopen_acts_as_the_assignee():
     beads.reopen(ticket["id"], "the criteria were wrong")
 
     assert beads.show(ticket["id"])["status"] == "open"
+
+
+def test_read_helpers_ask_for_unlimited_results(monkeypatch):
+    """`bd ready` defaults to 100 results and `bd list` to 50 -- a silent
+    cap that hides tickets past the boundary. Found live 2026-09-17 when
+    the shared test workspace passed 100 ready tickets and newly created
+    ones disappeared from `bd ready`. Guard that every read wrapper asks
+    for the unlimited form."""
+    calls = []
+
+    def fake_run(args, actor=None):
+        calls.append(args)
+        return "[]"
+
+    monkeypatch.setattr(beads, "_run", fake_run)
+    beads.ready()
+    beads.in_progress()
+    beads.list_all()
+    beads.list_top_level()
+    beads.children_of("x")
+    beads.list_by_assignee("someone")
+
+    assert calls, "no read helper called bd"
+    for args in calls:
+        assert "--limit" in args, args
+        assert args[args.index("--limit") + 1] == "0", args
