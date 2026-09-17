@@ -63,6 +63,12 @@ def test_a_held_ticket_does_not_starve_another_project(monkeypatch):
     beads.assign_to_seat(held_s["id"], "seat-a")
     open_p, open_s = _project_with_story("starve open")
     beads.assign_to_seat(open_s["id"], "seat-b")
+    # Pin the ready pool too: other tests leave assigned ready tickets in the
+    # shared workspace, and with a constant _order they tie and can win.
+    monkeypatch.setattr(
+        beads, "ready",
+        lambda: [beads.show(held_s["id"]), beads.show(open_s["id"])],
+    )
     dispatcher._hold_cache.update(at=-1e9, held={})
 
     issue, seat_id = dispatcher.next_assigned_ticket()
