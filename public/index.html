@@ -182,6 +182,18 @@
   }
   .progress-bar { background: var(--border); border-radius: 999px; height: 6px; margin: 0.5rem 0 0.35rem; overflow: hidden; }
   .progress-fill { background: var(--accent); height: 100%; }
+  /* One bar for the whole project, above the Roadmap, so "how far along is
+     this?" is answered without reading every epic card. Deliberately taller
+     and full-width: it is the headline number on the Home tab. */
+  .project-progress { margin: 0.5rem 0 0.75rem; }
+  .project-progress-head { display: flex; align-items: baseline; gap: 0.5rem; }
+  .project-progress-head .title { font-weight: 600; font-size: 0.95rem; }
+  .project-progress-head .pct { margin-left: auto; font-weight: 600; font-size: 1rem; }
+  .project-progress-bar {
+    background: var(--border); border-radius: 999px; height: 12px;
+    margin: 0.4rem 0 0.3rem; overflow: hidden;
+  }
+  .project-progress-fill { background: var(--accent); height: 100%; }
 </style>
 </head>
 <body>
@@ -199,6 +211,7 @@
 <main>
   <section id="project-nav" class="board-section project-nav" data-tab="home">
     <div id="project-tabs" class="project-tabs"></div>
+    <div id="project-progress"></div>
   </section>
   <section class="board-section" data-tab="home">
     <h2>Roadmap <span class="count" id="roadmap-count">0</span></h2>
@@ -573,6 +586,42 @@ function isBlocked(story) {
   return (story.labels || []).includes("human");
 }
 
+// "Parked" and "done" are the definitions every progress figure on this page
+// shares -- the project bar, the epic bars and the project tabs. Hoisted out
+// of roadmapEpicCard so a bar cannot quietly start counting parked tickets as
+// progress again: a `human`-labelled ticket is NOT finished work even when it
+// is closed, because the only thing that closes a ticket while leaving the
+// label on is a verifier fail with the rework budget spent.
+function isParked(story) {
+  return (story.labels || []).includes("human");
+}
+
+function storyCounts(stories) {
+  const done = stories.filter(s => s.status === "closed" && !isParked(s)).length;
+  const parked = stories.filter(isParked).length;
+  const pct = stories.length ? Math.round((100 * done) / stories.length) : 0;
+  return { done, parked, total: stories.length, pct };
+}
+
+// The project-level bar: how much of this project is actually finished.
+function renderProjectProgress(project) {
+  const el = document.getElementById("project-progress");
+  if (!project) {
+    el.innerHTML = "";
+    return;
+  }
+  const stories = (project.epics || []).flatMap(epic => epic.stories || []);
+  const { done, parked, total, pct } = storyCounts(stories);
+  el.innerHTML = `<div class="project-progress">
+    <div class="project-progress-head">
+      <span class="title">${escapeHtml(project.title)}</span>
+      <span class="pct">${pct}% done</span>
+    </div>
+    <div class="project-progress-bar"><div class="project-progress-fill" style="width:${pct}%"></div></div>
+    <div class="desc">${done} out of ${total} tickets done${parked ? ` · ${parked} parked` : ""}</div>
+  </div>`;
+}
+
 function kanbanCard(story) {
   const seat = (story.metadata && story.metadata.assigned_seat) || null;
   const blocked = isBlocked(story);
@@ -629,10 +678,7 @@ function roadmapEpicCard(epic) {
   // it here reported parked work as completed and inflated the epic's progress
   // bar. Found 2026-09-15 -- the roadmap credited an epic with stories whose
   // fails were mostly the verifier judging the wrong diff.
-  const isParked = s => (s.labels || []).includes("human");
-  const done = stories.filter(s => s.status === "closed" && !isParked(s)).length;
-  const parked = stories.filter(isParked).length;
-  const pct = stories.length ? Math.round((100 * done) / stories.length) : 0;
+  const { done, parked, pct } = storyCounts(stories);
   return `<div class="roadmap-card">
     <div class="roadmap-card-title">${escapeHtml(epic.title)}</div>
     <div class="desc">${escapeHtml(epic.projectTitle)}</div>
@@ -693,6 +739,7 @@ function renderProjects() {
     roadmapEl.innerHTML = `<div class="empty">no epics yet -- the product-owner creates these from ideas</div>`;
     document.getElementById("roadmap-count").textContent = "0";
     document.getElementById("projects-count").textContent = "0";
+    renderProjectProgress(null);
     return;
   }
   navEl.style.display = "";
@@ -715,6 +762,7 @@ function renderProjects() {
   const project = cachedProjects.find(p => p.id === activeProjectId);
   const stories = (project.epics || []).flatMap(epic => epic.stories || []);
   document.getElementById("projects-count").textContent = stories.length;
+  renderProjectProgress(project);
   listEl.innerHTML = projectCard(project);
   renderRoadmap(project);
 }
