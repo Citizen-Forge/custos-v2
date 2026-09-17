@@ -51,9 +51,16 @@ def test_list_seats_tool_includes_outcomes():
     assert "closed=" in result
 
 
-def test_list_unassigned_tickets_tool():
+def test_list_unassigned_tickets_tool(monkeypatch):
     beads.ensure_initialized()
     unassigned = beads.create("needs triage", "x")
+    # Pin the pool: the tool now summarises one line per project (capped at
+    # 40) so the fallback session gets an actionable list instead of a
+    # 20k-truncated dump, and the shared test workspace has more projects
+    # than that.
+    monkeypatch.setattr(
+        beads, "unassigned_ready", lambda: [beads.show(unassigned["id"])]
+    )
 
     _, list_unassigned, _, _, _, _, _, _, _, _ = build_tools(_conn(), requesting_model=None)
     result = list_unassigned.invoke({})
