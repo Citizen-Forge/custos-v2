@@ -92,6 +92,9 @@ def test_malformed_checks_metadata_reads_as_no_checks():
 # -- verifier pre-pass ---------------------------------------------------
 
 
+_TESTS_PASS = {"exit": 0, "ran": 3, "passed": 3, "failed": 0, "tail": ""}
+
+
 class _MustNotRun:
     def invoke(self, *a, **k):
         raise AssertionError("the model must not be called for a mechanical verdict")
@@ -129,7 +132,7 @@ def test_all_checks_passing_with_no_prose_passes_without_the_model(tmp_path, mon
     monkeypatch.setattr(workspaces, "tree_for_ticket", lambda tid: str(tmp_path))
     issue = _issue([{"type": "tests_at_least", "count": 1}])
     rec = {}
-    _stub_verifier(monkeypatch, issue, tests={"exit": 0, "ran": 3, "passed": 3, "failed": 0}, rec=rec)
+    _stub_verifier(monkeypatch, issue, tests=_TESTS_PASS, rec=rec)
 
     result = verifier.verify_ticket(None, "p.1.1", _MustNotRun())
 
@@ -141,7 +144,7 @@ def test_prose_criteria_still_go_to_the_model(tmp_path, monkeypatch):
     monkeypatch.setattr(workspaces, "tree_for_ticket", lambda tid: str(tmp_path))
     issue = _issue([{"type": "tests_at_least", "count": 1}], criteria="the code is elegant")
     rec = {}
-    _stub_verifier(monkeypatch, issue, tests={"exit": 0, "ran": 3, "passed": 3, "failed": 0}, rec=rec)
+    _stub_verifier(monkeypatch, issue, tests=_TESTS_PASS, rec=rec)
 
     class Model:
         def __init__(self):
