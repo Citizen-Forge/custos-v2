@@ -180,7 +180,14 @@ _hold_cache: dict = {"at": -1e9, "held": {}}
 
 
 def held_projects() -> dict[str, str]:
-    """Project id -> hold reason, for every project currently held."""
+    """Project id -> hold reason, for every project currently held.
+
+    Read straight out of the single `bd list --all`, which carries each
+    issue's metadata (verified live -- both real holds, workspace-9jg and
+    workspace-r2w, are visible in `bd list`, not only `bd show`). This used
+    to be one `show` per project on top of the list: an N+1 that cost ~100s
+    against the real 284-issue Dolt workspace at ~5s a call, and made the
+    first dispatch tick after every restart or retry take over a minute."""
     now = time.monotonic()
     if now - _hold_cache["at"] < _HOLD_TTL:
         return _hold_cache["held"]
@@ -189,11 +196,7 @@ def held_projects() -> dict[str, str]:
     for issue in beads.list_all():
         if "." in issue["id"]:
             continue
-        try:
-            project = beads.show(issue["id"])
-        except Exception:
-            continue
-        reason = (project.get("metadata") or {}).get(HOLD_KEY)
+        reason = (issue.get("metadata") or {}).get(HOLD_KEY)
         if reason:
             held[issue["id"]] = reason
     _hold_cache.update(at=now, held=held)

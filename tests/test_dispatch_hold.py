@@ -77,6 +77,24 @@ def test_a_held_ticket_does_not_starve_another_project(monkeypatch):
     assert seat_id == "seat-b"
 
 
+def test_held_projects_reads_metadata_from_the_one_list(monkeypatch):
+    """The hold used to cost one `show` per project on top of `bd list --all`
+    (~100s against the real 284-issue workspace). Guard that it is read from
+    the single list's metadata, with no per-project show."""
+    monkeypatch.setattr(dispatcher, "_hold_cache", {"at": -1e9, "held": {}})
+    monkeypatch.setattr(dispatcher.beads, "list_all", lambda: [
+        {"id": "proj-a", "issue_type": "epic", "metadata": {dispatcher.HOLD_KEY: "why"}},
+        {"id": "proj-b", "issue_type": "epic", "metadata": {}},
+    ])
+
+    def _no_show(*a, **k):
+        raise AssertionError("held_projects must not call bd show per project")
+
+    monkeypatch.setattr(dispatcher.beads, "show", _no_show)
+
+    assert dispatcher.held_projects() == {"proj-a": "why"}
+
+
 def test_held_work_does_not_wake_the_product_owner():
     """Unassigned work in a held project must not look like something to
     broker -- otherwise the product-owner is woken to assign tickets no
