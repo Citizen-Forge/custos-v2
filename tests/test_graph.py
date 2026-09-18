@@ -93,6 +93,36 @@ def test_repair_answers_only_the_calls_nothing_answered():
     assert _repair_dangling_tool_calls(repaired) == repaired
 
 
+def test_repair_answers_an_unparseable_tool_call():
+    """An `invalid_tool_call` -- arguments that failed to parse, typically a
+    truncated large write_file -- is serialized to the provider as a
+    tool_call, so it must be answered too or every resume 400s. Found live
+    2026-09-18: workspace-o0n.3.2 parked after three identical 400s, its last
+    assistant message carrying one invalid write_file the repair was blind to."""
+    history = [
+        HumanMessage(content="go"),
+        AIMessage(
+            content="",
+            invalid_tool_calls=[
+                {
+                    "type": "invalid_tool_call",
+                    "id": "bad-1",
+                    "name": "write_file",
+                    "args": "{not valid json",
+                    "error": "Unterminated string",
+                }
+            ],
+        ),
+    ]
+
+    repaired = _repair_dangling_tool_calls(history)
+
+    answered = [m.tool_call_id for m in repaired if isinstance(m, ToolMessage)]
+    assert answered == ["bad-1"]
+    assert "malformed" in repaired[-1].content
+    assert _repair_dangling_tool_calls(repaired) == repaired
+
+
 def test_a_thread_stopped_mid_tool_call_still_resumes():
     """The checkpoint shape a crash leaves behind must not poison the thread.
 

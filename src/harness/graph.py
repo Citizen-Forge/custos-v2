@@ -119,6 +119,14 @@ def _repair_dangling_tool_calls(messages: list) -> list:
     That keeps every other message in the thread -- the work the agent actually
     did -- instead of throwing the thread away, and it is idempotent: a history
     that is already valid comes back unchanged.
+
+    `invalid_tool_calls` are answered too. The provider serializes those as
+    `tool_calls` (a call the model emitted whose arguments failed to parse --
+    typically a truncated large `write_file`), so an unanswered one is the same
+    400 as an unanswered valid call, but it never appears in `.tool_calls` for
+    this function to see. Found live 2026-09-18: workspace-o0n.3.2 parked after
+    three identical 400s, the last assistant message carrying one invalid
+    `write_file` and the repair blind to it.
     """
     repaired: list = []
     index = 0
@@ -127,7 +135,8 @@ def _repair_dangling_tool_calls(messages: list) -> list:
         repaired.append(message)
         index += 1
         calls = getattr(message, "tool_calls", None) or []
-        if not calls:
+        invalid = getattr(message, "invalid_tool_calls", None) or []
+        if not calls and not invalid:
             continue
         # The contiguous run of tool messages answering this assistant turn.
         answered: set = set()
@@ -147,6 +156,21 @@ def _repair_dangling_tool_calls(messages: list) -> list:
                         tool_call_id=call["id"],
                     )
                 )
+        for call in invalid:
+            cid = call.get("id")
+            if not cid or cid in answered:
+                continue
+            name = call.get("name") or "the tool"
+            error = call.get("error") or "the arguments could not be parsed"
+            repaired.append(
+                ToolMessage(
+                    content=(
+                        f"not executed: the call to {name} had malformed arguments "
+                        f"({error}), so it never ran. Re-issue it with valid arguments."
+                    ),
+                    tool_call_id=cid,
+                )
+            )
     return repaired
 
 
