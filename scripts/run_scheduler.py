@@ -64,20 +64,41 @@ DEFAULT_INTERVAL_SECONDS = 1800
 
 def _provider(name: str, max_tokens: int) -> ProviderConfig:
     # Every field falls back to LOCAL_MODEL_* so that pointing the worker
-    # at a new provider moves the scheduler's jobs with it by default --
-    # SCHEDULER_MODEL_* exists to opt one of them back out, not to have to
-    # be set. The api_key fallback was missing until 2026-09-12: with the
-    # worker moved to DeepSeek, base_url and model followed correctly and
-    # the key did not, so every verifier/product-owner/overwatch call
-    # would have authenticated as "not-needed" and 401'd.
+    # at a new provider moves the scheduler's jobs with it by default.
+    # SCHEDULER_MODEL_* overrides all of them, and a job can opt out one
+    # more level with its own <ROLE>_MODEL_* (e.g. PROGRESS_MODEL_*) -- which
+    # is how an advisory job is pointed at a cheap local model while the
+    # rest stay on the frontier one. It also makes the scheduled verifier
+    # honour VERIFIER_MODEL_*, matching verifier.build_model().
+    # The api_key fallback was missing until 2026-09-12: with the worker
+    # moved to DeepSeek, base_url and model followed correctly and the key
+    # did not, so every verifier/product-owner/overwatch call would have
+    # authenticated as "not-needed" and 401'd.
+    prefix = name.upper().replace("-", "_")
+
+    def setting(suffix: str, default):
+        return os.environ.get(f"{prefix}_{suffix}", default)
+
     return ProviderConfig(
         name=name,
-        base_url=os.environ.get(
-            "SCHEDULER_MODEL_BASE_URL", os.environ.get("LOCAL_MODEL_BASE_URL", "http://host.docker.internal:11434/v1")
+        base_url=setting(
+            "MODEL_BASE_URL",
+            os.environ.get(
+                "SCHEDULER_MODEL_BASE_URL",
+                os.environ.get("LOCAL_MODEL_BASE_URL", "http://host.docker.internal:11434/v1"),
+            ),
         ),
-        model=os.environ.get("SCHEDULER_MODEL_NAME", os.environ.get("LOCAL_MODEL_NAME", "qwen2.5:7b-instruct")),
-        api_key=os.environ.get("SCHEDULER_MODEL_API_KEY", os.environ.get("LOCAL_MODEL_API_KEY")),
-        max_tokens=max_tokens,
+        model=setting(
+            "MODEL_NAME",
+            os.environ.get(
+                "SCHEDULER_MODEL_NAME", os.environ.get("LOCAL_MODEL_NAME", "qwen2.5:7b-instruct")
+            ),
+        ),
+        api_key=setting(
+            "MODEL_API_KEY",
+            os.environ.get("SCHEDULER_MODEL_API_KEY", os.environ.get("LOCAL_MODEL_API_KEY")),
+        ),
+        max_tokens=int(setting("MAX_TOKENS", max_tokens)),
         # See ProviderConfig.extra_body: a thinking model demands its
         # `reasoning_content` be replayed on the next turn and
         # langchain_openai does not round-trip it. The verifier makes a
@@ -85,7 +106,12 @@ def _provider(name: str, max_tokens: int) -> ProviderConfig:
         # multi-turn tool loops and would 400 on their second turn.
         extra_body=(
             {"thinking": {"type": "disabled"}}
-            if os.environ.get("SCHEDULER_MODEL_DISABLE_THINKING", os.environ.get("LOCAL_MODEL_DISABLE_THINKING"))
+            if setting(
+                "MODEL_DISABLE_THINKING",
+                os.environ.get(
+                    "SCHEDULER_MODEL_DISABLE_THINKING", os.environ.get("LOCAL_MODEL_DISABLE_THINKING")
+                ),
+            )
             else None
         ),
     )

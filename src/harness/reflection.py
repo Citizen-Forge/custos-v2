@@ -46,6 +46,41 @@ def enabled() -> bool:
     return os.environ.get("REFLECTION", "on").lower() not in ("off", "0", "false", "no")
 
 
+def build_model():
+    """The reflection's model, from REFLECTION_* falling back to LOCAL_*.
+
+    Reflection is advisory -- a post-ticket note, never a gate -- so a
+    deployment can point it at a cheap local model while the seats stay on a
+    frontier one. Defaults to the same LOCAL_* chain as everything else, so
+    leaving REFLECTION_* unset changes nothing."""
+    from .providers import ProviderConfig, build_chat_model
+
+    return build_chat_model(
+        ProviderConfig(
+            name="reflection",
+            base_url=os.environ.get(
+                "REFLECTION_MODEL_BASE_URL",
+                os.environ.get("LOCAL_MODEL_BASE_URL", "http://host.docker.internal:11434/v1"),
+            ),
+            model=os.environ.get(
+                "REFLECTION_MODEL_NAME", os.environ.get("LOCAL_MODEL_NAME", "qwen2.5:7b-instruct")
+            ),
+            api_key=os.environ.get(
+                "REFLECTION_MODEL_API_KEY", os.environ.get("LOCAL_MODEL_API_KEY")
+            ),
+            max_tokens=int(os.environ.get("REFLECTION_MAX_TOKENS", "2000")),
+            extra_body=(
+                {"thinking": {"type": "disabled"}}
+                if os.environ.get(
+                    "REFLECTION_MODEL_DISABLE_THINKING",
+                    os.environ.get("LOCAL_MODEL_DISABLE_THINKING"),
+                )
+                else None
+            ),
+        )
+    )
+
+
 # Tools available only while reflecting. suggest_prompt_change is not in
 # tools.SHARED_TOOLS precisely so it cannot be reached during a ticket.
 REFLECTION_TOOLS = [
@@ -110,7 +145,10 @@ def reflect(conn_string: str, runtime, issue: dict, outcome: str) -> bool:
         with PostgresSaver.from_conn_string(conn_string) as checkpointer:
             checkpointer.setup()
             graph = build_graph_from_model(
-                runtime.model, checkpointer, tools=REFLECTION_TOOLS, turn_budget=TURN_BUDGET
+                build_model().bind_tools(REFLECTION_TOOLS),
+                checkpointer,
+                tools=REFLECTION_TOOLS,
+                turn_budget=TURN_BUDGET,
             )
             messages = ([("system", runtime.system_prompt)] if runtime.system_prompt else []) + [
                 ("user", brief)

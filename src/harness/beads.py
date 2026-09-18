@@ -108,6 +108,35 @@ def acceptance_criteria(issue: dict) -> str | None:
     return (issue.get("metadata") or {}).get("acceptance_criteria")
 
 
+# Machine-checkable acceptance criteria: a JSON list of checks the verifier
+# can evaluate deterministically, before it spends a model call. Free-text
+# `acceptance_criteria` stays for the judgment calls; these cover the
+# mechanical half ("file X exists", "the suite runs at least N tests", "the
+# README contains Y"). See harness/acceptance.py for the schema.
+CHECKS_KEY = "acceptance_checks"
+
+
+def set_acceptance_checks(issue_id: str, checks: list, actor: str = DEFAULT_ACTOR) -> dict:
+    """Store the structured checks as JSON in one metadata field, the same
+    mechanism as set_acceptance_criteria."""
+    return set_metadata(issue_id, CHECKS_KEY, json.dumps(checks), actor=actor)
+
+
+def acceptance_checks(issue: dict) -> list:
+    """The ticket's structured checks, or [] when it has none / they are
+    unparseable. Malformed JSON reads as no checks rather than raising --
+    the verifier falls back to judging the free-text criteria, which is the
+    safe direction (a missing check means less pre-filtering, not a pass)."""
+    raw = (issue.get("metadata") or {}).get(CHECKS_KEY)
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
 def set_metadata(issue_id: str, key: str, value: str, actor: str = DEFAULT_ACTOR) -> dict:
     """Set one metadata key -- same `--set-metadata` mechanism
     assign_to_seat and set_acceptance_criteria already use, generalised so
@@ -304,6 +333,7 @@ def create(
     parent: str | None = None,
     acceptance_criteria: str | None = None,
     priority: int | None = None,
+    acceptance_checks: list | None = None,
 ) -> dict:
     args = ["create", title, "-d", description, "--type", issue_type]
     if parent:
@@ -315,7 +345,12 @@ def create(
         # scheme: a "project" is just a top-level Beads issue with this
         # field set, ordered via `bd list --sort priority`.
         args += ["--priority", str(priority)]
+    metadata = {}
     if acceptance_criteria:
+        metadata["acceptance_criteria"] = acceptance_criteria
+    if acceptance_checks:
+        metadata[CHECKS_KEY] = json.dumps(acceptance_checks)
+    if metadata:
         # bd create has its own --metadata flag (a JSON object string) --
         # checked live against bd v1.2.2's own --help rather than assumed
         # (a first draft of this guessed it didn't exist and planned a
@@ -323,7 +358,7 @@ def create(
         # `--set-metadata key=value` (bd update's flag, used by
         # assign_to_seat/set_acceptance_criteria below) -- this one takes
         # the whole metadata object as JSON, for create specifically.
-        args += ["--metadata", json.dumps({"acceptance_criteria": acceptance_criteria})]
+        args += ["--metadata", json.dumps(metadata)]
     return json.loads(_run(args))
 
 

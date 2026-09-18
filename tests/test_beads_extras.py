@@ -156,6 +156,15 @@ def test_reopen_acts_as_the_assignee():
     assert beads.show(ticket["id"])["status"] == "open"
 
 
+def test_create_stores_acceptance_checks():
+    beads.ensure_initialized()
+    checks = [{"type": "file_exists", "path": "project.godot"}]
+
+    ticket = beads.create("checks ticket", "d", acceptance_checks=checks)
+
+    assert beads.acceptance_checks(beads.show(ticket["id"])) == checks
+
+
 def test_read_helpers_ask_for_unlimited_results(monkeypatch):
     """`bd ready` defaults to 100 results and `bd list` to 50 -- a silent
     cap that hides tickets past the boundary. Found live 2026-09-17 when

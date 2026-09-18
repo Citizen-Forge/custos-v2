@@ -22,7 +22,7 @@ import os
 
 import psycopg
 
-from . import beads, verifications, workspaces
+from . import acceptance, beads, verifications, workspaces
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +105,13 @@ That test result is MEASURED, not claimed -- the suite was executed to produce i
 speaks to a criterion (do the tests run, do they pass), believe it over anything you infer \
 from reading the diff. Do not assert that tests fail, or that the project does not build, when \
 the measured result above says otherwise.
+
+Mechanical acceptance checks declared on the ticket, evaluated in code just now:
+{mechanical_checks}
+
+Those are computed, not judged. If every declared criterion is already covered above and all \
+of them are OK, say pass without second-guessing them; a FAILED mechanics line is always a \
+fail. Judge the remaining criteria yourself.
 
 Weigh the diff above all else. It is what the ticket actually changed; the close reason and \
 notes are the agent's own account of it and may be generous. If the diff is empty or does not \
@@ -280,7 +287,7 @@ def awaiting_verdict(conn, issue: dict) -> bool:
         # accepted on the strength of a contaminated commit record -- see
         # beads.DECISION_KEY for the live case.
         return False
-    if not beads.acceptance_criteria(issue):
+    if not beads.acceptance_criteria(issue) and not beads.acceptance_checks(issue):
         return False
     if issue.get("status") != "closed":
         return False
@@ -299,51 +306,76 @@ def verify_ticket(conn, issue_id: str, model) -> dict | None:
     """The recorded verdict dict, or None when the ticket isn't a candidate
     -- see awaiting_verdict for what counts as one.
 
+    Structured `acceptance_checks` are evaluated in code FIRST. A failing
+    check decides a fail with no model call at all, and a ticket whose
+    criteria are entirely machine-checkable can pass without one; the model
+    is asked only about the free-text criteria that genuinely need judgment.
     An unparseable model response fails closed to "fail", same posture as
     reviewer.py -- an unverifiable verdict is not a pass."""
     issue = beads.show(issue_id)
     if not awaiting_verdict(conn, issue):
         return None
     criteria = beads.acceptance_criteria(issue)
+    checks = beads.acceptance_checks(issue)
     current_commit = (issue.get("metadata") or {}).get("work_commit")
 
     seat_id = beads.assigned_seat(issue) or issue.get("assignee") or "unknown"
     tests = _tests_for(issue)
+    check_results = acceptance.evaluate(issue, tests) if checks else []
+    failed_checks = acceptance.failed(check_results)
 
-    response = model.invoke(
-        PROMPT.format(
-            title=issue.get("title", ""),
-            description=issue.get("description", ""),
-            acceptance_criteria=criteria,
-            close_reason=issue.get("close_reason") or "(none recorded)",
-            notes=issue.get("notes") or "(none)",
-            diff=_diff_for(issue) or "(no code change recorded for this ticket)",
-            current_files=_current_files_for(issue) or "(no configuration or readme files found)",
-            test_result=_describe_tests(tests),
-        )
-    )
-    content = getattr(response, "content", response)
-
-    try:
-        data = json.loads(content)
-        verdict = data["verdict"]
-        reasoning = data.get("reasoning", "")
-        if verdict not in ("pass", "fail"):
-            raise ValueError(f"unexpected verdict: {verdict!r}")
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-        verdict = "fail"
-        reasoning = f"verifier response unparseable: {e}"
-
-    # Mechanical override, applied only to the one case that admits no
-    # judgement: the suite exited 0 while running nothing. A model
-    # reading a well-written test file has no way to see that the file is
-    # never executed, so this is checked rather than asked.
-    if verdict == "pass" and tests and tests["exit"] == 0 and tests["ran"] == 0:
+    if failed_checks:
+        # Deterministic: no model call can override a failed check.
         verdict = "fail"
         reasoning = (
-            "Mechanical check overrode a pass: the project's test command exited 0 but ran "
-            "zero tests, so it is not evidence of anything. " + reasoning
+            "Machine-checked acceptance criteria failed: "
+            + "; ".join(r["detail"] for r in failed_checks)
         )
+    elif check_results and not criteria:
+        # Every criterion the ticket stated is machine-checkable and passed.
+        verdict = "pass"
+        reasoning = (
+            "Machine-checked acceptance criteria all passed: "
+            + "; ".join(r["detail"] for r in check_results)
+        )
+    else:
+        response = model.invoke(
+            PROMPT.format(
+                title=issue.get("title", ""),
+                description=issue.get("description", ""),
+                acceptance_criteria=criteria or "(none -- judged by the mechanical checks)",
+                close_reason=issue.get("close_reason") or "(none recorded)",
+                notes=issue.get("notes") or "(none)",
+                diff=_diff_for(issue) or "(no code change recorded for this ticket)",
+                current_files=(
+                    _current_files_for(issue) or "(no configuration or readme files found)"
+                ),
+                test_result=_describe_tests(tests),
+                mechanical_checks=acceptance.describe(check_results),
+            )
+        )
+        content = getattr(response, "content", response)
+
+        try:
+            data = json.loads(content)
+            verdict = data["verdict"]
+            reasoning = data.get("reasoning", "")
+            if verdict not in ("pass", "fail"):
+                raise ValueError(f"unexpected verdict: {verdict!r}")
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+            verdict = "fail"
+            reasoning = f"verifier response unparseable: {e}"
+
+        # Mechanical override, applied only to the one case that admits no
+        # judgement: the suite exited 0 while running nothing. A model
+        # reading a well-written test file has no way to see that the file is
+        # never executed, so this is checked rather than asked.
+        if verdict == "pass" and tests and tests["exit"] == 0 and tests["ran"] == 0:
+            verdict = "fail"
+            reasoning = (
+                "Mechanical check overrode a pass: the project's test command exited 0 but ran "
+                "zero tests, so it is not evidence of anything. " + reasoning
+            )
 
     verifications.record(conn, issue_id, seat_id, verdict, reasoning, work_commit=current_commit)
 

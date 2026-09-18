@@ -83,6 +83,10 @@ class CreateStoryBody(BaseModel):
     # without them is never checked by anyone. Found live 2026-09-01 --
     # 128 stories existed, 0 had criteria, 0 verifications had ever run.
     acceptance_criteria: str | None = None
+    # Machine-checkable criteria (harness/acceptance.py): a JSON list of
+    # {"type": ...} checks the verifier evaluates in code before spending a
+    # model call. Optional; free-text criteria and checks can coexist.
+    acceptance_checks: list[dict] | None = None
 
 
 class PriorityBody(BaseModel):
@@ -452,6 +456,7 @@ def create_story(epic_id: str, body: CreateStoryBody):
         story = beads.create(
             body.title, body.description, parent=epic_id, priority=body.priority,
             acceptance_criteria=body.acceptance_criteria,
+            acceptance_checks=body.acceptance_checks,
         )
     except beads.BeadsError as e:
         raise HTTPException(404, str(e)) from e

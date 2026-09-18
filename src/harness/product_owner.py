@@ -230,16 +230,28 @@ def build_tools(conn, requesting_model):
 
     @tool
     def add_subtask_to_epic(epic_id: str, title: str, description: str,
-                            acceptance_criteria: str = "") -> str:
+                            acceptance_criteria: str = "",
+                            acceptance_checks: list[dict] | None = None) -> str:
         """Add one concrete, individually-workable story under an epic (created via
         create_epic). Call this once per real piece of work the epic decomposes into.
 
         ALWAYS give acceptance_criteria: what must be concretely true for this to be done,
         checkable by someone who didn't do the work. A story without criteria is never
         verified by anyone (verifier.py skips it), so the working agent's own claim of
-        success becomes the only record that it happened."""
+        success becomes the only record that it happened.
+
+        Where a criterion is mechanical, ALSO give acceptance_checks: a list of assertions
+        the verifier evaluates in code before spending any model call. Supported forms:
+          {"type": "file_exists",    "path": "project.godot"}
+          {"type": "file_absent",    "path": "old/TODO"}
+          {"type": "contains",       "path": "README.md", "text": "## Test"}
+          {"type": "matches",        "path": "src/x.gd", "pattern": "func +\\\\w+"}
+          {"type": "tests_at_least", "count": 1}
+        Paths are relative to the project workspace. Use checks for the mechanical half of
+        the criteria and keep acceptance_criteria for what genuinely needs judgment."""
         subtask = beads.create(title, description, parent=epic_id,
-                               acceptance_criteria=acceptance_criteria or None)
+                               acceptance_criteria=acceptance_criteria or None,
+                               acceptance_checks=acceptance_checks or None)
         return f"created subtask {subtask['id']} under {epic_id}: {subtask['title']}"
 
     @tool
@@ -270,10 +282,15 @@ def build_tools(conn, requesting_model):
         )
 
     @tool
-    def set_acceptance_criteria(issue_id: str, criteria: str) -> str:
+    def set_acceptance_criteria(issue_id: str, criteria: str,
+                                acceptance_checks: list[dict] | None = None) -> str:
         """Set or replace a ticket's acceptance criteria -- the usual fix when an escalation
-        says the ticket had none or was underspecified."""
+        says the ticket had none or was underspecified. `acceptance_checks` is the optional
+        machine-checkable half (see add_subtask_to_epic for the forms); anything mechanical
+        belongs there so the verifier can decide it without a model call."""
         beads.set_acceptance_criteria(issue_id, criteria, actor=ROLE)
+        if acceptance_checks:
+            beads.set_acceptance_checks(issue_id, acceptance_checks, actor=ROLE)
         return f"set acceptance criteria on {issue_id}"
 
     @tool
@@ -343,10 +360,15 @@ def build_escalation_tools(conn, requesting_model):
         )
 
     @tool
-    def set_acceptance_criteria(issue_id: str, criteria: str) -> str:
+    def set_acceptance_criteria(issue_id: str, criteria: str,
+                                acceptance_checks: list[dict] | None = None) -> str:
         """Set or replace a ticket's acceptance criteria -- the usual fix when an escalation
-        says the ticket had none or was underspecified."""
+        says the ticket had none or was underspecified. `acceptance_checks` is the optional
+        machine-checkable half (see add_subtask_to_epic for the forms); anything mechanical
+        belongs there so the verifier can decide it without a model call."""
         beads.set_acceptance_criteria(issue_id, criteria, actor=ROLE)
+        if acceptance_checks:
+            beads.set_acceptance_checks(issue_id, acceptance_checks, actor=ROLE)
         return f"set acceptance criteria on {issue_id}"
 
     @tool
