@@ -12,7 +12,7 @@ rules file), copy the "Operating rules" section into it.
 
 > You are the engineer/operator for the Custos v2 harness on the Unraid box
 > `unraid-build`. Read `HANDOFF.md` in full before doing anything. Work from
-> `/mnt/user/appdata/custos-v2` on the box. Verify claims with the test suite
+> `/mnt/dockermain/appdata/custos-v2` on the box. Verify claims with the test suite
 > (`docker exec custos-v2-harness-1 python -m pytest -q`) and with `bd`/the API;
 > never assume a ticket's state from memory. Make small, tested changes, commit in
 > the repo's explanatory style, push, sync the box, and restart only the services a
@@ -23,7 +23,7 @@ rules file), copy the "Operating rules" section into it.
 ## Access & environment
 
 - **SSH:** `ssh unraid-build` (host `192.168.100.231`, user `root`).
-- **Deployment (source of truth):** `/mnt/user/appdata/custos-v2` — a git checkout, bind-mounted into
+- **Deployment (source of truth):** `/mnt/dockermain/appdata/custos-v2` — a git checkout, bind-mounted into
   the containers. This is the real, actively-developed tree; the GitHub repo can be behind it.
 - **Host OS quirk:** Unraid's `/` is tmpfs. Persistent things live on `/mnt/user/...` or
   `/boot/config/...`.
@@ -61,10 +61,17 @@ rules file), copy the "Operating rules" section into it.
 - **Windows clone uses `core.autocrlf=true`.** Commit locally (git normalises to LF), push, then on
   the box:
   ```
-  cd /mnt/user/appdata/custos-v2 && git fetch origin -q && git reset --hard origin/main
+  cd /mnt/dockermain/appdata/custos-v2 && git fetch origin -q && git reset --hard origin/main
   ```
   **Do not** edit files on Windows and `scp` them onto the box and commit there — the CRLF makes git
   see every line changed.
+- **Deployment moved to SSD 2026-09-18.** The live checkout is now
+  `/mnt/dockermain/appdata/custos-v2` (SSD), not `/mnt/user/appdata/custos-v2` — the old array dir is
+  kept as a backup (delete once confident). The sidecar moved to
+  `/mnt/dockermain/appdata/custos-sidecar`, and `/boot/config/go`, the sidecar compose files,
+  `watchdog.sh` and reasonix's session key were updated to match. Docker's own storage
+  (`/var/lib/docker` → `pgdata`, image layers) was already on the SSD. Do NOT bridge the two with a
+  symlink: Docker refuses a symlinked bind source.
 - **Tests:** `docker exec custos-v2-harness-1 python -m pytest -q` (uses a throwaway DB + temp
   workspace; safe). Targeted: append paths, e.g. `tests/test_dispatcher.py`.
 - **Restart only what a change affects:** `docker restart custos-v2-harness-1` (dispatcher/agent code)
@@ -254,7 +261,7 @@ rules file), copy the "Operating rules" section into it.
    pointed at, `192.168.250.235`, accepted no connections on any port — it is the stopped qwen
    server — so every DeepSeek hiccup fell back to a dead endpoint and died with
    `OpenAIConnectionError`. Removed rather than repointed: failures now fail fast and cleanly.
-   Backup at `/mnt/user/appdata/custos-v2/.env.bak-pre-fallback-removal` (0600). Remember that
+   Backup at `/mnt/dockermain/appdata/custos-v2/.env.bak-pre-fallback-removal` (0600). Remember that
    `docker restart` does **not** re-read `env_file` — the containers had to be recreated with
    `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --force-recreate harness
    scheduler`.
@@ -295,11 +302,11 @@ rules file), copy the "Operating rules" section into it.
 ## Sidecar (the conversational interface)
 
 **Reasonix** — a container, `custos-reasonix-sidecar`, defined in
-`/mnt/user/appdata/custos-sidecar/reasonix/` (Dockerfile + compose + `config/reasonix.toml` + a
+`/mnt/dockermain/appdata/custos-sidecar/reasonix/` (Dockerfile + compose + `config/reasonix.toml` + a
 README that explains the two non-obvious container settings). It replaced opencode on 2026-09-15.
 
 - **Web UI:** `http://192.168.100.231:4096`. Password auth; the password is unchanged from opencode and
-  still lives in `/mnt/user/appdata/custos-sidecar/opencode/server-password` (0600 — read it there,
+  still lives in `/mnt/dockermain/appdata/custos-sidecar/opencode/server-password` (0600 — read it there,
   don't paste it around). Only a bcrypt hash is in the config.
 - **Role prompt:** `system_prompt` in `config/reasonix.toml` (interface-agent + harness-engineer),
   adapted from the old opencode `AGENTS.md`. Its MCP tool names are `mcp__custos__<tool>`.
@@ -313,11 +320,11 @@ README that explains the two non-obvious container settings). It replaced openco
   - The config template keeps a `REPLACE_WITH_BCRYPT_HASH` placeholder; re-run
     `set-password.sh` after copying a fresh config over the live one, then restart — otherwise
     every login 401s.
-- **opencode** is retired but its directory is still on disk (`/mnt/user/appdata/custos-sidecar/opencode/`);
+- **opencode** is retired but its directory is still on disk (`/mnt/dockermain/appdata/custos-sidecar/opencode/`);
   nothing starts it. The older **Claude Code** sidecar + watchdog also still live under
-  `/mnt/user/appdata/custos-sidecar/`.
+  `/mnt/dockermain/appdata/custos-sidecar/`.
 - **`custos-bridge` (:8788)** is the *app's* backend, not the operator's console: a FastAPI service in
-  `/mnt/user/appdata/custos-sidecar/bridge/` that drives `reasonix acp` over the documented Agent
+  `/mnt/dockermain/appdata/custos-sidecar/bridge/` that drives `reasonix acp` over the documented Agent
   Client Protocol and exposes HTTP+SSE, plus thin mirrors of the Custos API. Auth is a bearer token in
   `bridge/state/bridge-token` (0600, `./set-token.sh`). Built FROM the sidecar image. Its README has
   the endpoint table and the two traps (credentials come from Reasonix's own `.env`; the ACP client
