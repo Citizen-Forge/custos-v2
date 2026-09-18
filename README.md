@@ -1,293 +1,315 @@
 # Custos v2
 
-Full rewrite of [Custos](https://github.com/Citizen-Forge/custos): a
-durable, queue-friendly agent harness for slow/low-concurrency local
-models, with frontier models used narrowly. See [PLAN.md](PLAN.md) for the
-phased roadmap and the reasoning behind every major decision — read that
-first, this README is just "how to run what exists so far."
+A durable, self-hosted agentic software-development lifecycle engine. Work is
+a real product roadmap in [Beads](https://github.com/gastownhall/beads) (`bd`);
+a bounded pool of named agent **seats** works it; a separate **verifier**
+judges each finished ticket against its own acceptance criteria; and the
+harness can improve its own source under a sandbox-and-review boundary. See
+[PLAN.md](PLAN.md) for the phase-by-phase design and the reasoning behind each
+decision — this README is "how it runs today."
 
-## Status
+## Status (2026-09)
 
-Phases 1–7 have working substrate, live-tested against real Postgres +
-real Beads (+ real Docker, for the Phase 7 sandbox). As of 2026-08-29 a
-real local model is reachable too, and the core mechanisms (product-owner
-judgment, kill/resume durability, the permission gate) are proven live
-against it, not just scripted fakes — see PLAN.md's "Open questions" for
-the full writeup. Work is now assigned
-to specific named agent **seats** by a product-owner agent, not claimed
-generically by one worker — see PLAN.md's Phase 4 "Emergent seat system"
-and the "Seats" section below. As of 2026-08-30 the harness can also
-modify its own source under the same containment substrate — see
-"Self-modification" below. See PLAN.md for the detailed status of each
-phase.
+All seven planned phases have working substrate, live-tested against real
+Postgres, real Beads, and real Docker. The pieces, all live-proven:
 
-Work items live in [Beads](https://github.com/gastownhall/beads) (`bd`),
-not a bespoke queue table — see PLAN.md's "Decisions locked in" for why.
-`bd`'s own `.beads/` data directory lives in the mounted `workspace/`
-folder alongside whatever files an agent's tool calls touch. Test runs
-use their own isolated temp workspace *and* a fresh throwaway Postgres
-database (`tests/conftest.py`) — both were found live to be missing at
-different points this session (real tickets/seats were leaking into the
-same store the actual services use) and fixed.
+- **Dispatcher** — capacity-bounded, roadmap-ordered, one ticket at a time per
+  project; verifies on close and only then merges the work.
+- **Emergent seats** — a product-owner agent assigns work to named specialists
+  and creates new ones when nothing existing fits.
+- **Projects & workspaces** — a project is a Beads epic; each gets its own
+  workspace and product repo, and each ticket gets its own worktree.
+- **Acceptance-criteria verifier** with a bounded rework loop, plus an
+  **escalation** handler for tickets that get parked.
+- **Scheduler** running triage, verification, progress checks and more on a
+  loop.
+- **Overwatch / reviewer** and **self-modification** of `src/harness/*` under
+  containment.
 
-## Running it (Docker only — no local Python install, see
-[[feedback_docker-for-runtimes]])
+The first product built on it is **Subspatial**
+(`workspace-o0n`): a Godot 4 / GDScript isometric starship game, the native
+successor to the suspended TypeScript project **Silent Run** (`workspace-9jg`,
+kept on `dispatch_hold`).
+
+## How it works
+
+- **Work graph is Beads.** `bd`'s dotted hierarchy (`project → epic → story`)
+  *is* the data model — a project is a top-level `epic`, its epics are
+  children, stories are grandchildren. There is no parallel queue table.
+- **Dispatcher** (`src/harness/dispatcher.py`) picks assigned work in roadmap
+  order (project priority → epic priority → story priority → natural id),
+  starting nothing else in a project until its earliest unfinished ticket is
+  done. Orphans (`in_progress`) resume first. Human-labelled and
+  dispatch-held projects are skipped. Capacity is `MAX_RUNNING_AGENTS`.
+- **Worker** (`src/harness/worker.py`) runs one ticket's LangGraph thread. In
+  a fresh start it lays out the opening prompt (`bd prime` context + ticket
+  text + acceptance criteria + any verifier finding), then the agent works and
+  commits. On success the harness commits the ticket's own worktree and closes
+  it.
+- **Verifier** (`src/harness/verifier.py`) judges a closed ticket against its
+  acceptance criteria, using the ticket's real diff and a mechanical test run,
+  and merges it into the project's integration branch only on a pass. A fail
+  reopens it with the finding (bounded by `MAX_VERIFIER_REWORKS`) and then parks
+  it for a human.
+- **Escalations** (`src/harness/escalations.py`) let the product-owner resolve
+  parked tickets (fix the spec and requeue, reassign, or dismiss), bounded by
+  `MAX_ESCALATION_ATTEMPTS`.
+- **Postgres** holds LangGraph checkpoints and the harness's own tables
+  (prompts, seats, verifications, proposals).
+
+## Running it (Docker only)
 
 ```bash
-# all tests, including the real end-to-end resume proof (needs Postgres +
-# the real bd CLI, no LLM needed — see tests/test_worker_resume.py)
-docker compose up -d postgres
-docker compose run --rm harness pytest -v
+cp .env.example .env            # then edit: model endpoints/keys live here
 
-# create a real ticket
+docker compose up -d            # postgres + harness (dispatcher) + api + scheduler
+```
+
+- **harness** — `python -m harness.dispatcher`: the dispatcher/agent pool.
+- **api** — FastAPI + dashboard on `:8000`.
+- **scheduler** — periodic jobs (see below), on by default.
+- **postgres** — checkpoints + harness tables.
+- **sandbox-runner** — only under `--profile sandbox`; the one service that
+  mounts the Docker socket (used by the sandbox/self-mod pipeline).
+
+Full test suite (uses a throwaway Postgres DB and temp workspace —
+`tests/conftest.py`):
+
+```bash
+docker compose run --rm harness pytest -v
+```
+
+Create a ticket:
+
+```bash
 docker compose run --rm harness python scripts/enqueue_demo.py \
     "demo ticket" "list the files in the workspace"
 ```
 
-**A freshly enqueued ticket has no seat assigned yet** — since the Phase 4
-seat system landed, a worker only claims tickets explicitly assigned to
-its own seat (`ready_for_seat`), never just "any ready ticket." Assign it
-one of two ways before `docker compose up harness` will pick it up:
+A fresh ticket has **no seat** until it is assigned. Either let the
+product-owner triage it, or assign it directly:
 
 ```bash
-# realistic path: let the product-owner triage it (creates a specialist
-# seat if nothing existing fits, its own judgment call)
 docker compose run --rm harness python scripts/run_product_owner.py
 
-# OR bootstrap path: assign it directly to the default "worker" seat
+# or bootstrap: assign to the default "worker" seat
 docker compose run --rm harness python -c "
 from harness import beads
 beads.ensure_initialized()
-beads.assign_to_seat('<ticket-id-from-enqueue_demo-output>', 'worker')
+beads.assign_to_seat('<ticket-id>', 'worker')
 "
-
-docker compose up harness
 ```
 
-`docker compose up harness` runs the `worker` seat (`DEFAULT_SEAT_ID`) by
-default — set `SEAT_ID=<seat_id>` (now correctly wired through
-docker-compose.yml as of 2026-08-29; previously silently ignored — a real
-bug, see PLAN.md) to run a worker process for a specialist seat the
-product-owner has created instead. `LOCAL_MODEL_*` env vars are the
-shared model chain every seat falls back to unless it's explicitly
-registered its own (`routing.py`'s `default_role`) — defaults to
-`http://host.docker.internal:11434/v1`, a host-machine Ollama. Override in
-`.env` (copy from `.env.example`) to point at a different OpenAI-compatible
-endpoint — e.g. a llama.cpp/vLLM server on another machine on the LAN.
+### Model configuration
 
-## Seats and the product-owner
+`LOCAL_MODEL_*` is the shared chain every role falls back to (this deployment
+points at a DeepSeek OpenAI-compatible endpoint; a local llama.cpp/vLLM/Ollama
+server works the same way). `CLASSIFIER_*` configures the permission-gate model
+separately. `LOCAL_FALLBACK_*` adds a second chain entry. All variables in
+`.env` reach the containers (`env_file`), not just a hand-picked few.
+
+## Dispatch, seats, and the product-owner
+
+Seats are **emergent, not a fixed roster**: the product-owner looks at
+unassigned ready tickets and the current seat roster (with each seat's
+outcomes), assigns tickets to existing seats, and creates new specialist seats
+(active immediately) when nothing fits. That is a model judgment call — but
+only the *seat* is.
+
+The ticket itself is deterministic: the next one is the project's roadmap
+front, highest priority, `bd`-ready (no open dependencies). `dispatcher.
+assign_front()` assigns it to the project's seat with **no model call** when
+the project already has exactly one seat working it; the product-owner is only
+woken when a project has no seat yet or several (a real choice of specialist).
+A seat that already declined a ticket is never auto-picked for it.
+
+## Projects and workspaces
+
+- A project maps to a Beads epic (`issue_type="epic"`) and gets
+  `PROJECTS_ROOT/<project_id>` (mounted at `/projects`) with its own git repo —
+  product code never lands beside the harness's issue database, and projects
+  can't reach each other's files.
+- Each **ticket** gets its own `git worktree` on a branch off the project's
+  integration branch (default `master`), so no two agents write the same tree
+  and each ticket's commit is attributable to it. Work is merged only after the
+  verifier passes.
+- **Toolchain**: a project declares the commands its work needs as `toolchain`
+  metadata (e.g. `node,npm` or `godot`). Dispatch refuses a ticket whose
+  toolchain is missing, loudly, instead of producing unbuildable work. The
+  shared image ships Node and Godot so agents can actually build and test.
+- **Test command**: a project declares `test_command` (e.g.
+  `godot --headless --path . --script tests/run_tests.gd`); the verifier runs
+  it and reads `# tests/# pass/# fail` plus the exit code. A project with no
+  declared command falls back to a `package.json` + `npm test` script.
+
+## Permissions and containment
+
+Three deliberately separate layers (`src/harness/permissions.py`):
+
+1. **Allow-list fast path** — ordinary workspace-scoped build/test/local-git/
+   `bd`-read commands skip the classifier.
+2. **LLM classifier** — everything else is judged per call (tool name + args).
+3. **Hard denials** — a small set is *not* the classifier's call, because they
+   are integrity boundaries, not task judgments: agents may not move the
+   integration branch (`git update-ref`, `branch -f`, `reset`, `checkout`, …)
+   or mutate the board outside the harness's pathways (`bd close`, `update`,
+   `delete`, …). A mechanical backstop (`workspaces.
+   revert_unexpected_integration_move`) reverts an integration-branch move the
+   gated merge did not make, since a blacklist is bypassable by construction.
+
+File tools are additionally confined to the ticket's workspace by
+`permissions.check_within_workspace` (a hard invariant, not classifier-
+overridable). `shell_exec` is not path-jailed — the classifier is its gate,
+same as this project's stated posture.
+
+## API and dashboard
 
 ```bash
-docker compose run --rm harness python scripts/run_product_owner.py
+docker compose up -d api        # http://localhost:8000
 ```
 
-One triage session: the product-owner looks at unassigned ready tickets
-and the current seat roster (each with its outcomes), assigns tickets to
-existing seats, and creates new specialist seats (via the meta-agent,
-active immediately, no approval needed) when nothing existing fits — its
-own judgment call, not a rule table. See the dashboard's Seats section or
-`GET /seats` to see the roster it's built. Not scheduled yet, run
-manually for now — same as the meta-agent below.
+The dashboard is a no-build vanilla HTML/JS page (`public/index.html`, polls
+every 5s) with four tabs:
 
-## API + dashboard
+- **Home** — a project-wide progress bar, the **Roadmap**, and the **Board**
+  (Open / In Progress / Blocked / Done). An in-progress ticket shows its
+  assigned seat and **"last move 12s ago · N steps"**, read from the
+  checkpointer, so you can see it's moving without opening another tab.
+  `human`-labelled tickets render as Blocked even when closed (closed + human
+  is failed work, not done).
+- **Agents** — Working Now (running agents) and the seat roster with outcomes.
+- **Wiki** — agent profile pages.
+- **Settings** — cost slider, avatar style, model registry.
 
-```bash
-docker compose up -d api   # http://localhost:8000, brings up postgres too
+Key endpoints (`API_AUTH_TOKEN` in `.env` gates everything except `/health`
+and the static dashboard; send `Authorization: Bearer <token>`):
+
+```
+GET    /tickets?status=ready|in_progress|human
+GET    /projects
+PATCH  /issues/{id}/priority
+POST   /projects | /projects/{id}/epics | /epics/{id}/stories
+GET    /tickets/{id}          POST /tickets/{id}/respond | /dismiss
+GET    /seats                 GET  /agents/running
+GET    /outcomes/{actor}      GET  /toolchain
+GET    /prompts/pending       POST /prompts/{role}/{version}/approve
+GET    /tool-proposals        POST /tool-proposals/{id}/approve|reject
+GET    /self-mod-proposals    POST /self-mod-proposals/{id}/approve|reject
+GET    /wiki | /wiki/{slug}   GET  /settings/{cost-slider,model-registry,avatar-style}
 ```
 
-Open `http://localhost:8000/` for the dashboard (vanilla HTML/JS, no
-build step — `public/index.html`): the seat roster (with each seat's
-outcomes), ready/in-progress/needs-a-human ticket lists, pending prompt
-proposals with an Approve button, and an outcomes lookup. Polls every 5s.
+## Scheduler
+
+`scripts/run_scheduler.py` runs, in order each cycle (default every 1800s),
+first skipping model-backed jobs when a cycle has nothing to act on:
+
+- **escalations** — resolve parked tickets first (the front of a project
+  blocks everything behind it).
+- **product_owner** — triage unassigned work.
+- **overwatch** — capability-gap scanning / tool proposals.
+- **meta_agent** — prompt-revision review per seat.
+- **verifier** — judge closed tickets awaiting a verdict.
+- **progress** — flag agents that look stalled/looping (cheap checkpointer
+  signal, model only past a threshold; deliberately does not kill a run).
+
+To opt a deployment back out of automatic scheduling:
+`docker compose up postgres harness api`.
+
+## Meta-agent, overwatch, and tool promotion
+
+`src/harness/meta_agent.py` reviews a role's recent outcomes and proposes a
+system-prompt revision; it **activates on its own verdict** (the model's
+judgment *is* the review — no human step), and stays reachable via
+`POST /prompts/{role}/{version}/approve` as a manual override.
+
+`src/harness/overwatch.py` proposes tools from real capability-gap evidence,
+`sandbox.run_sandboxed` runs candidate code in a maximally-restricted ephemeral
+container (`--network none`, `--read-only`, `--cap-drop=ALL`, no socket, no
+secrets), and `src/harness/reviewer.py` forms an allow/deny verdict on the
+source **and** the sandbox evidence. A clean sandbox run alone is not enough to
+allow — the reviewer reads the source.
 
 ```bash
-curl localhost:8000/tickets?status=ready
-curl localhost:8000/prompts/pending
-curl -X POST localhost:8000/prompts/worker/1/approve
-```
-
-Read-mostly by design (PLAN.md Phase 6) — no auth yet, not exposed beyond
-the docker-compose network today.
-
-## Meta-agent
-
-`scripts/run_meta_agent.py` reviews a role's recent outcomes (sourced from
-Beads' own audit trail) and proposes a system-prompt revision — queued as
-*pending*, never applied automatically:
-
-```bash
-docker compose run --rm harness python scripts/run_meta_agent.py
-# then review + apply via the API:
-curl localhost:8000/prompts/pending
-curl -X POST localhost:8000/prompts/worker/<version>/approve
-```
-
-## Sandbox (Phase 7 — overwatch's containment boundary)
-
-```bash
-# needs the Docker socket -- deliberately never mounted in harness/api,
-# see PLAN.md Phase 7 for why. A separate profile so it isn't started by
-# `docker compose up` by accident.
-docker compose --profile sandbox run --rm sandbox-runner pytest tests/test_sandbox.py -v
-```
-
-Proves the actual containment properties live against real Docker: no
-secrets visible by default, the mount is read-only, `--network none`
-blocks network access, `--pids-limit` caps a fork-bomb attempt, and a
-timed-out sandbox container is actually killed, not left running. The
-regular test suite (`docker compose run --rm harness pytest`) skips these
-automatically — no Docker socket there, which is itself the boundary
-this phase is about, not an oversight.
-
-`src/harness/tool_proposals.py` + `GET/POST /tool-proposals` + the
-dashboard's Tool Proposals section carry a candidate tool from
-`propose` → `sandboxed` → `reviewed` → `approved`/`rejected`. Nothing
-auto-activates at any stage, unlike a new seat's first prompt — `approve`
-is always a distinct, human-triggered call.
-
-```bash
-# overwatch proposes a tool from real capability-gap evidence (or an
-# explicit brief while that evidence is still thin):
 docker compose run --rm -e OVERWATCH_BRIEF="..." harness python scripts/run_overwatch.py
-# sandboxing needs the Docker socket, so it's a separate step, sandbox-runner only:
 docker compose --profile sandbox run --rm sandbox-runner python scripts/run_sandbox_for_proposals.py
-# reviewer forms a real allow/deny verdict on the source + sandbox evidence:
 docker compose run --rm harness python scripts/run_reviewer.py
-# then a human approves/rejects via the API/dashboard, same as any tool proposal.
 ```
+
+Sandbox containment is live-proven (`tests/test_sandbox.py`, run via the
+`sandbox-runner` profile): no env vars visible, read-only mount, no network,
+`--pids-limit` caps a fork bomb, and a timed-out sandbox is actually killed.
 
 ## Self-modification (the harness improving its own source)
 
-Same containment shape as tool proposals above, but for `src/harness/*`
-itself — the "control plane" PLAN.md's Phase 7 design walls off ("no
-agent, including overwatch, ever writes here directly"). The only code
-with real write access to the actual tree is `run_self_mod_deploy.py`'s
-own trusted orchestration; a self-modifier agent only ever writes to a
-separate, isolated checkout.
+Same shape for `src/harness/*` — the "control plane" no agent may write
+directly. A self-modifier agent only writes to an isolated checkout; the only
+code with write access to the real tree is `run_self_mod_deploy.py`'s trusted
+orchestration, and deploy enforces a hard non-LLM precondition (the sandboxed
+run had zero real test failures). An `allow` verdict approves and deploys
+without a human gate; git history is the rollback.
 
 ```bash
-# propose a change to the harness's own source, from real capability-gap
-# evidence or an explicit brief:
 docker compose run --rm -e SELF_MOD_BRIEF="..." harness python scripts/run_self_modifier.py
-# sandboxed test run against the diff -- a real isolated image build +
-# throwaway Postgres, needs the Docker socket, sandbox-runner only:
 docker compose --profile sandbox run --rm sandbox-runner python scripts/run_self_mod_sandbox.py
-# reviewer forms a real allow/deny verdict on the diff + sandbox evidence:
 docker compose run --rm harness python scripts/run_self_mod_reviewer.py
-# approved proposals: applies the diff to the REAL tree, re-tests it
-# there as a final hard gate, commits, and rebuilds/restarts the
-# affected services -- also sandbox-runner only (needs both the Docker
-# socket and write access to the real repo):
 docker compose --profile sandbox run --rm sandbox-runner python scripts/run_self_mod_deploy.py
 ```
 
-**No human approval gate here, deliberately** (the user's own explicit
-call) — an `allow` verdict immediately approves, and deploy immediately
-applies it once its own hard mechanical precondition is met (the
-sandboxed run had zero real test failures, not just an "allow" from the
-model). Git history is the actual rollback mechanism: a bad "allow" is a
-`git revert` away, not something a pre-deployment approval step was ever
-going to catch better than a real, passing test suite already does.
-`approve`/`reject` stay reachable directly via the API as a manual
-override path, same as every other proposal system in this project, but
-nothing waits on it. Live-proven end to end 2026-08-30 against a real
-(intentionally trivial) proposal — see PLAN.md's dated section for the
-full trace, including two real bugs this surfaced and fixed
-(Docker-out-of-Docker forcing raw `docker build`/`run`/`network` calls
-instead of `docker compose` for the sandboxed/final test runs, and a
-missing Compose CLI plugin in `sandbox-runner`'s own image).
-
 ## Sidecar interface agent (conversational, from your phone)
 
-`mcp-server/` is a separate MCP server exposing this harness's real API
-(projects/tickets/seats) as tools to an ordinary Claude Code session —
-run wherever you normally run Claude Code, not inside this project's own
-docker-compose stack, with Claude Code's own Remote Control enabled so
-it's reachable from claude.ai/code and the mobile app. Gives
-conversational, Sonnet-tier planning against a live deployment at
-subscription pricing instead of a parallel per-token system. See
-[`mcp-server/SIDECAR.md`](mcp-server/SIDECAR.md) for setup, the
-role prompt, and — importantly — which API URL to use, which depends on
-*where* the sidecar itself runs relative to the deployment (a host-level
-process on the same box needs a different address than one on another
-LAN device, if the deployment uses `docker-compose.prod.yml`'s macvlan
-overlay below).
+`mcp-server/` is a separate MCP server exposing this harness's API
+(projects/tickets/seats) as tools to an ordinary Claude Code session, run
+wherever you normally run Claude Code with Remote Control enabled. See
+[`mcp-server/SIDECAR.md`](mcp-server/SIDECAR.md) for setup, the role prompt,
+and which API URL to use (it depends on where the sidecar runs relative to the
+deployment).
 
 ## Production deployment (macvlan overlay)
 
-`docker-compose.prod.yml` is an overlay for deploying alongside other
-apps on a LAN box (this project's convention, shared with
-[irl](https://github.com/Citizen-Forge/irl) and others): internal
-services (postgres, harness, scheduler) stay on the private
-docker-compose network only, while `api` gets a real static LAN IP via
-Docker's macvlan driver (`br0`) so it's reachable from other real
-devices on the network — plus a *second*, pinned static IP on the
-internal bridge network specifically so a host-level process (like a
-sidecar above, if it runs on the same box) can still reach it, since a
-Docker host can never reach its own macvlan children.
+`docker-compose.prod.yml` deploys alongside other apps on a LAN box: internal
+services (postgres, harness, scheduler) stay on the private compose network,
+while `api` gets a static LAN IP via Docker's macvlan driver (`br0`) plus a
+pinned static IP on the internal bridge — so a host-level process (like the
+sidecar) can reach it, since a Docker host cannot reach its own macvlan
+children.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d harness api scheduler
 ```
 
-No git-based deploy today — sync the working tree over (`tar`-over-SSH,
-excluding `.git`/`.env`/`workspace`/`sandbox-scratch`), rebuild, restart.
-`.env` lives only on the deployment target, never synced from a dev
-checkout; `REPO_HOST_PATH`/`SANDBOX_SCRATCH_HOST_PATH` (needed for
-self-modification's Docker-out-of-Docker calls above) resolve from
-`${PWD}` at compose-invocation time, not from `.env`, so they need no
-manual per-deployment configuration as long as commands run from the
-deployment's own working directory.
+`.env` lives only on the deployment target. `REPO_HOST_PATH` /
+`SANDBOX_SCRATCH_HOST_PATH` resolve from `${PWD}` at compose time. A common
+operator workflow is to commit locally, push, then on the box
+`git fetch origin -q && git reset --hard origin/main`, and restart only the
+service a change affects (`docker restart custos-v2-harness-1` for
+dispatcher/agent code, `custos-v2-scheduler-1` for scheduled jobs; the
+dashboard is served live).
 
-## Verifier (acceptance-criteria pass/fail)
+## Proving the durability guarantee manually
 
-A real, automated positive-feedback signal (replaces the earlier idea of
-a human-feedback "Laurels" surface): give a ticket explicit acceptance
-criteria at creation time, and once a seat closes it, a separate verifier
-agent judges the real evidence against those criteria and records a
-pass/fail — not self-graded by the seat that did the work.
+1. Enqueue a ticket that needs a couple of tool calls, and assign it to a seat.
+2. `docker compose up -d harness`, let it start — watch for
+   `starting thread <id>`.
+3. `docker compose kill harness` (once a real tool-call round trip is in the
+   logs).
+4. `docker compose up -d harness` — look for `resuming thread <id>` (distinct
+   from `starting thread`), confirming checkpoint resume rather than restart.
 
-```bash
-docker compose run --rm harness python scripts/run_verifier.py
+## Repository layout
+
 ```
-
-## Scheduler (on by default)
-
-Runs product-owner triage, meta-agent revision proposals, overwatch
-capability scanning, and the verifier on a loop instead of manual
-`docker compose run` invocations for each — starts automatically with
-`docker compose up`, same as harness/api. Deliberately a reversal of v1's
-"autonomy off by default" posture, per the user's own call: this project
-is built around a local, unmetered model, so the cost/risk calculus that
-justified gating recurring work behind manual activation elsewhere
-doesn't really apply here. Narrowly scoped, though — the things that
-protect against a *bad change silently taking effect* (prompts.py's
-revision-approval step, tool_proposals.py's approve/reject gate) are
-untouched; this only flips whether recurring work gets kicked off on its
-own, not whether generated tool code or prompt revisions auto-activate.
-
-```bash
-# to opt back OUT of automatic scheduling for a given deployment:
-docker compose up postgres harness api
+src/harness/     the harness (dispatcher, worker, verifier, product_owner,
+                 seats, routing, permissions, api, self_mod, sandbox, …)
+public/          dashboard (index.html, no build step)
+scripts/         operator entrypoints (scheduler, product-owner, verifier,
+                 escalations, self-mod, requeue helpers, probes)
+tests/           pytest suite (real Postgres + real bd; isolated per session)
+projects/        per-project workspaces (created at runtime, not tracked)
+workspace/       the harness's own store (.beads, wiki, avatars)
+mcp-server/      sidecar interface agent
 ```
-
-## Proving the durability guarantee manually (with a real model)
-
-Verified live 2026-08-29 against a real model, not just described here —
-see PLAN.md's "Open questions" for the actual log evidence.
-
-1. `docker compose run --rm harness python scripts/enqueue_demo.py "<title>" "<prompt requiring a couple tool calls>"`
-2. Assign it to a seat (see "Running it" above — a fresh ticket has no
-   seat by default).
-3. `docker compose up harness` and let it start working — watch for
-   `starting thread <id>` in the logs.
-4. `docker compose kill harness` partway through (once you've seen at
-   least one real tool-call round trip in the logs).
-5. `docker compose up harness` again — look for `resuming thread <id>` in
-   the logs (a distinct message from the fresh-claim `starting thread`,
-   confirming it picked the same ticket back up from its last checkpoint
-   via `bd list --status=in_progress`, not a restart from scratch).
 
 ## License
 
-[PolyForm Noncommercial 1.0.0](LICENSE) — free to use, modify and share for any noncommercial purpose.
+[PolyForm Noncommercial 1.0.0](LICENSE) — free to use, modify and share for any
+noncommercial purpose.
