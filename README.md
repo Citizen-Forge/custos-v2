@@ -47,15 +47,40 @@ kept on `dispatch_hold`).
   commits. On success the harness commits the ticket's own worktree and closes
   it.
 - **Verifier** (`src/harness/verifier.py`) judges a closed ticket against its
-  acceptance criteria, using the ticket's real diff and a mechanical test run,
-  and merges it into the project's integration branch only on a pass. A fail
-  reopens it with the finding (bounded by `MAX_VERIFIER_REWORKS`) and then parks
-  it for a human.
+  acceptance criteria. Machine-checkable criteria (`acceptance_checks`, e.g.
+  "file X exists", "the suite runs at least N tests") are evaluated in code
+  first: a failed check fails the ticket with no model call, and a ticket whose
+  criteria are all mechanical can pass without one. Free-text criteria go to
+  the model, which also sees the mechanical results. A pass merges into the
+  project's integration branch; a fail reopens it with the finding (bounded by
+  `MAX_VERIFIER_REWORKS`) and then parks it for a human.
 - **Escalations** (`src/harness/escalations.py`) let the product-owner resolve
   parked tickets (fix the spec and requeue, reassign, or dismiss), bounded by
   `MAX_ESCALATION_ATTEMPTS`.
 - **Postgres** holds LangGraph checkpoints and the harness's own tables
   (prompts, seats, verifications, proposals).
+
+## Acceptance checks (structured criteria)
+
+Beyond free-text criteria, a ticket can carry `acceptance_checks`: a JSON list
+of machine-checkable assertions the verifier evaluates in code before any model
+call. Supported forms (`harness/acceptance.py`); paths are relative to the
+project workspace and confined there:
+
+```
+{"type": "file_exists",     "path": "project.godot"}
+{"type": "file_absent",     "path": "old/TODO"}
+{"type": "contains",        "path": "README.md", "text": "## Test"}
+{"type": "matches",         "path": "src/x.gd", "pattern": "func \\w+"}
+{"type": "tests_at_least",  "count": 1}
+```
+
+A failed check is a fail with no model call; a ticket whose criteria are all
+mechanical and pass can pass with no model call too. The model is asked only
+when the ticket also has free-text criteria, and it sees the mechanical results
+as measured evidence. The product-owner sets checks when it creates a story (or
+on an escalation), and the API accepts `acceptance_checks` on the create-story
+body.
 
 ## Running it (Docker only)
 
@@ -105,8 +130,14 @@ beads.assign_to_seat('<ticket-id>', 'worker')
 `LOCAL_MODEL_*` is the shared chain every role falls back to (this deployment
 points at a DeepSeek OpenAI-compatible endpoint; a local llama.cpp/vLLM/Ollama
 server works the same way). `CLASSIFIER_*` configures the permission-gate model
-separately. `LOCAL_FALLBACK_*` adds a second chain entry. All variables in
-`.env` reach the containers (`env_file`), not just a hand-picked few.
+separately — a small fast local model is a good fit there. The scheduler
+resolves each job's model as `<ROLE>_MODEL_*` → `SCHEDULER_MODEL_*` →
+`LOCAL_MODEL_*`, and the verifier/reflection use `VERIFIER_MODEL_*` /
+`REFLECTION_MODEL_*`, so advisory roles (`progress`, `reflection`) can run on a
+local model while the seats, product-owner and verifier stay on a frontier one.
+`LOCAL_FALLBACK_*` adds a second chain entry, engaged automatically on a
+provider error (e.g. a 402 once credits run out). All variables in `.env` reach
+the containers (`env_file`), not just a hand-picked few.
 
 ## Dispatch, seats, and the product-owner
 
