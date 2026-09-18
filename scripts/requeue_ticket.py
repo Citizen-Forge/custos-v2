@@ -30,12 +30,18 @@ def main() -> None:
         for issue_id in args.ids:
             if args.reason:
                 beads.set_metadata(issue_id, "rework_reason", args.reason)
+            _reset_thread(conn, issue_id)
+            beads.reopen(issue_id, args.reason or "requeued by operator")
+            # The human flag comes off LAST. It is what keeps the dispatcher
+            # from picking the ticket up; removing it first opened a window
+            # where dispatch claimed the ticket before reopen had reset its
+            # status, leaving a running agent on an `open`, unassigned ticket.
+            # Found live 2026-09-18: workspace-o0n.3.2, requeued while the
+            # dispatcher was mid-poll.
             try:
                 beads.remove_human_flag(issue_id)
             except Exception:
                 pass
-            _reset_thread(conn, issue_id)
-            beads.reopen(issue_id, args.reason or "requeued by operator")
             print(f"requeued {issue_id}")
 
 
