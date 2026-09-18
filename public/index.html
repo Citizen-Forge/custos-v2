@@ -129,6 +129,7 @@
   }
   .priority-badge.p0, .priority-badge.p1 { background: var(--accent); color: white; }
   .story-seat { font-size: 0.75rem; opacity: 0.8; }
+  .story-activity { font-size: 0.72rem; color: var(--muted); margin-top: 0.15rem; }
 
   .kanban-board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; margin-top: 0.75rem; }
   .kanban-col { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem; min-height: 3rem; }
@@ -622,9 +623,27 @@ function renderProjectProgress(project) {
   </div>`;
 }
 
+function relTime(iso) {
+  // "how long ago", from the checkpointer's last-step timestamp. The board
+  // polls every 5s, so this ticks without any extra endpoint.
+  const then = Date.parse(iso);
+  if (isNaN(then)) return "";
+  const s = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
+}
+
 function kanbanCard(story) {
   const seat = (story.metadata && story.metadata.assigned_seat) || null;
   const blocked = isBlocked(story);
+  // An in-progress ticket shows when it last took a graph step and how many
+  // it has taken, so "is it actually moving?" is answerable from the board
+  // instead of the Agents tab or an API call.
+  const activity = (story.status === "in_progress" && story.last_activity)
+    ? `<div class="story-activity">last move ${relTime(story.last_activity)}${
+        story.activity_steps != null ? ` · ${story.activity_steps} steps` : ""}</div>`
+    : "";
   // The old panel offered these; without them a flagged item could be
   // seen but not resolved from the dashboard.
   const actions = blocked ? `<div class="kanban-card-actions">
@@ -637,6 +656,7 @@ function kanbanCard(story) {
     <div class="kanban-card-epic">${escapeHtml(story.epicTitle || "")}</div>
     <div class="kanban-card-title"><span class="id">${story.id}</span> ${escapeHtml(story.title)}</div>
     ${seat ? `<div class="story-seat">→ ${escapeHtml(seat)}</div>` : ""}
+    ${activity}
     ${notes}
     ${actions}
   </div>`;

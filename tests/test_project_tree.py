@@ -101,3 +101,43 @@ def test_priority_beats_id_order():
         {"id": "p.2", "priority": 0},
     ]
     assert [i["id"] for i in sorted(issues, key=api._sort_key)] == ["p.2", "p.1"]
+
+
+# -- the board's "is it moving" signal --------------------------------
+
+
+def test_attach_activity_marks_only_in_progress_tickets(monkeypatch):
+    from harness import progress
+
+    issues = [
+        {"id": "p.1.1", "issue_type": "task", "status": "in_progress"},
+        {"id": "p.1.2", "issue_type": "task", "status": "open"},
+    ]
+
+    class _Conn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(api.psycopg, "connect", lambda *a, **k: _Conn())
+    monkeypatch.setattr(
+        progress, "activity",
+        lambda conn, ids: {"p.1.1": {"last_activity": "T", "steps": 7}},
+    )
+
+    api._attach_activity(issues)
+
+    assert issues[0]["last_activity"] == "T"
+    assert issues[0]["activity_steps"] == 7
+    assert "activity_steps" not in issues[1]
+
+
+def test_attach_activity_does_nothing_without_in_progress_work(monkeypatch):
+    def _no_connect(*a, **k):
+        raise AssertionError("no query should run when nothing is in progress")
+
+    monkeypatch.setattr(api.psycopg, "connect", _no_connect)
+    issues = [{"id": "p.1.2", "issue_type": "task", "status": "open"}]
+
+    api._attach_activity(issues)
+
+    assert "activity_steps" not in issues[0]

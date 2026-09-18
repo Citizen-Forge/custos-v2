@@ -188,3 +188,47 @@ def test_check_reports_never_mutate_the_ticket(monkeypatch):
     current = beads.show(story["id"])
     assert beads.is_flagged_for_human(current) is False
     assert current["status"] == "in_progress"
+
+
+# -- the board's "is it moving" signal --------------------------------
+
+
+class _FakeCursor:
+    def __init__(self, rows):
+        self._rows = rows
+        self.sql = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params):
+        self.sql = sql
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeConn:
+    def __init__(self, rows):
+        self._rows = rows
+        self.cur = None
+
+    def cursor(self):
+        self.cur = _FakeCursor(self._rows)
+        return self.cur
+
+
+def test_activity_returns_last_step_and_count():
+    conn = _FakeConn([("t1", "2026-01-01T00:00:00+00:00", 42)])
+
+    result = progress.activity(conn, ["t1"])
+
+    assert result == {"t1": {"last_activity": "2026-01-01T00:00:00+00:00", "steps": 42}}
+    assert "count(*)" in conn.cur.sql
+
+
+def test_activity_is_a_noop_without_threads():
+    assert progress.activity(object(), []) == {}

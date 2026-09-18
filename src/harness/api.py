@@ -173,8 +173,42 @@ _tree_state_lock = threading.Lock()
 _tree_state: dict = {"tree": None, "at": 0.0}
 
 
+def _attach_activity(issues: list[dict]) -> None:
+    """Add `last_activity` and `activity_steps` to in-progress tickets.
+
+    From the checkpointer, so the board can show a ticket is actually moving
+    without opening the Agents tab or asking. Best-effort: an indicator is
+    not worth failing a page for, and a project with no running ticket pays
+    nothing (no query)."""
+    from . import progress
+
+    ids = [
+        i["id"] for i in issues
+        if i.get("status") == "in_progress" and i.get("issue_type") == "task"
+    ]
+    if not ids:
+        return
+    try:
+        conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+    except Exception:
+        return
+    try:
+        info = progress.activity(conn, ids)
+    except Exception:
+        return
+    finally:
+        conn.close()
+    for issue in issues:
+        entry = info.get(issue["id"])
+        if entry:
+            issue["last_activity"] = entry["last_activity"]
+            issue["activity_steps"] = entry["steps"]
+
+
 def _load_project_tree() -> list[dict]:
-    tree = _tree_from_flat(beads.list_all())
+    issues = beads.list_all()
+    _attach_activity(issues)
+    tree = _tree_from_flat(issues)
     with _tree_state_lock:
         _tree_state["tree"] = tree
         _tree_state["at"] = time.monotonic()

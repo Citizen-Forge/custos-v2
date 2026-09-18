@@ -84,6 +84,28 @@ def last_activity(conn, thread_ids: list[str]) -> dict[str, str]:
         return {row[0]: row[1] for row in cur.fetchall()}
 
 
+def activity(conn, thread_ids: list[str]) -> dict[str, dict]:
+    """Newest checkpoint timestamp AND step count per thread, in one query.
+
+    The step count is the cheap "is it moving" number the board shows: every
+    graph step writes a checkpoint, so it advances whenever the agent does
+    anything, which is what an operator wants to see on an in-progress
+    ticket without opening the Agents tab. Same indexed query family as
+    last_activity, just with a count alongside the max."""
+    if not thread_ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT thread_id, max(checkpoint->>'ts'), count(*) "
+            "FROM checkpoints WHERE thread_id = ANY(%s) GROUP BY thread_id",
+            (list(thread_ids),),
+        )
+        return {
+            row[0]: {"last_activity": row[1], "steps": int(row[2])}
+            for row in cur.fetchall()
+        }
+
+
 def idle_seconds(last_ts: str | None, now=None) -> float | None:
     """Seconds since a thread's last graph step, or None if it has never
     checkpointed (a just-started agent, not a stalled one)."""
