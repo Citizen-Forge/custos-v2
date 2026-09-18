@@ -126,6 +126,28 @@ def test_close_blocked_by_an_open_blocker_is_not_a_failure(monkeypatch):
     beads.flag_for_human(story["id"], "test cleanup")
 
 
+def test_close_blocked_by_an_open_child_parks_instead_of_looping(monkeypatch):
+    """An open CHILD is the ticket's own subtask (create_subtask) and will
+    never close itself, so a close refusal from it must park the ticket
+    rather than retry forever. Found live 2026-09-18: workspace-o0n.2.4
+    looped every ~2 minutes with its work already landed on master."""
+    story = _assigned_story("child-close-seat")
+    beads.set_metadata(story["id"], "completion_summary", "did the work")
+    child = beads.create("leftover subtask", "d", parent=story["id"])
+    real_close = beads.close
+
+    def refuse(*a, **k):
+        raise beads.BeadsError("cannot close: 1 open child issue(s); close children first")
+
+    monkeypatch.setattr(beads, "close", refuse)
+
+    outcome = worker.work_one_ticket(StubRuntime("child-close-seat"), beads.show(story["id"]))
+
+    assert outcome == "flagged"
+    assert beads.is_flagged_for_human(beads.show(story["id"])) is True
+    real_close(child["id"], reason="test cleanup")
+
+
 def test_refusal_still_wins_over_the_completion_gate():
     """refuse_ticket must keep parking a ticket for a human rather than
     falling through to the unclaimed path."""

@@ -410,6 +410,29 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
             # past the graph and retries the close. "blocked" (not
             # "failed") so the dispatcher does not count it against the
             # retry budget.
+            #
+            # An open CHILD is different, and must not retry: it is this
+            # ticket's own subtask (create_subtask), nothing else will ever
+            # close it, so the retry loops forever. Found live 2026-09-18:
+            # workspace-o0n.2.4 looped every ~2 minutes with its work
+            # already landed on master, because the agent had created an
+            # open subtask and never closed it. Park it for the escalation
+            # role instead.
+            open_children = [
+                c for c in beads.children_of(thread_id) if c.get("status") != "closed"
+            ]
+            if open_children:
+                ids = ", ".join(c["id"] for c in open_children)
+                log.warning(
+                    "thread %s has open child issue(s) (%s); parking rather than looping",
+                    thread_id, ids,
+                )
+                beads.flag_for_human(
+                    thread_id,
+                    f"cannot close: open child issue(s) {ids}. The work is committed; close "
+                    f"or discard the child issue(s), then close this ticket.",
+                )
+                return "flagged"
             log.warning("thread %s could not close yet: %s", thread_id, e)
             return "blocked"
         log.info("thread %s complete", thread_id)
