@@ -102,9 +102,38 @@ def create_subtask(title: str, description: str, state: Annotated[HarnessState, 
     parented under the current ticket in Beads' dependency graph -- use
     this when a ticket turns out to be bigger than one sitting of work, so
     the pieces are individually trackable/resumable rather than all living
-    inside one giant thread."""
+    inside one giant thread.
+
+    This ticket cannot be completed while any of its subtasks is still
+    open. Close each one with `complete_subtask` (passing the id returned
+    here) once its work is done, before calling `complete_ticket`."""
     subtask = beads.create(title, description, parent=state["ticket_id"])
     return f"created subtask {subtask['id']}: {subtask['title']}"
+
+
+@tool
+def complete_subtask(
+    subtask_id: str, summary: str, state: Annotated[HarnessState, InjectedState]
+) -> str:
+    """Close a subtask you created with `create_subtask`, once its work is
+    done -- the counterpart that tool is missing on its own. The parent
+    ticket cannot be completed until every subtask is closed, so close each
+    one here as you finish it.
+
+    `subtask_id` must be a subtask of the ticket you are working (the id
+    `create_subtask` returned); this refuses to close anything else."""
+    parent = state["ticket_id"]
+    children = {c["id"]: c for c in beads.children_of(parent)}
+    child = children.get(subtask_id)
+    if child is None:
+        return (
+            f"{subtask_id!r} is not a subtask of {parent} -- pass an id returned by "
+            "create_subtask, or call complete_ticket to finish the ticket itself."
+        )
+    if child.get("status") == "closed":
+        return f"{subtask_id} is already closed"
+    beads.close(subtask_id, reason=summary[:500])
+    return f"closed subtask {subtask_id}"
 
 
 @tool
@@ -135,6 +164,20 @@ def complete_ticket(summary: str, state: Annotated[HarnessState, InjectedState])
     inflated one fails verification rather than passing quietly. If you
     could not finish, use refuse_ticket or decline_ticket instead."""
     ticket_id = state["ticket_id"]
+    # A ticket with open subtasks cannot be closed in Beads (bd refuses),
+    # and the harness would otherwise park it for a human at the very end
+    # of the run. Refuse HERE instead -- while the agent can still act --
+    # so it closes them with complete_subtask and completes properly.
+    open_subtasks = [
+        c["id"] for c in beads.children_of(ticket_id) if c.get("status") != "closed"
+    ]
+    if open_subtasks:
+        return (
+            "cannot complete: this ticket still has open subtask(s) "
+            + ", ".join(open_subtasks)
+            + ". Finish each and close it with complete_subtask, then call "
+            "complete_ticket again."
+        )
     beads.set_metadata(ticket_id, "completion_summary", summary[:2000])
     beads.append_note(ticket_id, f"completed: {summary}")
     return "completion recorded -- the ticket will close if nothing else intervenes"
@@ -372,6 +415,7 @@ SHARED_TOOLS = [
     write_wiki_page,
     list_wiki_pages,
     create_subtask,
+    complete_subtask,
     refuse_ticket,
     decline_ticket,
     complete_ticket,

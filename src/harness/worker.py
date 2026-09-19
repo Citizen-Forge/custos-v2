@@ -435,7 +435,8 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
                 )
                 beads.flag_for_human(
                     thread_id,
-                    f"cannot close: open child issue(s) {ids}. The work is committed; close "
+                    f"cannot close: open child issue(s) {ids}. They should have been closed "
+                    f"with complete_subtask before completing; the work is committed, so close "
                     f"or discard the child issue(s), then close this ticket.",
                 )
                 return "flagged"

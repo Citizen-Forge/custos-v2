@@ -505,8 +505,8 @@ def forbidden_reason(tool_name: str, tool_args: dict) -> str | None:
 # straight into a loop: the agent literally cannot report completion. Found in
 # the 2026-09-19 denial audit -- a `refuse_ticket` had been denied.
 _CONTROL_TOOLS = {
-    "remember_fact", "create_subtask", "complete_ticket", "refuse_ticket",
-    "decline_ticket", "write_handoff_note",
+    "remember_fact", "create_subtask", "complete_subtask", "complete_ticket",
+    "refuse_ticket", "decline_ticket", "write_handoff_note",
 }
 
 
