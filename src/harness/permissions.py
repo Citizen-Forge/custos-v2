@@ -56,6 +56,32 @@ class PermissionDenied(Exception):
 HIDDEN_FROM_LISTING = {".git", ".beads", ".claude", ".codex", ".agents"}
 
 
+# Read-only infrastructure an agent may inspect even though it lives outside
+# its workspace: installed toolchains. The default is the Godot 4 data dir the
+# image installs -- export templates live there, and an agent building or
+# exporting a Godot project legitimately needs to read them. Found in the
+# 2026-09-19 denial audit: `ls /root/.local/share/godot/export_templates` was
+# denied as an out-of-workspace read. os.pathsep-separated, overridable.
+READONLY_ROOTS = tuple(
+    p for p in os.environ.get("TOOLCHAIN_READ_PATHS", "/root/.local/share/godot").split(os.pathsep) if p
+)
+
+# Verbs whose path arguments may also reach a READONLY_ROOT. Everything else
+# stays workspace-scoped. `find` is screened for its mutating flags below, and
+# redirects are checked separately (and stay workspace-only), so this cannot
+# be used to write into a read-only root.
+_READONLY_VERBS = {
+    "ls", "cat", "head", "tail", "grep", "egrep", "fgrep", "rg", "ag",
+    "find", "fd", "wc", "which", "type", "file", "stat", "tree", "du",
+    "realpath", "readlink", "dirname", "basename", "strings", "less", "more",
+    "xxd", "od", "md5sum", "sha1sum", "sha256sum", "cmp", "diff", "jq", "yq",
+}
+_FIND_MUTATORS = {
+    "-delete", "-exec", "-execdir", "-ok", "-okdir",
+    "-fprint", "-fprint0", "-fprintf", "-fls",
+}
+
+
 # -- shell command allow-list ------------------------------------------------
 
 # Leading verbs an agent is expected to run to build and test a project.
@@ -146,6 +172,18 @@ _FORBIDDEN_GIT_SUBCOMMANDS = {
     "stash", "worktree", "filter-branch", "replace", "gc", "prune",
 }
 
+# A few of the subcommands above have genuinely read-only forms that touch
+# neither refs nor the working tree, and denying those made a harmless
+# inspection look like an integrity-boundary violation. Found live
+# 2026-09-18: an agent ran `git worktree list` to understand the layout and
+# the gate refused it, because the whole `worktree` verb is blacklisted.
+# Only the verbs named here are let through; every mutation form
+# (`worktree add/remove/prune/move`, `stash push/pop/...`) stays forbidden.
+_READONLY_GIT_FORMS = {
+    "worktree": {"list"},
+    "stash": {"list", "show"},
+}
+
 # `git branch`/`git tag` are read-only without these; with them they move
 # or delete refs.
 _FORBIDDEN_GIT_FLAGS = {
@@ -210,12 +248,28 @@ def _looks_like_path(token: str) -> bool:
     return "/" in token or token in (".", "..") or token.startswith("~")
 
 
-def _arg_stays_in_workspace(token: str, workspace_root: str) -> bool:
-    """A single command argument does not point outside the workspace.
+def _within_any(path: str, roots) -> bool:
+    resolved = os.path.abspath(path)
+    for root in roots:
+        root = os.path.abspath(root)
+        if resolved == root or resolved.startswith(root + os.sep):
+            return True
+    return False
 
-    Non-path arguments (`express`, `-rf`, `s/a/b/`, a commit message)
-    pass trivially -- only tokens that actually look like a filesystem
-    path get resolved and checked."""
+
+def _readable_path(path: str, workspace_root: str | None) -> bool:
+    """Within the workspace, or within a declared read-only toolchain root."""
+    if _within_any(path, READONLY_ROOTS):
+        return True
+    return workspace_root is not None and _is_within_workspace(path, workspace_root)
+
+
+def _arg_stays_within(token: str, within) -> bool:
+    """A single command argument stays inside whatever `within` permits.
+
+    Non-path arguments (`express`, `-rf`, `s/a/b/`, a commit message) pass
+    trivially -- only tokens that actually look like a filesystem path get
+    resolved and checked."""
     if token.startswith("-"):
         return True
     # strip a `--flag=value` wrapper and check the value
@@ -226,8 +280,16 @@ def _arg_stays_in_workspace(token: str, workspace_root: str) -> bool:
     if token.startswith("~"):
         return False
     if ".." in token.split("/") or token.startswith("/"):
-        return _is_within_workspace(token, workspace_root)
+        return within(token)
     return True
+
+
+def _arg_stays_in_workspace(token: str, workspace_root: str) -> bool:
+    return _arg_stays_within(token, lambda p: _is_within_workspace(p, workspace_root))
+
+
+def _arg_readable(token: str, workspace_root: str) -> bool:
+    return _arg_stays_within(token, lambda p: _readable_path(p, workspace_root))
 
 
 def _is_env_assignment(token: str) -> bool:
@@ -265,7 +327,13 @@ def _segment_ok(seg: list[str], workspace_root: str | None) -> bool:
         return False
 
     if workspace_root is not None:
-        if not all(_arg_stays_in_workspace(a, workspace_root) for a in rest):
+        # Read-only verbs may also reach a declared toolchain root; everything
+        # else (and any `find` that mutates) stays workspace-only.
+        readonly = verb in _READONLY_VERBS and not (
+            verb == "find" and any(a in _FIND_MUTATORS for a in rest)
+        )
+        checker = _arg_readable if readonly else _arg_stays_in_workspace
+        if not all(checker(a, workspace_root) for a in rest):
             return False
     return True
 
@@ -331,8 +399,10 @@ def _shell_is_allowlisted(command: str, workspace_root: str | None) -> bool:
     return _segment_ok(seg, workspace_root)
 
 
-def _git_subcommand(rest: list[str]) -> str | None:
-    """The git subcommand, skipping global options and their values."""
+def _git_after_subcommand(rest: list[str]) -> tuple[str | None, list[str]]:
+    """The git subcommand and the tokens after it, skipping global options
+    and their values (so `git -C /repo worktree list` resolves the same
+    way whether you want the verb or its arguments)."""
     i = 0
     while i < len(rest):
         a = rest[i]
@@ -345,8 +415,13 @@ def _git_subcommand(rest: list[str]) -> str | None:
         if a.startswith("-"):
             i += 1
             continue
-        return a
-    return None
+        return a, rest[i + 1:]
+    return None, []
+
+
+def _git_subcommand(rest: list[str]) -> str | None:
+    """The git subcommand, skipping global options and their values."""
+    return _git_after_subcommand(rest)[0]
 
 
 def _segment_forbidden(seg: list[str]) -> str | None:
@@ -359,13 +434,16 @@ def _segment_forbidden(seg: list[str]) -> str | None:
     rest = seg[i + 1:]
 
     if verb == "git":
-        sub = _git_subcommand(rest)
+        sub, after = _git_after_subcommand(rest)
         if sub in _FORBIDDEN_GIT_SUBCOMMANDS:
-            return (
-                f"`git {sub}` edits the repository's own refs or working tree, which the "
-                "harness owns; ticket work is landed by the verifier-gated merge. Use the "
-                "file tools and report completion with complete_ticket."
-            )
+            readonly = _READONLY_GIT_FORMS.get(sub or "", set())
+            action = next((a for a in after if not a.startswith("-")), None)
+            if action not in readonly:
+                return (
+                    f"`git {sub}` edits the repository's own refs or working tree, which the "
+                    "harness owns; ticket work is landed by the verifier-gated merge. Use the "
+                    "file tools and report completion with complete_ticket."
+                )
         flags = _FORBIDDEN_GIT_FLAGS.get(sub or "", set())
         if flags and any(a in flags for a in rest):
             return f"`git {sub}` with a force/delete/move flag rewrites refs, which is not allowed."
@@ -420,20 +498,32 @@ def forbidden_reason(tool_name: str, tool_args: dict) -> str | None:
     return None
 
 
+# Harness-control tools. They touch neither the shell, the filesystem nor the
+# network -- they record a verdict, note or subtask on the board, and they are
+# how an agent finishes a ticket. A safety classifier has no business gating
+# them, and a denial (or an unparseable response, which fails closed) turns
+# straight into a loop: the agent literally cannot report completion. Found in
+# the 2026-09-19 denial audit -- a `refuse_ticket` had been denied.
+_CONTROL_TOOLS = {
+    "remember_fact", "create_subtask", "complete_ticket", "refuse_ticket",
+    "decline_ticket", "write_handoff_note",
+}
+
+
 def is_statically_safe(tool_name: str, tool_args: dict, workspace_root: str | None) -> bool:
     """Fast-path allow: True means this call may skip the classifier.
 
     Fails safe -- any surprise returns False and the call is classified
     as normal."""
     try:
-        if tool_name == "remember_fact":
-            return True  # additive, non-destructive by construction
+        if tool_name in _CONTROL_TOOLS:
+            return True  # board/control only; no shell, filesystem or network
         if tool_name in ("read_file", "list_directory"):
             # the tools' own check_within_workspace / is_infrastructure
             # guards still run regardless; this just skips the LLM call.
             if workspace_root is None:
                 return False
-            return _is_within_workspace(tool_args.get("path", ""), workspace_root)
+            return _readable_path(tool_args.get("path", ""), workspace_root)
         if tool_name == "shell_exec":
             return _shell_is_allowlisted(tool_args.get("command", ""), workspace_root)
     except Exception:
@@ -443,6 +533,13 @@ def is_statically_safe(tool_name: str, tool_args: dict, workspace_root: str | No
 
 def check_within_workspace(path: str, workspace_root: str) -> None:
     if not _is_within_workspace(path, workspace_root):
+        raise PermissionDenied(f"path escapes workspace: {path!r}")
+
+
+def check_readable(path: str, workspace_root: str) -> None:
+    """Containment for READ tools: the workspace, or a declared read-only
+    toolchain root. Writes keep using check_within_workspace."""
+    if not _readable_path(path, workspace_root):
         raise PermissionDenied(f"path escapes workspace: {path!r}")
 
 

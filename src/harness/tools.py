@@ -286,7 +286,7 @@ def build_workspace_tools(workspace_root: str) -> list:
         # workspaces, FileNotFoundError propagated out of the tool node
         # and killed the graph, and the dispatcher restarted the same
         # ticket forever.
-        permissions.check_within_workspace(path, workspace_root)
+        permissions.check_readable(path, workspace_root)
         if permissions.is_infrastructure(path):
             return (
                 f"{path!r} is harness/tool infrastructure ({', '.join(sorted(permissions.HIDDEN_FROM_LISTING))}), "
@@ -337,7 +337,7 @@ def build_workspace_tools(workspace_root: str) -> list:
         of those (.claude/settings.json) may carry credentials. Use this
         instead of `ls` to orient yourself, so you don't spend a turn
         finding out the hard way that something is off-limits."""
-        permissions.check_within_workspace(path, workspace_root)
+        permissions.check_readable(path, workspace_root)
         resolved = os.path.abspath(os.path.join(workspace_root, path))
         try:
             entries = sorted(os.listdir(resolved))

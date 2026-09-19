@@ -187,6 +187,25 @@ def test_write_file_still_always_classified():
     assert not permissions.is_statically_safe("write_file", {"path": "src/x.ts", "content": "x"}, WS)
 
 
+GODOT = "/root/.local/share/godot"
+
+
+def test_readonly_toolchain_root_is_readable():
+    assert permissions.is_statically_safe("read_file", {"path": f"{GODOT}/export_templates/foo.tpz"}, WS)
+    assert permissions.is_statically_safe("list_directory", {"path": f"{GODOT}/export_templates"}, WS)
+    assert safe(f"ls -la {GODOT}/export_templates")
+    assert safe(f"cat {GODOT}/export_templates/foo")
+    assert safe(f"find {GODOT} -name '*.tpz'")
+
+
+def test_readonly_toolchain_root_cannot_be_written():
+    assert not safe(f"rm -rf {GODOT}")
+    assert not safe(f"echo pwn > {GODOT}/x")
+    assert not safe(f"sed -i s/a/b/ {GODOT}/x")
+    assert not safe(f"find {GODOT} -delete")
+    assert not permissions.is_statically_safe("write_file", {"path": f"{GODOT}/x", "content": "y"}, WS)
+
+
 # -- wiring: the gate honours the fast path ------------------------------
 
 
@@ -236,6 +255,21 @@ def test_gate_still_denies_a_non_allowlisted_command_via_classifier(tmp_path):
     assert "permission denied: classifier says no" in result["messages"][-1].content
 
 
+def test_control_tools_skip_the_classifier():
+    # Board/control tools cannot wedge the agent: a classifier deny (or an
+    # unparseable response, which fails closed) on complete_ticket would stop
+    # it ever reporting completion. See permissions._CONTROL_TOOLS.
+    for name in (
+        "remember_fact",
+        "create_subtask",
+        "complete_ticket",
+        "refuse_ticket",
+        "decline_ticket",
+        "write_handoff_note",
+    ):
+        assert permissions.is_statically_safe(name, {}, None), name
+
+
 # -- hard denials: ref/board mutations the classifier may not override -----
 #
 # Found live 2026-09-17: an agent ran `git update-ref refs/heads/master
@@ -257,6 +291,10 @@ FORBIDDEN = [
     "git checkout master",
     "git switch main",
     "git worktree remove .worktrees/x",
+    "git worktree add .worktrees/y",
+    "git worktree prune",
+    "git stash",
+    "git stash push -m wip",
     "cd src && git update-ref refs/heads/master HEAD",
     "bd close abc-123 --reason done",
     "bd update abc-123 --claim",
@@ -276,6 +314,10 @@ NOT_FORBIDDEN = [
     "git branch",
     "git tag",
     "git rev-parse HEAD",
+    # read-only forms of otherwise-forbidden verbs (live 2026-09-18)
+    "git worktree list",
+    "git worktree list --porcelain",
+    "git stash list",
     "bd ready",
     "bd show abc-123",
     "bd prime",

@@ -219,7 +219,13 @@ def build_seat_runtime(
     tools = build_agent_tools(workspace_root) + build_dynamic_tools(prompt_conn)
 
     worker_model = RoutedModel(seat_id, routing, gate, tools=tools)
-    classify = build_classifier_from_model(RoutedModel("classifier", routing, gate))
+    classify = build_classifier_from_model(
+        RoutedModel("classifier", routing, gate),
+        # The local classifier failing to answer (empty/unparseable even
+        # after a retry) must not become a spurious deny, so hand the call
+        # to the primary/frontier model -- the same chain the workers use.
+        escalation_model=RoutedModel(DEFAULT_SEAT_ID, routing, gate),
+    )
     graph = build_graph_from_model(
         worker_model, checkpointer, tools=tools, classify=classify,
         turn_budget=turn_budget, workspace_root=workspace_root,
