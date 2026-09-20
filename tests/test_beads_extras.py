@@ -112,6 +112,19 @@ class ProposesSubtaskThenDone:
         )
 
 
+def test_set_acceptance_checks_rejects_an_unknown_schema():
+    """The product-owner is an LLM and periodically invents a check schema
+    (found live 2026-09-20: {"kind": "command_exit_zero"} on
+    workspace-o0n.4.2), which then fails every check as "unknown type None".
+    Writing must reject it so the caller retries with a valid shape."""
+    beads.ensure_initialized()
+    issue = beads.create("checks schema", "d")
+    with pytest.raises(beads.BeadsError):
+        beads.set_acceptance_checks(issue["id"], [{"kind": "command_exit_zero"}])
+    # A valid shape is accepted.
+    beads.set_acceptance_checks(issue["id"], [{"type": "tests_at_least", "count": 1}])
+
+
 def test_create_subtask_tool_parents_under_current_ticket():
     beads.ensure_initialized()
     parent = beads.create("big ticket", "turns out this is two pieces of work")

@@ -481,10 +481,39 @@ def _project(monkeypatch, issues):
     )
     monkeypatch.setattr(dispatcher, "held_projects", lambda: {})
     monkeypatch.setattr(dispatcher, "_order", lambda issue: (issue["priority"], issue["id"]))
+    dispatcher._open_parents_cache["at"] = -1e9  # recompute against the stub
 
 
 def test_the_front_of_a_project_is_its_earliest_unfinished_ticket(monkeypatch):
     issues = [_issue("proj-x.2"), _issue("proj-x.1")]
+    _project(monkeypatch, issues)
+
+    assert dispatcher.roadmap_fronts() == {"proj-x": "proj-x.1"}
+
+
+def test_the_front_descends_to_a_child_when_the_parent_has_open_work(monkeypatch):
+    """A parent with open children cannot be closed (bd refuses), so it is
+    not the actionable front -- its earliest open child is. Found live
+    2026-09-19/20: workspace-o0n.3.2 and 4.2 both had a parent whose subtasks
+    (later ids, so behind the front gate) never ran, so the parent was
+    restarted and parked forever."""
+    issues = [
+        _issue("proj-x.1", seat="seat-a"),
+        _issue("proj-x.1.1", seat="seat-a"),
+    ]
+    _project(monkeypatch, issues)
+
+    assert dispatcher.roadmap_fronts() == {"proj-x": "proj-x.1.1"}
+    picked, seat = dispatcher.next_assigned_ticket()
+    assert picked["id"] == "proj-x.1.1"
+    assert seat == "seat-a"
+
+
+def test_a_parent_is_the_front_once_its_children_close(monkeypatch):
+    issues = [
+        _issue("proj-x.1", seat="seat-a"),
+        _issue("proj-x.1.1", seat="seat-a", status="closed"),
+    ]
     _project(monkeypatch, issues)
 
     assert dispatcher.roadmap_fronts() == {"proj-x": "proj-x.1"}

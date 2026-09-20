@@ -118,7 +118,25 @@ CHECKS_KEY = "acceptance_checks"
 
 def set_acceptance_checks(issue_id: str, checks: list, actor: str = DEFAULT_ACTOR) -> dict:
     """Store the structured checks as JSON in one metadata field, the same
-    mechanism as set_acceptance_criteria."""
+    mechanism as set_acceptance_criteria.
+
+    Validates each check's `type` against acceptance.CHECK_TYPES. Without
+    this, the product-owner (an LLM) periodically invents a schema --
+    observed live 2026-09-20 on workspace-o0n.4.2, which carried
+    {"kind": "command_exit_zero"} -- and every check then fails as "unknown
+    check type None": a false fail with no model call. Failing loudly here
+    lets the caller retry with a valid shape instead."""
+    from . import acceptance  # local import: acceptance imports beads
+
+    for check in checks or []:
+        if not isinstance(check, dict):
+            raise BeadsError(f"acceptance check must be an object, got {type(check).__name__}")
+        kind = check.get("type")
+        if kind not in acceptance.CHECK_TYPES:
+            raise BeadsError(
+                f"unknown acceptance check type {kind!r}; valid types: "
+                + ", ".join(acceptance.CHECK_TYPES)
+            )
     return set_metadata(issue_id, CHECKS_KEY, json.dumps(checks), actor=actor)
 
 

@@ -213,6 +213,35 @@ def project_hold(ticket_id: str) -> str | None:
     return held_projects().get(toolchain.project_id_for(ticket_id))
 
 
+# A ticket with open children cannot be closed (bd refuses), so it is NOT the
+# actionable front -- its children are. Without this the front stayed on the
+# parent, the parent was restarted and parked forever, and its subtasks
+# (later ids, so behind the front gate) were never dispatched at all:
+# workspace-o0n.3.2 and 4.2 both wedged exactly this way (2026-09-19/20).
+_OPEN_PARENTS_TTL = 60.0
+_open_parents_cache: dict = {"at": -1e9, "ids": set()}
+
+
+def _parents_with_open_children() -> set[str]:
+    """Ids that have at least one non-closed direct child.
+
+    Derived from the id hierarchy (`<parent>.<seg>`) -- the same convention
+    toolchain.project_id_for and api._parent_id rely on -- so this is one
+    `bd list --all`, cached briefly, rather than a `children_of` per node."""
+    now = time.monotonic()
+    if now - _open_parents_cache["at"] < _OPEN_PARENTS_TTL:
+        return _open_parents_cache["ids"]
+    ids: set[str] = set()
+    for issue in beads.list_all():
+        if issue.get("status") == "closed":
+            continue
+        iid = issue.get("id", "")
+        if "." in iid:
+            ids.add(iid.rsplit(".", 1)[0])
+    _open_parents_cache.update(at=now, ids=ids)
+    return ids
+
+
 def _fronts_from(issues: list) -> dict[str, str]:
     """Project id -> the ticket it must work next, out of `issues`.
 
@@ -241,11 +270,16 @@ def _fronts_from(issues: list) -> dict[str, str]:
     _skip allows its candidates. A stall the operator cannot see is worse
     than a ticket starting out of order."""
     front: dict[str, tuple] = {}
+    parents_with_children = _parents_with_open_children()
     for issue in issues:
         if issue.get("status") == "closed":
             continue
         if not dispatchable(issue):
             continue  # projects and epics are issues too, and are never worked
+        if issue["id"] in parents_with_children:
+            # Cannot be closed while its children are open, so it is not the
+            # actionable front -- descend: its earliest open child is.
+            continue
         project = toolchain.project_id_for(issue["id"])
         key = _order(issue)
         if project not in front or key < front[project][0]:
@@ -293,6 +327,7 @@ def next_assigned_ticket(
     in_progress_issues = beads.in_progress()
     ready_issues = beads.ready()
     fronts = _fronts_from(in_progress_issues + ready_issues)
+    parents = _parents_with_open_children()
     running_projects = {
         toolchain.project_id_for(ticket_id) for ticket_id in (running_tickets or set())
     }
@@ -315,7 +350,12 @@ def next_assigned_ticket(
         best = None
         best_seat = None
         for issue in issues:
-            if not dispatchable(issue) or beads.is_flagged_for_human(issue) or _skip(issue):
+            if (
+                not dispatchable(issue)
+                or issue["id"] in parents
+                or beads.is_flagged_for_human(issue)
+                or _skip(issue)
+            ):
                 continue
             seat_id = beads.assigned_seat(issue)
             if not seat_id or seat_id in busy:
@@ -342,6 +382,7 @@ def next_unassigned_ticket(running_tickets: set[str] | None = None) -> dict | No
     held = held_projects()
     ready_issues = beads.ready()
     fronts = _fronts_from(list(beads.in_progress()) + ready_issues)
+    parents = _parents_with_open_children()
     running = {
         toolchain.project_id_for(ticket_id) for ticket_id in (running_tickets or set())
     }
@@ -349,6 +390,8 @@ def next_unassigned_ticket(running_tickets: set[str] | None = None) -> dict | No
     for issue in ready_issues:
         if not dispatchable(issue):
             continue
+        if issue["id"] in parents:
+            continue  # has open children -- its children are brokered, not it
         if beads.assigned_seat(issue) is not None:
             continue
         project_id = toolchain.project_id_for(issue["id"])

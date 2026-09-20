@@ -42,6 +42,7 @@ already merged.
 import os
 import shutil
 import subprocess
+import threading
 
 try:  # Linux only; the harness runs in a container, but tests can run anywhere.
     import fcntl
@@ -50,6 +51,23 @@ except ImportError:  # pragma: no cover - not reachable in the deployment
 
 from . import toolchain
 from .config import PROJECTS_ROOT
+
+
+# Serialize test-suite runs per tree. Two verifier passes on the same ticket
+# (the dispatcher's verify-on-close racing the scheduled verifier job, or an
+# operator running one by hand) each exec the project's whole suite against
+# the SAME worktree: they contend on Godot's .godot import cache and thrash
+# the CPU, so a run that finishes in ~1-2 min alone can crawl past the 600s
+# timeout -- and a timeout is reported as exit=-1/ran=0, i.e. a FALSE
+# verification failure. One lock per resolved path fixes the same-tree case
+# without serializing unrelated projects.
+_TEST_LOCKS: dict = {}
+_TEST_LOCKS_GUARD = threading.Lock()
+
+
+def _test_lock(path: str) -> threading.Lock:
+    with _TEST_LOCKS_GUARD:
+        return _TEST_LOCKS.setdefault(os.path.abspath(path), threading.Lock())
 
 
 def project_id_for(ticket_id: str) -> str:
@@ -931,9 +949,10 @@ def _run_declared_command(path: str, command: str, timeout: int) -> dict:
         return {"ran": 0, "passed": 0, "failed": 0, "exit": -1,
                 "tail": "empty test_command"}
     try:
-        out = subprocess.run(
-            argv, cwd=path, capture_output=True, text=True, timeout=timeout
-        )
+        with _test_lock(path):
+            out = subprocess.run(
+                argv, cwd=path, capture_output=True, text=True, timeout=timeout
+            )
     except FileNotFoundError:
         return {"ran": 0, "passed": 0, "failed": 0, "exit": -1,
                 "tail": f"test_command not found: {argv[0]}"}
@@ -994,9 +1013,10 @@ def _run_tests_at(path: str, timeout: int = 600,
         return None
 
     try:
-        out = subprocess.run(
-            ["npm", "test"], cwd=path, capture_output=True, text=True, timeout=timeout
-        )
+        with _test_lock(path):
+            out = subprocess.run(
+                ["npm", "test"], cwd=path, capture_output=True, text=True, timeout=timeout
+            )
     except subprocess.TimeoutExpired:
         return {"ran": 0, "passed": 0, "failed": 0, "exit": -1, "tail": "npm test timed out"}
 
