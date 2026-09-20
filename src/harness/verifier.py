@@ -19,6 +19,7 @@ refused."
 import json
 import logging
 import os
+from contextlib import contextmanager
 
 import psycopg
 
@@ -168,7 +169,23 @@ def _current_files_for(issue: dict) -> str:
         return ""
 
 
-def land(ticket_id: str) -> bool:
+def _is_merge_conflict(reason: str) -> bool:
+    return "CONFLICT" in reason or "Merge conflict" in reason
+
+
+@contextmanager
+def _conn(conn):
+    """Reuse a caller's connection, or open one from DATABASE_URL. The
+    conflict requeue needs a connection for the graph-thread reset, and the
+    worker's land call has none to hand."""
+    if conn is not None:
+        yield conn
+    else:
+        with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as opened:
+            yield opened
+
+
+def land(ticket_id: str, conn=None) -> bool:
     """Merge a ticket's approved work into the integration branch.
 
     The merge used to happen when the ticket was committed, which meant the
@@ -178,12 +195,46 @@ def land(ticket_id: str) -> bool:
     state of the integration branch" mean something: what a ticket starts
     from is only ever work that passed review.
 
-    A ticket that will not merge is parked for a person rather than
-    guessed at, and its work stays on its own branch."""
+    A CONFLICT is ordinary contention, not a broken ticket: the integration
+    tip moved under this ticket (another ticket landed first) and both
+    changed the same lines. Parking that behind a human strands approved
+    work; instead the ticket is requeued so the agent redoes it on the new
+    tip. Any other merge failure (or a conflict that will not clear after
+    the rework budget) is parked for a person, with the work left safely on
+    its own branch."""
     ok, reason = workspaces.merge_to_integration(ticket_id)
     if ok:
         log.info("landed %s on the integration branch", ticket_id)
         return True
+
+    if _is_merge_conflict(reason):
+        issue = beads.show(ticket_id)
+        attempt = int((issue.get("metadata") or {}).get("rework_count") or 0) + 1
+        if attempt <= MAX_VERIFIER_REWORKS:
+            try:
+                with _conn(conn) as active:
+                    requeue_for_rework(
+                        active,
+                        ticket_id,
+                        "the work passed review but the integration branch moved "
+                        f"under it (another ticket landed first) and the merge "
+                        f"conflicted: {reason}",
+                        attempt,
+                    )
+                log.warning(
+                    "requeued %s after an integration merge conflict (attempt %s)",
+                    ticket_id,
+                    attempt,
+                )
+                return False
+            except Exception:
+                log.exception("could not requeue %s after a merge conflict", ticket_id)
+        else:
+            reason = (
+                f"the merge kept conflicting after {MAX_VERIFIER_REWORKS} rework "
+                f"attempt(s): {reason}"
+            )
+
     log.error("could not land %s: %s", ticket_id, reason)
     beads.flag_for_human(
         ticket_id,
@@ -385,7 +436,7 @@ def verify_ticket(conn, issue_id: str, model) -> dict | None:
     # from a tree of accepted work only.
     if verdict == "pass":
         try:
-            land(issue_id)
+            land(issue_id, conn=conn)
         except Exception:
             log.exception("approved %s but could not land it", issue_id)
 

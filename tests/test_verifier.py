@@ -201,7 +201,7 @@ def test_a_pass_lands_the_work_and_a_fail_does_not(monkeypatch):
     approved ticket's work lands; a rejected one stays on its own branch,
     so what the next ticket starts from is only ever accepted work."""
     landed = []
-    monkeypatch.setattr(verifier, "land", lambda ticket_id: landed.append(ticket_id) or True)
+    monkeypatch.setattr(verifier, "land", lambda ticket_id, conn=None: landed.append(ticket_id) or True)
 
     conn = _conn()
     beads.ensure_initialized()

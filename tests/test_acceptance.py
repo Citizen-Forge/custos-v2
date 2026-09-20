@@ -107,7 +107,7 @@ def _stub_verifier(monkeypatch, issue, tests, rec):
     monkeypatch.setattr(
         verifier.verifications, "record", lambda *a, **k: rec.update(verdict=a[3], reasoning=a[4])
     )
-    monkeypatch.setattr(verifier, "land", lambda tid: rec.update(landed=True))
+    monkeypatch.setattr(verifier, "land", lambda tid, conn=None: rec.update(landed=True))
     monkeypatch.setattr(
         verifier, "requeue_for_rework", lambda *a, **k: rec.update(requeued=True)
     )
