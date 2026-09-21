@@ -378,7 +378,13 @@ def build_graph_from_model(model, checkpointer, tools=None, classify=None, inter
     builder = StateGraph(HarnessState)
     builder.add_node("agent", call_model)
     builder.add_node("permission_gate", permission_gate)
-    builder.add_node("tools", ToolNode(tools))
+    # handle_tool_errors=True: a tool that raises (e.g. a containment escape --
+    # an agent writing to /tmp) must come back as a ToolMessage the agent can
+    # read and correct, not kill the whole run. It killed workspace-o0n.7.1
+    # three times in a row (2026-09-21), each crash burning part of the retry
+    # budget until the ticket was flagged. The containment invariant still
+    # holds -- the tool does not act -- and the agent still sees it, loudly.
+    builder.add_node("tools", ToolNode(tools, handle_tool_errors=True))
     builder.add_edge(START, "agent")
     builder.add_conditional_edges("agent", after_agent, {"permission_gate": "permission_gate", "agent": "agent", END: END})
     builder.add_conditional_edges("permission_gate", route_after_gate, {"tools": "tools", "agent": "agent"})
