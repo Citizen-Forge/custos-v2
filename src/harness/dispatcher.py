@@ -310,38 +310,32 @@ def next_assigned_ticket(
     already running, tick() reports "could not start", and the
     dispatcher sits at one agent however high the cap is. Found live
     2026-09-13 while raising the cap to 3 -- the log showed a single
-    'resuming thread' and nothing else for a full minute.
+    'resuming thread' and nothing else for a full minute. This is also the
+    "one ticket per seat" rule now that a project may run several tickets at
+    once: different seats run concurrently, but a seat already working a
+    ticket is skipped here.
 
-    `running_tickets` (optional) is what the dispatcher has actually got
-    running in-process, and it is how a project stays serialised. Read
-    from the dispatcher's own bookkeeping rather than from `bd`: an
-    in_progress ticket that nothing is running is a crashed run's orphan,
-    and treating THAT as "engaged" would let a stale orphan block the
-    project's front ticket -- or, worse, let several orphans resume side
-    by side, which is what happened live on restart when 1.2 and 1.3 both
-    woke up in the same project."""
+    `running_tickets` is retained for callers but no longer gates anything:
+    it used to serialise a whole project to one ticket. Dependency ordering
+    is `bd ready`'s job (open blockers excluded), and same-ticket restarts are
+    prevented by `busy_seats`/start_agent."""
     held = held_projects()
     busy = busy_seats or set()
-    # Fetched once and reused: these two lists ARE the pools below, and
-    # their union is what the front is chosen from.
+    # Fetched once and reused: these two lists ARE the pools below.
     in_progress_issues = beads.in_progress()
     ready_issues = beads.ready()
-    fronts = _fronts_from(in_progress_issues + ready_issues)
     parents = _parents_with_open_children()
-    running_projects = {
-        toolchain.project_id_for(ticket_id) for ticket_id in (running_tickets or set())
-    }
 
     def _skip(issue):
-        project = toolchain.project_id_for(issue["id"])
-        if project in held:
-            return True
-        if project in running_projects:
-            return True  # this project is being worked right now
-        front = fronts.get(project)
-        # Anything past the front waits, including an orphan: the front
-        # ticket may be exactly what it needs.
-        return front is not None and issue["id"] != front
+        # Only a project on dispatch hold holds ALL of its tickets. Two
+        # tickets in one project may now run concurrently as long as they are
+        # on different seats ("one ticket per seat", enforced by the seat
+        # check in _pick). Dependency ordering comes from `bd ready`, which
+        # excludes anything blocked by an open prerequisite; a file collision
+        # on landing is handled by conflict-requeue (verifier.land). This
+        # replaced the old "one ticket per project" gate, which serialised a
+        # whole project even when a dozen specialist seats had ready work.
+        return toolchain.project_id_for(issue["id"]) in held
 
     def _pick(issues):
         """Best candidate by roadmap order among this pool. Choosing the min

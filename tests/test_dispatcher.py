@@ -440,21 +440,18 @@ def test_running_agents_reports_claimed_work():
     assert running[active["id"]]["seat_id"] == "seat-r"
 
 
-# -- one ticket at a time per project, in roadmap order ----------------
+# -- concurrency: one ticket per seat, several seats per project --------
 #
-# Agents on a project share its git history, so two at once fork from the
-# same commit and both edit what every ticket edits. Found live
-# 2026-09-15, with per-ticket worktrees already in place: src/index.ts is
-# the barrel every new module is re-exported from, and workspace-9jg.1.3
-# and 14.2 both appended to it from the same base, so neither merged.
-#
-# And a project works its roadmap in order: nothing past the front ticket
-# starts, because a ticket that cannot be actioned -- parked, or blocked
-# on an open dependency -- may be exactly what the tickets after it need.
+# This used to run one ticket per PROJECT, which serialised a whole project
+# even when a dozen specialist seats each had ready work. It is now one
+# ticket per SEAT, so different seats run at once; dependency ordering is
+# `bd ready`'s job (blocked tickets excluded, their blockers surfaced). A
+# file collision between two concurrent tickets is handled by
+# conflict-requeue on landing (verifier.land), not by serialising.
 #
 # These use synthetic issues rather than beads.create: bd does not give
 # tickets a shared id root here, so created tickets do not land in one
-# project and could not exercise the gate at all.
+# project and could not exercise the selection at all.
 
 
 def _issue(ticket_id, *, priority=1, seat="seat-a", status="open", labels=None):
@@ -559,9 +556,9 @@ def test_a_closed_ticket_does_not_have_to_be_worked_first(monkeypatch):
     assert seat == "seat-a"
 
 
-def test_a_parked_front_stops_only_its_own_project(monkeypatch):
-    """Skipping past the front is what the gate stops; another project is
-    unaffected, so this is a per-project rule and not a global stall."""
+def test_a_parked_ticket_does_not_stop_its_project(monkeypatch):
+    """A parked (human) ticket is skipped and the project's next ready
+    ticket is selected -- parking one ticket no longer halts the rest."""
     issues = [
         _issue("proj-a.1", labels=["human"], seat="seat-a"),
         _issue("proj-a.2", seat="seat-a"),
@@ -571,30 +568,28 @@ def test_a_parked_front_stops_only_its_own_project(monkeypatch):
 
     picked, seat = dispatcher.next_assigned_ticket()
 
-    assert picked["id"] == "proj-b.1"
-    assert seat == "seat-b"
+    assert picked["id"] == "proj-a.2"
+    assert seat == "seat-a"
 
 
-def test_a_parked_front_ticket_stops_the_project(monkeypatch):
-    """The point of the rule: the front cannot be worked, so nothing of
-    that project is worked."""
+def test_a_parked_ticket_is_not_selected(monkeypatch):
     issues = [_issue("proj-x.1", labels=["human"]), _issue("proj-x.2", priority=2)]
     _project(monkeypatch, issues)
 
     picked, _ = dispatcher.next_assigned_ticket()
 
-    assert picked is None
+    assert picked is not None and picked["id"] == "proj-x.2"
 
 
-def test_an_orphan_behind_the_front_does_not_jump_it(monkeypatch):
-    """A crashed run's leftover is still behind the front. Resuming it
-    first would work a later ticket while the front is untouched."""
+def test_an_orphan_is_resumed_before_fresh_work(monkeypatch):
+    """A crashed run's leftover is picked up first -- `bd ready` never
+    returns it, so nothing else would resume it."""
     issues = [_issue("proj-x.1"), _issue("proj-x.2", status="in_progress")]
     _project(monkeypatch, issues)
 
     picked, _ = dispatcher.next_assigned_ticket()
 
-    assert picked["id"] == "proj-x.1"
+    assert picked["id"] == "proj-x.2"
 
 
 def test_an_orphan_at_the_front_is_resumed(monkeypatch):
@@ -609,13 +604,28 @@ def test_an_orphan_at_the_front_is_resumed(monkeypatch):
     assert seat == "seat-a"
 
 
-def test_a_project_being_worked_starts_nothing_else(monkeypatch):
-    issues = [_issue("proj-x.1")]
+def test_a_running_seat_is_not_given_a_second_ticket(monkeypatch):
+    """One ticket per seat: with seat-a already running, seat-a's next
+    ticket is skipped rather than started twice."""
+    issues = [_issue("proj-x.1", seat="seat-a"), _issue("proj-x.2", seat="seat-a")]
     _project(monkeypatch, issues)
 
-    picked, _ = dispatcher.next_assigned_ticket(running_tickets={"proj-x.1"})
+    picked, _ = dispatcher.next_assigned_ticket(busy_seats={"seat-a"})
 
     assert picked is None
+
+
+def test_different_seats_are_both_eligible(monkeypatch):
+    """The concurrency the per-seat rule buys: once seat-a is busy, seat-b's
+    ticket is still selectable, so two seats work one project at once."""
+    issues = [_issue("proj-x.1", seat="seat-a"), _issue("proj-x.2", seat="seat-b")]
+    _project(monkeypatch, issues)
+
+    first, _ = dispatcher.next_assigned_ticket()
+    second, _ = dispatcher.next_assigned_ticket(busy_seats={"seat-a"})
+
+    assert first["id"] == "proj-x.1"
+    assert second["id"] == "proj-x.2"
 
 
 def test_unassigned_work_behind_the_front_is_not_brokered(monkeypatch):
