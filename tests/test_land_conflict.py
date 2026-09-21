@@ -55,3 +55,23 @@ def test_land_requeues_a_conflicting_merge(projects_root):
                 beads.close(tid, reason="test cleanup")
             except Exception:
                 pass
+
+
+def test_merge_discards_stray_edits_in_the_integration_checkout(projects_root):
+    """Strays an agent wrote into the project root (the integration checkout)
+    made `git merge` refuse -- "local changes would be overwritten" -- which
+    parked workspace-o0n.7.3 for a human. The merge now discards them first."""
+    a = workspaces.for_ticket("workspace-9jg.1.1")
+    with open(os.path.join(a, "shared.gd"), "w") as fh:
+        fh.write("committed\n")
+    workspaces.commit_all_for_ticket("workspace-9jg.1.1", "workspace-9jg.1.1: a")
+
+    repo = workspaces.path_for("workspace-9jg")
+    stray = os.path.join(repo, "stray.gd")
+    with open(stray, "w") as fh:
+        fh.write("stray\n")
+
+    ok, reason = workspaces.merge_to_integration("workspace-9jg.1.1")
+
+    assert ok, reason
+    assert not os.path.exists(stray), "the stray must be discarded"

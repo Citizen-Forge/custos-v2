@@ -170,7 +170,15 @@ def _current_files_for(issue: dict) -> str:
 
 
 def _is_merge_conflict(reason: str) -> bool:
-    return "CONFLICT" in reason or "Merge conflict" in reason
+    # "local changes would be overwritten" is the integration checkout holding
+    # uncommitted strays, not a content collision -- but it is still a retry,
+    # not a human's problem (merge_to_integration now clears the strays first,
+    # so the retry usually just works).
+    return (
+        "CONFLICT" in reason
+        or "Merge conflict" in reason
+        or "would be overwritten" in reason
+    )
 
 
 @contextmanager

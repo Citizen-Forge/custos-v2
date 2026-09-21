@@ -775,6 +775,16 @@ def merge_to_integration(ticket_id: str) -> tuple[bool, str]:
         return True, ""  # the ticket produced no branch: nothing to merge
 
     with _merge_lock(project_id):
+        # The integration checkout must be clean before we merge. Agents
+        # occasionally write to the project root (this checkout) instead of
+        # their own worktree, leaving uncommitted strays; `git merge` then
+        # refuses with "local changes would be overwritten", which parked a
+        # finished ticket for a human (workspace-o0n.7.3, 2026-09-21). The
+        # committed tip is the source of truth, so discard anything
+        # uncommitted first -- `.worktrees/` is gitignored, so `clean -fd`
+        # leaves the per-ticket worktrees alone.
+        _git(["reset", "--hard", "HEAD"], repo)
+        _git(["clean", "-fd"], repo)
         # The merge has to happen in the integration checkout, because that
         # is the tree the project's own test suite runs in.
         if _current_branch(repo) != base:
