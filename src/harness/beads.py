@@ -77,18 +77,24 @@ def in_progress() -> list[dict]:
     return json.loads(_run(["list", "--status=in_progress", "--limit", "0"]))
 
 
-def blocked_ids() -> set[str]:
-    """Ids with at least one OPEN blocker (`bd blocked`).
+def blocked_map() -> dict[str, list[str]]:
+    """Ticket id -> ids of its OPEN blockers (`bd blocked`).
 
     `bd ready` already excludes blocked tickets from the fresh-work pool, but
     an in_progress ticket that is later blocked still shows up as an orphan --
-    and nothing else would exclude it. Found live 2026-09-21: workspace-o0n.15.4
-    was in_progress, gained open blockers, and the dispatcher resumed + re-landed
-    it three times in twenty minutes, because it could never close."""
+    and the board has no way to say *why* it is stuck. Found live 2026-09-21:
+    workspace-o0n.15.4 was in_progress, gained open blockers, and the
+    dispatcher resumed + re-landed it three times in twenty minutes because it
+    could never close. Fails open to {}: a broken query must not stall
+    dispatch or blank the board."""
     try:
-        return {issue["id"] for issue in json.loads(_run(["blocked"]))}
+        return {i["id"]: i.get("blocked_by", []) for i in json.loads(_run(["blocked"]))}
     except Exception:
-        return set()  # fail open: a broken query must not stall dispatch
+        return {}
+
+
+def blocked_ids() -> set[str]:
+    return set(blocked_map())
 
 
 def assign_to_seat(issue_id: str, seat_id: str, actor: str = DEFAULT_ACTOR) -> dict:

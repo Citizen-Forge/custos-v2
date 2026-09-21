@@ -166,6 +166,7 @@
   main section[data-tab].visible { display: block; }
   .kanban-col.blocked .kanban-col-head { color: #d97706; }
   .kanban-card.blocked { border-left: 2px solid #d97706; }
+  .blocked-by { color: #dc2626; font-size: 0.75rem; margin-top: 0.25rem; }
   .kanban-card-actions { margin-top: 0.4rem; display: flex; gap: 0.3rem; }
   .kanban-card-actions button { font-size: 0.75rem; padding: 0.15rem 0.4rem; }
   .roadmap-card {
@@ -587,6 +588,13 @@ function isBlocked(story) {
   return (story.labels || []).includes("human");
 }
 
+// A ticket blocked by an OPEN dependency (from `bd blocked` -> blocked_by).
+// It is usually open/in_progress by status, so without this it reads as
+// ordinary work; the board routes it to Blocked and names the blocker.
+function isDependencyBlocked(story) {
+  return !!(story.blocked_by && story.blocked_by.length);
+}
+
 // "Parked" and "done" are the definitions every progress figure on this page
 // shares -- the project bar, the epic bars and the project tabs. Hoisted out
 // of roadmapEpicCard so a bar cannot quietly start counting parked tickets as
@@ -636,7 +644,9 @@ function relTime(iso) {
 
 function kanbanCard(story) {
   const seat = (story.metadata && story.metadata.assigned_seat) || null;
-  const blocked = isBlocked(story);
+  const human = isBlocked(story);
+  const depBlockers = story.blocked_by || [];
+  const blocked = human || depBlockers.length > 0;
   // An in-progress ticket shows when it last took a graph step and how many
   // it has taken, so "is it actually moving?" is answerable from the board
   // instead of the Agents tab or an API call.
@@ -644,19 +654,25 @@ function kanbanCard(story) {
     ? `<div class="story-activity">last move ${relTime(story.last_activity)}${
         story.activity_steps != null ? ` · ${story.activity_steps} steps` : ""}</div>`
     : "";
+  // A ticket held by an open dependency is not parked for a person -- it just
+  // cannot proceed yet -- so it gets a red blocker line, not Respond/Dismiss.
+  const depNote = depBlockers.length
+    ? `<div class="blocked-by">⛔ blocked by ${depBlockers.map(escapeHtml).join(", ")}</div>`
+    : "";
   // The old panel offered these; without them a flagged item could be
   // seen but not resolved from the dashboard.
-  const actions = blocked ? `<div class="kanban-card-actions">
+  const actions = human ? `<div class="kanban-card-actions">
       <button onclick="respondToTicket('${story.id}')">Respond</button>
       <button onclick="dismissTicket('${story.id}')">Dismiss</button>
     </div>` : "";
-  const notes = blocked && story.notes
+  const notes = human && story.notes
     ? `<div class="notes">${escapeHtml(story.notes)}</div>` : "";
   return `<div class="kanban-card${blocked ? " blocked" : ""}">
     <div class="kanban-card-epic">${escapeHtml(story.epicTitle || "")}</div>
     <div class="kanban-card-title"><span class="id">${story.id}</span> ${escapeHtml(story.title)}</div>
     ${seat ? `<div class="story-seat">→ ${escapeHtml(seat)}</div>` : ""}
     ${activity}
+    ${depNote}
     ${notes}
     ${actions}
   </div>`;
@@ -670,7 +686,7 @@ function projectCard(project) {
   // Blocked is checked before status: a flagged item is in_progress by
   // status, and showing it there would hide the fact that it is stuck.
   for (const s of stories) {
-    if (isBlocked(s)) byStatus.blocked.push(s);
+    if (isBlocked(s) || isDependencyBlocked(s)) byStatus.blocked.push(s);
     else (byStatus[s.status] || byStatus.open).push(s);
   }
 

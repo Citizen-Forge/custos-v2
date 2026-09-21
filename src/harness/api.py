@@ -211,6 +211,11 @@ def _attach_activity(issues: list[dict]) -> None:
 
 def _load_project_tree() -> list[dict]:
     issues = beads.list_all()
+    # Attach each ticket's open blockers so the board can show "blocked by X"
+    # instead of leaving a stuck ticket looking like ordinary in-progress work.
+    blocked = beads.blocked_map()
+    for issue in issues:
+        issue["blocked_by"] = blocked.get(issue["id"], [])
     _attach_activity(issues)
     tree = _tree_from_flat(issues)
     with _tree_state_lock:
