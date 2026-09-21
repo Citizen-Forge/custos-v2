@@ -131,7 +131,15 @@
   .story-seat { font-size: 0.75rem; opacity: 0.8; }
   .story-activity { font-size: 0.72rem; color: var(--muted); margin-top: 0.15rem; }
 
-  .kanban-board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; margin-top: 0.75rem; }
+  .kanban-board { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.5rem; margin-top: 0.75rem; }
+  /* Five columns stay on ONE row down to a ~12" screen (Surface 6) by letting
+     them shrink; the gap and padding tighten before anything wraps. */
+  @media (max-width: 1200px) {
+    .kanban-board { gap: 0.35rem; }
+    .kanban-col { padding: 0.35rem; }
+    .kanban-card { padding: 0.35rem; }
+    .kanban-card-title { font-size: 0.8rem; }
+  }
   .kanban-col { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem; min-height: 3rem; }
   .kanban-col-head {
     display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--muted);
@@ -565,10 +573,8 @@ async function refreshSeats() {
 
 const KANBAN_COLUMNS = [
   { key: "open", label: "Open" },
+  { key: "ready", label: "Ready" },
   { key: "in_progress", label: "In Progress" },
-  // Replaces the old standalone "Needs a Human" panel. Flagged work
-  // belongs on the default tab: a panel on a non-default tab meant an
-  // operator sitting on Home never saw that the harness was blocked.
   { key: "blocked", label: "Blocked" },
   { key: "closed", label: "Done" },
 ];
@@ -589,10 +595,27 @@ function isBlocked(story) {
 }
 
 // A ticket blocked by an OPEN dependency (from `bd blocked` -> blocked_by).
-// It is usually open/in_progress by status, so without this it reads as
-// ordinary work; the board routes it to Blocked and names the blocker.
+// It is not workable yet; the board keeps it out of Ready and names the
+// blocker in red.
 function isDependencyBlocked(story) {
   return !!(story.blocked_by && story.blocked_by.length);
+}
+
+// Which Kanban column a story belongs in:
+//   Open        not workable yet -- blocked by an open dependency, or not yet
+//               triaged/assigned by the product-owner.
+//   Ready       assigned and unblocked: a seat can pick it up.
+//   In Progress actively being worked.
+//   Blocked     parked for the product-owner or a human (the `human` label);
+//               escalation, not waiting.
+//   Done        closed (and not parked -- a closed+human ticket is a failed
+//               verification, i.e. escalation).
+function storyColumn(story) {
+  if (isBlocked(story)) return "blocked";
+  if (story.status === "closed") return "closed";
+  if (story.status === "in_progress") return "in_progress";
+  const seat = (story.metadata && story.metadata.assigned_seat) || null;
+  return (isDependencyBlocked(story) || !seat) ? "open" : "ready";
 }
 
 // "Parked" and "done" are the definitions every progress figure on this page
@@ -646,7 +669,10 @@ function kanbanCard(story) {
   const seat = (story.metadata && story.metadata.assigned_seat) || null;
   const human = isBlocked(story);
   const depBlockers = story.blocked_by || [];
-  const blocked = human || depBlockers.length > 0;
+  // The amber "blocked" border is for escalation (human). A dependency-blocked
+  // ticket sits in Open with just the red blocker line, so the two are not
+  // confused.
+  const blocked = human;
   // An in-progress ticket shows when it last took a graph step and how many
   // it has taken, so "is it actually moving?" is answerable from the board
   // instead of the Agents tab or an API call.
@@ -682,12 +708,9 @@ function projectCard(project) {
   const stories = (project.epics || []).flatMap(epic =>
     (epic.stories || []).map(s => ({ ...s, epicTitle: epic.title }))
   );
-  const byStatus = { open: [], in_progress: [], blocked: [], closed: [] };
-  // Blocked is checked before status: a flagged item is in_progress by
-  // status, and showing it there would hide the fact that it is stuck.
+  const byStatus = { open: [], ready: [], in_progress: [], blocked: [], closed: [] };
   for (const s of stories) {
-    if (isBlocked(s) || isDependencyBlocked(s)) byStatus.blocked.push(s);
-    else (byStatus[s.status] || byStatus.open).push(s);
+    byStatus[storyColumn(s)].push(s);
   }
 
   const columns = KANBAN_COLUMNS.map(({ key, label }) => `
