@@ -325,6 +325,7 @@ def next_assigned_ticket(
     in_progress_issues = beads.in_progress()
     ready_issues = beads.ready()
     parents = _parents_with_open_children()
+    blocked = beads.blocked_ids()
 
     def _skip(issue):
         # Only a project on dispatch hold holds ALL of its tickets. Two
@@ -347,6 +348,7 @@ def next_assigned_ticket(
             if (
                 not dispatchable(issue)
                 or issue["id"] in parents
+                or issue["id"] in blocked
                 or beads.is_flagged_for_human(issue)
                 or _skip(issue)
             ):
@@ -377,6 +379,7 @@ def next_unassigned_ticket(running_tickets: set[str] | None = None) -> dict | No
     ready_issues = beads.ready()
     fronts = _fronts_from(list(beads.in_progress()) + ready_issues)
     parents = _parents_with_open_children()
+    blocked = beads.blocked_ids()
     running = {
         toolchain.project_id_for(ticket_id) for ticket_id in (running_tickets or set())
     }
@@ -384,8 +387,8 @@ def next_unassigned_ticket(running_tickets: set[str] | None = None) -> dict | No
     for issue in ready_issues:
         if not dispatchable(issue):
             continue
-        if issue["id"] in parents:
-            continue  # has open children -- its children are brokered, not it
+        if issue["id"] in parents or issue["id"] in blocked:
+            continue  # has open children, or an open blocker: broker it later
         if beads.assigned_seat(issue) is not None:
             continue
         project_id = toolchain.project_id_for(issue["id"])

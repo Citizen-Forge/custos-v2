@@ -478,6 +478,7 @@ def _project(monkeypatch, issues):
     )
     monkeypatch.setattr(dispatcher, "held_projects", lambda: {})
     monkeypatch.setattr(dispatcher, "_order", lambda issue: (issue["priority"], issue["id"]))
+    monkeypatch.setattr(beads, "blocked_ids", lambda: set())
     dispatcher._open_parents_cache["at"] = -1e9  # recompute against the stub
 
 
@@ -626,6 +627,20 @@ def test_different_seats_are_both_eligible(monkeypatch):
 
     assert first["id"] == "proj-x.1"
     assert second["id"] == "proj-x.2"
+
+
+def test_a_blocked_in_progress_orphan_is_not_resumed(monkeypatch):
+    """A ticket left in_progress that has since gained an open blocker must
+    not be resumed: it cannot close until the blocker lands, so resuming it
+    only re-lands the same work. Found live 2026-09-21: workspace-o0n.15.4
+    started and landed three times in twenty minutes while blocked."""
+    issues = [_issue("proj-x.1", status="in_progress")]
+    _project(monkeypatch, issues)
+    monkeypatch.setattr(beads, "blocked_ids", lambda: {"proj-x.1"})
+
+    picked, _ = dispatcher.next_assigned_ticket()
+
+    assert picked is None
 
 
 def test_unassigned_work_behind_the_front_is_not_brokered(monkeypatch):

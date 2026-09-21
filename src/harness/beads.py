@@ -77,6 +77,20 @@ def in_progress() -> list[dict]:
     return json.loads(_run(["list", "--status=in_progress", "--limit", "0"]))
 
 
+def blocked_ids() -> set[str]:
+    """Ids with at least one OPEN blocker (`bd blocked`).
+
+    `bd ready` already excludes blocked tickets from the fresh-work pool, but
+    an in_progress ticket that is later blocked still shows up as an orphan --
+    and nothing else would exclude it. Found live 2026-09-21: workspace-o0n.15.4
+    was in_progress, gained open blockers, and the dispatcher resumed + re-landed
+    it three times in twenty minutes, because it could never close."""
+    try:
+        return {issue["id"] for issue in json.loads(_run(["blocked"]))}
+    except Exception:
+        return set()  # fail open: a broken query must not stall dispatch
+
+
 def assign_to_seat(issue_id: str, seat_id: str, actor: str = DEFAULT_ACTOR) -> dict:
     """The product-owner's core assignment primitive -- earmarks a ready
     ticket for a specific seat without claiming it (status stays `open`;
