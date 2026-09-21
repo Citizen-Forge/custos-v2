@@ -37,3 +37,23 @@ def test_complete_subtask_refuses_a_non_child():
     )
     assert "not a subtask" in msg
     assert beads.show(unrelated["id"])["status"] != "closed"
+
+
+def test_create_subtask_assigns_the_child_to_the_parents_seat():
+    """A decomposed subtask must be pickable without the product-owner brokering
+    it: create_subtask assigns it to the parent's own seat. Found live
+    2026-09-21: 5.4's child 5.4.4 landed unassigned and the parent stalled for
+    an hour because the dispatcher only brokers with spare capacity."""
+    import re
+
+    beads.ensure_initialized()
+    project = beads.create("subtask seat proj", "d", issue_type="epic")
+    parent = beads.create("subtask seat parent", "d", parent=project["id"])
+    beads.assign_to_seat(parent["id"], "seat-subtask")
+
+    msg = tools.create_subtask.func(
+        title="child", description="d", state={"ticket_id": parent["id"]}
+    )
+
+    child_id = re.search(r"created subtask (\S+)", msg).group(1)
+    assert beads.assigned_seat(beads.show(child_id)) == "seat-subtask"

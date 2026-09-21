@@ -107,7 +107,20 @@ def create_subtask(title: str, description: str, state: Annotated[HarnessState, 
     This ticket cannot be completed while any of its subtasks is still
     open. Close each one with `complete_subtask` (passing the id returned
     here) once its work is done, before calling `complete_ticket`."""
-    subtask = beads.create(title, description, parent=state["ticket_id"])
+    parent = state["ticket_id"]
+    subtask = beads.create(title, description, parent=parent)
+    # Assign the child to THIS ticket's own seat. An unassigned subtask needs
+    # the product-owner to broker it, which only happens with spare capacity --
+    # so while the dispatcher is busy the parent sits excluded (open child) and
+    # nothing touches the child. Found live 2026-09-21: 5.4 left 5.4.4
+    # unassigned and was idle for an hour.
+    seat = beads.assigned_seat(beads.show(parent))
+    if seat:
+        try:
+            beads.assign_to_seat(subtask["id"], seat)
+            return f"created subtask {subtask['id']} (assigned to {seat}): {subtask['title']}"
+        except Exception:
+            pass  # fall through: an unassigned child is still created
     return f"created subtask {subtask['id']}: {subtask['title']}"
 
 
