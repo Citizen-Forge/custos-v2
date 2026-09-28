@@ -77,3 +77,28 @@ def test_routing_bounds_each_provider_to_its_own_window():
 
     assert sizes["primary"] > 9000, "the primary's generous window kept the whole history"
     assert sizes["fallback"] <= 2000 + len("brief"), "the fallback got a trimmed request"
+
+
+def test_routing_passes_a_string_prompt_through_unchanged():
+    """The classifier calls invoke() with a plain prompt STRING, not a message
+    list. Routing must pass it through -- feeding a string to bound_history
+    char-splits it into one-character 'messages' and hands the model garbage
+    (which made the classifier ramble and deny benign calls, 2026-09-28)."""
+    from langchain_core.messages import AIMessage
+
+    from harness import routing
+    from harness.providers import ProviderConfig
+
+    seen = {}
+
+    class Rec:
+        def invoke(self, messages):
+            seen["arg"] = messages
+            return AIMessage(content="ok")
+
+    table = routing.RoutingTable({"r": [ProviderConfig(name="p", base_url="x", model="m")]})
+    routing.RoutedModel(
+        "r", table, routing.ConcurrencyGate(), model_factory=lambda cfg: Rec()
+    ).invoke("classify this call")
+
+    assert seen["arg"] == "classify this call"

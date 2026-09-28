@@ -19,3 +19,12 @@ def test_large_tool_args_are_truncated():
 def test_small_tool_args_are_untouched():
     text = _short_args({"command": "bd ready"})
     assert text == str({"command": "bd ready"})
+
+
+def test_decision_variants_are_normalised():
+    from harness.classifier import parse_verdict
+
+    assert parse_verdict('{"decision": "denied", "reason": "x"}').decision == "deny"
+    assert parse_verdict('{"decision": "allowed", "reason": "x"}').decision == "allow"
+    assert parse_verdict('{"decision": "blocked", "reason": "x"}').decision == "deny"
+    assert parse_verdict('{"decision": "ALLOW", "reason": "x"}').decision == "allow"

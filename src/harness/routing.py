@@ -170,14 +170,23 @@ class RoutedModel:
             semaphore = self._gate.acquire(cfg)
             with semaphore:
                 try:
-                    # Bound to THIS provider's window, right before the call: a
-                    # fallback is usually much smaller than the primary, so one
-                    # global bound cannot be right for both.
-                    bounded = context.bound_history(
-                        messages,
-                        cfg.context_chars or context.DEFAULT_HISTORY_MAX_CHARS,
-                    )
-                    return self._model_for(cfg).invoke(bounded)
+                    # Bound a message LIST to THIS provider's window, right
+                    # before the call: a fallback is usually much smaller than
+                    # the primary, so one global bound cannot be right for both.
+                    # A non-list input -- the classifier calls invoke() with a
+                    # plain prompt STRING -- is passed through untouched. Feeding
+                    # a string to bound_history char-splits it into a list of
+                    # one-character "messages" and hands the model garbage,
+                    # which made the classifier ramble and deny benign calls
+                    # (2026-09-28).
+                    if isinstance(messages, list):
+                        to_send = context.bound_history(
+                            messages,
+                            cfg.context_chars or context.DEFAULT_HISTORY_MAX_CHARS,
+                        )
+                    else:
+                        to_send = messages
+                    return self._model_for(cfg).invoke(to_send)
                 except Exception as e:  # noqa: BLE001 -- any provider failure triggers fallback
                     last_error = e
                     # Content rejections do not cool the provider down -- see
