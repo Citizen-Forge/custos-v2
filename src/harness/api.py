@@ -155,6 +155,12 @@ def _tree_from_flat(issues: list[dict]) -> list[dict]:
     for issue in issues:
         by_parent[_parent_id(issue["id"])].append(issue)
 
+    def _attach_subtasks(issue):
+        subs = sorted(by_parent.get(issue["id"], []), key=_sort_key)
+        issue["subtasks"] = subs
+        for sub in subs:
+            _attach_subtasks(sub)
+
     tree = []
     for project in sorted(by_parent[None], key=_sort_key):
         if project.get("issue_type") != "epic":
@@ -162,6 +168,11 @@ def _tree_from_flat(issues: list[dict]) -> list[dict]:
         epics = sorted(by_parent.get(project["id"], []), key=_sort_key)
         for epic in epics:
             epic["stories"] = sorted(by_parent.get(epic["id"], []), key=_sort_key)
+            for story in epic["stories"]:
+                # A story's own subtasks (a 4th id level) are real work and were
+                # invisible on the board entirely; carry them so the card can
+                # show them as indented subcards with their own status.
+                _attach_subtasks(story)
         project["epics"] = epics
         tree.append(project)
     return tree

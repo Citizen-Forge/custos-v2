@@ -175,6 +175,18 @@
   .kanban-col.blocked .kanban-col-head { color: #d97706; }
   .kanban-card.blocked { border-left: 2px solid #d97706; }
   .blocked-by { color: #dc2626; font-size: 0.75rem; margin-top: 0.25rem; }
+  .subtasks { margin-top: 0.4rem; border-top: 1px dashed var(--border); padding-top: 0.3rem; }
+  .subtask {
+    display: flex; gap: 0.3rem; align-items: baseline; flex-wrap: wrap;
+    font-size: 0.72rem; padding: 0.15rem 0 0.15rem 0.5rem; margin-top: 0.2rem;
+    border-left: 2px solid var(--border);
+  }
+  .subtask-id { color: var(--muted); }
+  .subtask-title { flex: 1 1 auto; }
+  .subtask-status { color: var(--muted); }
+  .subtask.active { border-left-color: #2563eb; }
+  .subtask.blocked { border-left-color: #d97706; }
+  .subtask.done { border-left-color: #16a34a; opacity: 0.65; }
   .kanban-card-actions { margin-top: 0.4rem; display: flex; gap: 0.3rem; }
   .kanban-card-actions button { font-size: 0.75rem; padding: 0.15rem 0.4rem; }
   .roadmap-card {
@@ -665,6 +677,29 @@ function relTime(iso) {
   return `${Math.round(s / 3600)}h ago`;
 }
 
+// A story's own subtask, shown indented inside its parent's card with its own
+// status. Before this, the 4th id level (e.g. 6.6.3 under 6.6) never reached
+// the board at all.
+function subtaskRow(s) {
+  const human = (s.labels || []).includes("human");
+  const depBlockers = s.blocked_by || [];
+  const status = s.status || "open";
+  const cls = status === "closed" ? "done"
+    : (human || depBlockers.length) ? "blocked"
+    : status === "in_progress" ? "active" : "open";
+  const seat = (s.metadata && s.metadata.assigned_seat) || null;
+  const bits = [];
+  if (human) bits.push("parked");
+  if (seat) bits.push(seat);
+  if (depBlockers.length) bits.push("blocked by " + depBlockers.join(", "));
+  const meta = bits.length ? " · " + escapeHtml(bits.join(" · ")) : "";
+  return `<div class="subtask ${cls}">
+    <span class="subtask-id">${escapeHtml(s.id)}</span>
+    <span class="subtask-title">${escapeHtml(s.title || "")}</span>
+    <span class="subtask-status">${escapeHtml(status)}${meta}</span>
+  </div>`;
+}
+
 function kanbanCard(story) {
   const seat = (story.metadata && story.metadata.assigned_seat) || null;
   const human = isBlocked(story);
@@ -693,6 +728,9 @@ function kanbanCard(story) {
     </div>` : "";
   const notes = human && story.notes
     ? `<div class="notes">${escapeHtml(story.notes)}</div>` : "";
+  const subs = story.subtasks || [];
+  const subtasks = subs.length
+    ? `<div class="subtasks">${subs.map(subtaskRow).join("")}</div>` : "";
   return `<div class="kanban-card${blocked ? " blocked" : ""}">
     <div class="kanban-card-epic">${escapeHtml(story.epicTitle || "")}</div>
     <div class="kanban-card-title"><span class="id">${story.id}</span> ${escapeHtml(story.title)}</div>
@@ -700,6 +738,7 @@ function kanbanCard(story) {
     ${activity}
     ${depNote}
     ${notes}
+    ${subtasks}
     ${actions}
   </div>`;
 }
