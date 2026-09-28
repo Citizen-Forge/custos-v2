@@ -209,6 +209,21 @@ def _cap_tool_message(message: ToolMessage) -> ToolMessage:
     )
 
 
+def _message_size(message) -> int:
+    """Chars a message contributes to the request: its content PLUS its
+    tool-call arguments.
+
+    The args are the load-bearing part for a coding agent -- a `write_file`
+    carries the whole file -- and counting only `content` let a thread grow far
+    past HISTORY_MAX_CHARS in real tokens. Found live 2026-09-21: with DeepSeek
+    out of balance the fallback refused a 330k-token request against its 64k
+    window, and every ticket fell over until the harness was stopped."""
+    size = len(str(getattr(message, "content", "") or ""))
+    for call in getattr(message, "tool_calls", None) or []:
+        size += len(str(call.get("args", "")))
+    return size
+
+
 def _bound_history(messages: list) -> list:
     """Drop the oldest messages until the request fits, cutting only at boundaries.
 
@@ -223,7 +238,7 @@ def _bound_history(messages: list) -> list:
     capped = [
         _cap_tool_message(m) if isinstance(m, ToolMessage) else m for m in messages
     ]
-    total = sum(len(str(getattr(m, "content", "") or "")) for m in capped)
+    total = sum(_message_size(m) for m in capped)
     if total <= HISTORY_MAX_CHARS:
         return capped
 
@@ -245,7 +260,7 @@ def _bound_history(messages: list) -> list:
     kept: list = []
     used = 0
     for message in reversed(body):
-        size = len(str(getattr(message, "content", "") or ""))
+        size = _message_size(message)
         if kept and used + size > HISTORY_MAX_CHARS:
             break
         kept.append(message)
