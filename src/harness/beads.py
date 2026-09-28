@@ -291,7 +291,25 @@ def list_by_assignee(actor: str) -> list[dict]:
 
 
 def claim(issue_id: str, actor: str = DEFAULT_ACTOR) -> dict:
-    return json.loads(_run(["update", issue_id, "--claim"], actor=actor))[0]
+    try:
+        return json.loads(_run(["update", issue_id, "--claim"], actor=actor))[0]
+    except BeadsError as e:
+        text = str(e).lower()
+        if "already claimed" not in text and "already assigned" not in text:
+            raise
+        # The ticket is still claimed by another seat -- typically the
+        # product-owner reassigned it (metadata `assigned_seat`) without
+        # releasing the old claim. A single such ticket wedged dispatch: the
+        # selector kept returning it and start_agent kept failing, so nothing
+        # else ever started (workspace-o0n.5.5, 2026-09-28). Release the stale
+        # claim and take it -- the harness owns the board, and the intended
+        # seat is the one now claiming.
+        # The ticket is already in_progress, so a plain --claim is refused
+        # ("not claimable"). A forced reassign takes it in one step -- the
+        # harness owns the board and the intended seat is the one claiming.
+        return json.loads(
+            _run(["update", issue_id, "--assignee", actor, "--force"], actor=actor)
+        )[0]
 
 
 def show(issue_id: str) -> dict:
