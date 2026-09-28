@@ -89,6 +89,21 @@ Arguments: {tool_args}
 """
 
 
+# The classifier only needs enough of the call to judge it, and a `write_file`
+# carries the whole file in its args. Sending all of it made every classifier
+# call ~2050 prompt tokens and ~500 output tokens (~11-15s on the 3070 Ti), so a
+# board full of agents hammered the card. The verb/path/command is always at the
+# front, which is what the judgement turns on, so a truncation is enough.
+_ARGS_MAX_CHARS = 800
+
+
+def _short_args(tool_args) -> str:
+    text = str(tool_args)
+    if len(text) <= _ARGS_MAX_CHARS:
+        return text
+    return text[:_ARGS_MAX_CHARS] + f"... [args truncated at {_ARGS_MAX_CHARS} chars]"
+
+
 def build_classifier_from_model(model, escalation_model=None):
     """Returns a `(tool_name, tool_args) -> Verdict` callable bound to any
     object with an `.invoke(prompt) -> response.content` interface -- a
@@ -102,7 +117,7 @@ def build_classifier_from_model(model, escalation_model=None):
     the fail-closed deny."""
 
     def classify(tool_name: str, tool_args: dict) -> Verdict:
-        prompt = PROMPT.format(tool_name=tool_name, tool_args=tool_args)
+        prompt = PROMPT.format(tool_name=tool_name, tool_args=_short_args(tool_args))
         started = time.perf_counter()
         # One retry on an unparseable response. The historical failure the
         # 2026-09-19 denial audit found was not a strict classifier but an

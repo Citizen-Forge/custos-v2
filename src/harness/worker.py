@@ -153,7 +153,10 @@ def _routing_table_from_env() -> RoutingTable:
             # The classifier answers one short JSON verdict on EVERY
             # non-trivial tool call -- the highest-frequency call in the
             # whole system, so keep this tight specifically.
-            "classifier": _chain_from_env("CLASSIFIER", local_base_url, local_model, max_tokens=1000),
+            # A verdict is a short JSON object; 1000 let the model ramble to
+            # ~500 tokens (11-15s per call, observed 2026-09-28). 250 is ample
+            # and bounds the worst case.
+            "classifier": _chain_from_env("CLASSIFIER", local_base_url, local_model, max_tokens=250),
         },
         default_role=DEFAULT_SEAT_ID,
     )
