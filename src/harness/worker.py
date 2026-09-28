@@ -47,7 +47,7 @@ import time
 import psycopg
 from langgraph.checkpoint.postgres import PostgresSaver
 
-from . import beads, prompts, seats, slack, verifier, workspaces
+from . import beads, context, prompts, seats, slack, verifier, workspaces
 from .classifier import build_classifier_from_model
 from .dynamic_tools import build_dynamic_tools
 from .graph import build_graph_from_model
@@ -101,6 +101,11 @@ def _chain_from_env(env_prefix: str, default_base_url: str, default_model: str, 
             concurrency_limit=int(os.environ.get(f"{env_prefix}_MODEL_CONCURRENCY", "1")),
             max_tokens=resolved_max_tokens,
             extra_body=_thinking_off(f"{env_prefix}_MODEL_DISABLE_THINKING"),
+            # A hosted primary can take a big window; bound it generously and
+            # leave the tightening to the fallback below.
+            context_chars=int(
+                os.environ.get(f"{env_prefix}_MODEL_CONTEXT_CHARS", context.DEFAULT_HISTORY_MAX_CHARS)
+            ),
         )
     ]
     fallback_base_url = os.environ.get(f"{env_prefix}_FALLBACK_BASE_URL")
@@ -114,6 +119,14 @@ def _chain_from_env(env_prefix: str, default_base_url: str, default_model: str, 
                 concurrency_limit=int(os.environ.get(f"{env_prefix}_FALLBACK_CONCURRENCY", "4")),
                 max_tokens=resolved_max_tokens,
                 extra_body=_thinking_off(f"{env_prefix}_FALLBACK_DISABLE_THINKING"),
+                # The fallback is usually the smaller-window model (a local 30B
+                # at 64k); bound it to fit so a request sized for the primary is
+                # trimmed rather than rejected.
+                context_chars=int(
+                    os.environ.get(
+                        f"{env_prefix}_FALLBACK_CONTEXT_CHARS", context.FALLBACK_HISTORY_MAX_CHARS
+                    )
+                ),
             )
         )
     return chain

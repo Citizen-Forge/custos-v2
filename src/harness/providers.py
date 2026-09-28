@@ -54,6 +54,12 @@ class ProviderConfig:
     # than global precisely because the local llama.cpp server has no such
     # parameter and should not receive it.
     extra_body: dict | None = None
+    # Request-size bound in characters, applied by routing right before this
+    # provider is called. A fallback is usually a much smaller window than the
+    # primary (a local 30B at 65536 tokens vs a hosted model), so the bound is
+    # per provider rather than one global value. None falls back to
+    # context.DEFAULT_HISTORY_MAX_CHARS.
+    context_chars: int | None = None
 
 
 # A model call that never returns takes the whole project down with it.

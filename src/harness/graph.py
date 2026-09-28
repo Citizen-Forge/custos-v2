@@ -44,7 +44,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, StateGraph, START
 from langgraph.prebuilt import ToolNode
 
-from . import permissions
+from . import context, permissions
 from .classifier import Verdict
 from .providers import ProviderConfig, build_chat_model
 from .state import HarnessState
@@ -190,85 +190,23 @@ def _repair_dangling_tool_calls(messages: list) -> list:
 # KB), so each is capped as well as the total. Both limits are deliberately
 # generous: this is a backstop against a request the provider will refuse, not
 # a context-management policy.
-HISTORY_MAX_CHARS = int(os.environ.get("HISTORY_MAX_CHARS", "400000"))
-TOOL_MESSAGE_MAX_CHARS = int(os.environ.get("TOOL_MESSAGE_MAX_CHARS", "20000"))
+# The bounding logic lives in context.py, applied here as the OUTER default and
+# tightened per provider in routing (a fallback is usually a smaller window than
+# the primary -- see context.py's docstring for the 2026-09-21 incident).
+HISTORY_MAX_CHARS = context.DEFAULT_HISTORY_MAX_CHARS
+TOOL_MESSAGE_MAX_CHARS = context.TOOL_MESSAGE_MAX_CHARS
 
 
 def _cap_tool_message(message: ToolMessage) -> ToolMessage:
-    """Shorten one tool result, marking the cut so the model knows it is partial."""
-    content = getattr(message, "content", None)
-    if not isinstance(content, str) or len(content) <= TOOL_MESSAGE_MAX_CHARS:
-        return message
-    return ToolMessage(
-        content=(
-            content[:TOOL_MESSAGE_MAX_CHARS]
-            + f"\n... [truncated at {TOOL_MESSAGE_MAX_CHARS} characters]"
-        ),
-        tool_call_id=getattr(message, "tool_call_id", None),
-        name=getattr(message, "name", None),
-    )
+    return context.cap_tool_message(message)
 
 
 def _message_size(message) -> int:
-    """Chars a message contributes to the request: its content PLUS its
-    tool-call arguments.
-
-    The args are the load-bearing part for a coding agent -- a `write_file`
-    carries the whole file -- and counting only `content` let a thread grow far
-    past HISTORY_MAX_CHARS in real tokens. Found live 2026-09-21: with DeepSeek
-    out of balance the fallback refused a 330k-token request against its 64k
-    window, and every ticket fell over until the harness was stopped."""
-    size = len(str(getattr(message, "content", "") or ""))
-    for call in getattr(message, "tool_calls", None) or []:
-        size += len(str(call.get("args", "")))
-    return size
+    return context.message_size(message)
 
 
 def _bound_history(messages: list) -> list:
-    """Drop the oldest messages until the request fits, cutting only at boundaries.
-
-    The retained window must never BEGIN on a tool message: a tool reply whose
-    assistant message was dropped is invalid on its own, which is the exact
-    failure this exists to prevent. Keeping a suffix (rather than a prefix plus
-    a suffix) is what makes that a one-line guarantee -- every assistant
-    tool_calls inside a suffix still has its replies directly after it.
-
-    A history that already fits is returned unchanged.
-    """
-    capped = [
-        _cap_tool_message(m) if isinstance(m, ToolMessage) else m for m in messages
-    ]
-    total = sum(_message_size(m) for m in capped)
-    if total <= HISTORY_MAX_CHARS:
-        return capped
-
-    # Keep the LEAD-IN, which for a ticket thread is [system prompt, brief].
-    # Dropping the brief is not a tidy truncation: it removes the only copy of
-    # the ticket text, and agents then refuse with "no ticket text reached this
-    # turn". Found live 2026-09-15, after the first version of this bound
-    # shipped -- 6.1, 6.3, 6.5 and 9.4 were all parked saying exactly that.
-    # Only system/human messages are kept, never an assistant turn, so this can
-    # never separate a tool_calls message from its replies.
-    head: list = []
-    for message in capped[:2]:
-        if getattr(message, "type", None) in ("system", "human"):
-            head.append(message)
-        else:
-            break
-    body = capped[len(head):]
-
-    kept: list = []
-    used = 0
-    for message in reversed(body):
-        size = _message_size(message)
-        if kept and used + size > HISTORY_MAX_CHARS:
-            break
-        kept.append(message)
-        used += size
-    kept.reverse()
-    while kept and isinstance(kept[0], ToolMessage):
-        kept.pop(0)
-    return head + kept
+    return context.bound_history(messages, HISTORY_MAX_CHARS)
 
 
 def build_graph_from_model(model, checkpointer, tools=None, classify=None, interrupt_after=None, turn_budget=None, workspace_root=None, completion_gate=False):

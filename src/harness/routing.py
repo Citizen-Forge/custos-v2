@@ -39,6 +39,7 @@ import threading
 import time
 from dataclasses import dataclass
 
+from . import context
 from .providers import ProviderConfig, build_chat_model
 
 DEFAULT_COOLDOWN_SECONDS = 60.0
@@ -169,7 +170,14 @@ class RoutedModel:
             semaphore = self._gate.acquire(cfg)
             with semaphore:
                 try:
-                    return self._model_for(cfg).invoke(messages)
+                    # Bound to THIS provider's window, right before the call: a
+                    # fallback is usually much smaller than the primary, so one
+                    # global bound cannot be right for both.
+                    bounded = context.bound_history(
+                        messages,
+                        cfg.context_chars or context.DEFAULT_HISTORY_MAX_CHARS,
+                    )
+                    return self._model_for(cfg).invoke(bounded)
                 except Exception as e:  # noqa: BLE001 -- any provider failure triggers fallback
                     last_error = e
                     # Content rejections do not cool the provider down -- see
