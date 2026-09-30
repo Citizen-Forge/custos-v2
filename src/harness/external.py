@@ -454,7 +454,8 @@ def submit_ticket(conn, seat_id: str, ticket_id: str, summary: str) -> dict:
     # A ticket with no criteria is never judged, so nothing else would land
     # it -- same rule as worker.work_one_ticket.
     current = beads.show(ticket_id)
-    if not beads.acceptance_criteria(current) and not beads.acceptance_checks(current):
+    judged = bool(beads.acceptance_criteria(current) or beads.acceptance_checks(current))
+    if not judged:
         if not verifier.land(ticket_id, conn):
             return {"ticket_id": ticket_id, "work_commit": span, "state": "flagged: could not merge"}
 
@@ -466,7 +467,9 @@ def submit_ticket(conn, seat_id: str, ticket_id: str, summary: str) -> dict:
         (ticket_id, seat_id),
     )
     log.info("external seat %s submitted %s (%s)", seat_id, ticket_id, span)
-    return {"ticket_id": ticket_id, "work_commit": span, "state": "submitted: awaiting verification"}
+    state = ("submitted: awaiting verification" if judged
+             else "landed: no acceptance criteria, so merged without a verdict")
+    return {"ticket_id": ticket_id, "work_commit": span, "state": state}
 
 
 def pending_verification(conn) -> list[str]:

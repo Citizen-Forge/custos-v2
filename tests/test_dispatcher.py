@@ -279,6 +279,39 @@ def test_degraded_primary_refuses_new_starts_but_keeps_running_agents():
     assert set(d.in_flight()) == {"seat-a", "seat-b"}
 
 
+def test_a_resumed_thread_keeps_its_tree_and_a_fresh_one_is_reset(monkeypatch):
+    d = _dispatcher()
+    resets = []
+    monkeypatch.setattr(dispatcher.workspaces, "for_ticket", lambda tid: f"/tree/{tid}")
+    monkeypatch.setattr(dispatcher.workspaces, "reset_for_attempt", lambda tid: resets.append(tid))
+
+    monkeypatch.setattr(d, "_has_thread", lambda tid: True)
+    assert d._prepare_tree("p.1") == "/tree/p.1"
+    assert resets == [], "a resumed thread's edits must not be wiped under it"
+
+    monkeypatch.setattr(d, "_has_thread", lambda tid: False)
+    d._prepare_tree("p.2")
+    assert resets == ["p.2"]
+
+
+def test_has_thread_reads_the_checkpointer(monkeypatch):
+    import os
+
+    from langgraph.checkpoint.base import empty_checkpoint
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    d = dispatcher.Dispatcher(os.environ["DATABASE_URL"], RoutingTable({}), max_agents=1)
+    with PostgresSaver.from_conn_string(os.environ["DATABASE_URL"]) as saver:
+        saver.setup()
+        saver.put(
+            {"configurable": {"thread_id": "has-thread.1", "checkpoint_ns": ""}},
+            empty_checkpoint(), {}, {},
+        )
+
+    assert d._has_thread("has-thread.1") is True
+    assert d._has_thread("has-thread.2") is False
+
+
 def test_tick_reports_at_capacity_without_touching_beads():
     d = _dispatcher(max_agents=1)
     with d._lock:

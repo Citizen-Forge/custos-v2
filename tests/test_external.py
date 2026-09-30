@@ -155,8 +155,9 @@ def test_submit_without_criteria_lands_directly(projects_root, conn, seat, ticke
     brief = external.request_ticket(name, project_id)
     assert _clone_commit_push(brief, tmp_path, brief["git"]["push_branch"]).returncode == 0
 
-    external.submit_ticket(conn, name, story_id, "added hello.txt")
+    result = external.submit_ticket(conn, name, story_id, "added hello.txt")
 
+    assert result["state"].startswith("landed")
     assert beads.show(story_id)["status"] == "closed"
     assert os.path.exists(os.path.join(workspaces.path_for(project_id), "hello.txt"))
 

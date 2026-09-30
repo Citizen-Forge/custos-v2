@@ -645,6 +645,33 @@ class Dispatcher:
         except Exception:
             log.exception("could not annotate %s about the restored ref", issue["id"])
 
+    def _has_thread(self, ticket_id: str) -> bool:
+        try:
+            with psycopg.connect(self.conn_string, autocommit=True) as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM checkpoints WHERE thread_id = %s LIMIT 1", (ticket_id,)
+                ).fetchone()
+        except psycopg.errors.UndefinedTable:
+            return False
+        return row is not None
+
+    def _prepare_tree(self, ticket_id: str) -> str:
+        """The ticket's worktree, put on the integration tip for a FRESH attempt
+        only. A resumed thread keeps its tree: its history records the edits it
+        made, and resetting under it wiped them while the agent went on
+        believing they existed -- and would have discarded workspace-o0n.17.1's
+        whole uncommitted, verified fix on its next pickup (2026-09-30). A
+        rework requeue deletes the thread (verifier._reset_thread), so reworks
+        still start from the tip."""
+        workspace_root = workspaces.for_ticket(ticket_id)
+        if self._has_thread(ticket_id):
+            log.info("%s: resuming its thread, tree kept as it was", ticket_id)
+            return workspace_root
+        previous = workspaces.reset_for_attempt(ticket_id)
+        if previous:
+            log.info("%s: tree reset to the integration tip (was %s)", ticket_id, previous[:12])
+        return workspace_root
+
     def _agent_thread(self, seat_id: str, issue: dict) -> None:
         """One agent, one ticket. Whatever happens -- success, refusal,
         decline, crash -- the capacity slot is released in `finally`, so a
@@ -663,13 +690,7 @@ class Dispatcher:
             # actioned from the state of the integration branch when it
             # starts. Safe because the merge is gated on verification, so
             # that branch holds accepted work and nothing else.
-            workspace_root = workspaces.for_ticket(issue["id"])
-            previous = workspaces.reset_for_attempt(issue["id"])
-            if previous:
-                log.info(
-                    "%s: tree reset to the integration tip (was %s)",
-                    issue["id"], previous[:12],
-                )
+            workspace_root = self._prepare_tree(issue["id"])
             # And the integration checkout itself, before the agent touches
             # anything: a run that was killed outright never got to file
             # what it left in there, and absorb_stray_edits would otherwise
