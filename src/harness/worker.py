@@ -280,7 +280,9 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
             slack.post_message(
                 f":rocket: {runtime.who} is starting work on {thread_id}: {issue['title']}"
             )
-            context = beads.prime()
+            prime_text = context.cap_prime(
+                beads.prime(), project_id=workspaces.project_id_for(thread_id)
+            )
             # `issue` came from `bd list`, which carries no metadata, so the
             # ticket's own record is fetched explicitly. That record is the
             # ONLY place the acceptance criteria live for most escalated
@@ -292,7 +294,7 @@ def work_one_ticket(runtime: SeatRuntime, issue: dict) -> str:
             # in the turn", spent the escalation budget and parked for good.
             record = beads.show(thread_id)
             prompt = (
-                f"{context}\n\n---\n\nTicket: {issue['title']}\n\n"
+                f"{prime_text}{context.BRIEF_TICKET_MARKER} {issue['title']}\n\n"
                 f"{issue.get('description', '')}"
             )
             criteria = beads.acceptance_criteria(record)

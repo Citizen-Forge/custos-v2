@@ -35,6 +35,7 @@ against a provider that's cooling down specifically *because* it's rate-
 limited would defeat the cooldown's purpose.
 """
 
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -43,6 +44,21 @@ from . import context
 from .providers import ProviderConfig, build_chat_model
 
 DEFAULT_COOLDOWN_SECONDS = 60.0
+
+# 401/402/403 do not clear in a minute: an exhausted balance or a revoked key
+# stays broken until a person acts. A 60s cooldown re-sent every call to a
+# dead DeepSeek account once a minute per agent (2026-09-30).
+ACCOUNT_COOLDOWN_SECONDS = float(os.environ.get("ROUTING_ACCOUNT_COOLDOWN_SECONDS", "900"))
+
+# How long after a primary failure the chain still counts as degraded, on top
+# of the cooldown itself. Must outlast the cooldown: once it lapses, the
+# primary is only re-probed by the next call, and until that call fails again
+# nothing would otherwise say the fallback is still carrying the load.
+DEGRADED_GRACE_SECONDS = float(os.environ.get("ROUTING_DEGRADED_GRACE_SECONDS", "300"))
+
+# Statuses that describe the provider or the account, not the request.
+_PROVIDER_STATUSES = {401, 402, 403, 429}
+_ACCOUNT_STATUSES = {401, 402, 403}
 
 # A provider that rejects the *content* of a request is not unwell, and cooling
 # it down is actively harmful. The request is rebuilt from the same checkpoint
@@ -73,16 +89,25 @@ _CONTENT_ERROR_MARKERS = (
 def is_content_error(exc: BaseException) -> bool:
     """True when a provider rejected what we sent rather than being unhealthy.
 
-    Treats any 4xx as content: a 400 means the request was unacceptable, which
-    says nothing about whether the backend is up. 5xx stays provider
-    ill-health and still cools down, except for the known llama.cpp tool-call
-    parse failure, which is caused by what we sent rather than by the server.
+    Treats a 4xx as content: a 400 means the request was unacceptable, which
+    says nothing about whether the backend is up. The exceptions are auth,
+    billing and rate limits (401/402/403/429) -- those say the provider cannot
+    serve us, whatever we send. 5xx stays provider ill-health and still cools
+    down, except for the known llama.cpp tool-call parse failure, which is
+    caused by what we sent rather than by the server.
     """
     status = getattr(exc, "status_code", None)
     if isinstance(status, int) and 400 <= status < 500:
-        return True
+        return status not in _PROVIDER_STATUSES
     text = str(exc).lower()
     return any(marker in text for marker in _CONTENT_ERROR_MARKERS)
+
+
+def cooldown_seconds_for(exc: BaseException) -> float:
+    status = getattr(exc, "status_code", None)
+    if status in _ACCOUNT_STATUSES:
+        return ACCOUNT_COOLDOWN_SECONDS
+    return DEFAULT_COOLDOWN_SECONDS
 
 
 class AllProvidersCoolingDown(Exception):
@@ -120,6 +145,7 @@ class RoutingTable:
         self._chains = chains
         self._default_role = default_role
         self._cooldowns: dict[str, _Cooldown] = {}
+        self._degraded: dict[str, _Cooldown] = {}
 
     def chain_for(self, role: str) -> list[ProviderConfig]:
         if role in self._chains:
@@ -133,6 +159,22 @@ class RoutingTable:
 
     def report_failure(self, cfg: ProviderConfig, cooldown_seconds: float = DEFAULT_COOLDOWN_SECONDS) -> None:
         self._cooldowns.setdefault(cfg.name, _Cooldown()).start(cooldown_seconds)
+        self._degraded.setdefault(cfg.name, _Cooldown()).start(cooldown_seconds + DEGRADED_GRACE_SECONDS)
+
+    def report_success(self, cfg: ProviderConfig) -> None:
+        self._degraded.pop(cfg.name, None)
+
+    def primary_degraded(self, role: str) -> bool:
+        """True while `role`'s first provider has failed recently and a
+        fallback exists to carry its load. Cleared by the primary's next
+        success, not by a timer alone."""
+        try:
+            chain = self.chain_for(role)
+        except KeyError:
+            return False
+        if len(chain) < 2:
+            return False
+        return self._degraded.get(chain[0].name, _Cooldown()).active()
 
 
 class RoutedModel:
@@ -186,7 +228,9 @@ class RoutedModel:
                         )
                     else:
                         to_send = messages
-                    return self._model_for(cfg).invoke(to_send)
+                    result = self._model_for(cfg).invoke(to_send)
+                    self._routing.report_success(cfg)
+                    return result
                 except Exception as e:  # noqa: BLE001 -- any provider failure triggers fallback
                     last_error = e
                     # Content rejections do not cool the provider down -- see
@@ -196,7 +240,7 @@ class RoutedModel:
                     # provider stays available so the ticket's next retry is a
                     # real one instead of an instant AllProvidersCoolingDown.
                     if not is_content_error(e):
-                        self._routing.report_failure(cfg)
+                        self._routing.report_failure(cfg, cooldown_seconds_for(e))
 
         if not attempted_any:
             raise AllProvidersCoolingDown(f"every provider for role {self._role!r} is cooling down")

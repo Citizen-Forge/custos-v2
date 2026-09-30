@@ -37,13 +37,37 @@ log = logging.getLogger(__name__)
 MAX_VERIFIER_REWORKS = int(os.environ.get("MAX_VERIFIER_REWORKS", "2"))
 
 
-def build_model():
+ROLE = "verifier"
+
+
+def build_model(routing=None, gate=None):
     """The verifier's model, from VERIFIER_* falling back to LOCAL_*.
 
     Shared by the standalone entry point and by the dispatcher's
     verify-on-close step, so the two cannot drift into judging tickets
-    with differently-configured models."""
+    with differently-configured models.
+
+    With no VERIFIER_* model configured it is the workers' own LOCAL chain,
+    primary AND fallback, routed. It used to be the primary alone, so when
+    DeepSeek ran out of balance (2026-09-30) nothing could be verified or
+    landed even though the fallback was serving every agent. Pass the
+    dispatcher's routing table and gate to share their cooldowns and the
+    fallback's concurrency limit."""
     from .providers import ProviderConfig, build_chat_model
+
+    if not os.environ.get("VERIFIER_MODEL_BASE_URL"):
+        from .routing import ConcurrencyGate, RoutedModel, RoutingTable
+        from .worker import _chain_from_env
+
+        chain = _chain_from_env(
+            "LOCAL",
+            "http://host.docker.internal:11434/v1",
+            "qwen2.5:7b-instruct",
+            max_tokens=int(os.environ.get("VERIFIER_MAX_TOKENS", "6000")),
+        )
+        routing = routing or RoutingTable({})
+        routing._chains.setdefault(ROLE, chain)
+        return RoutedModel(ROLE, routing, gate or ConcurrencyGate())
 
     provider_cfg = ProviderConfig(
         name="verifier",

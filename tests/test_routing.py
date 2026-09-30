@@ -217,3 +217,95 @@ def test_a_500_without_a_known_marker_still_cools_down():
 
     assert routed.invoke("hi") == "response from backup"
     assert routing.is_cooling_down(primary)
+
+
+@pytest.mark.parametrize("status", [401, 402, 403, 429])
+def test_auth_billing_and_rate_limits_are_provider_failures_not_content(status):
+    # A 402 was once filed under "any 4xx is content", so an empty DeepSeek
+    # balance never cooled down and every call hit it first (2026-09-30).
+    primary = _cfg("primary")
+    backup = _cfg("backup")
+    models = {
+        "primary": RejectingModel(_HTTPError(f"Error code: {status}", status_code=status)),
+        "backup": FakeModel("backup"),
+    }
+    routing = RoutingTable({"worker": [primary, backup]})
+    routed = RoutedModel("worker", routing, ConcurrencyGate(), model_factory=lambda cfg: models[cfg.name])
+
+    assert routed.invoke("hi") == "response from backup"
+    assert routing.is_cooling_down(primary)
+    routed.invoke("hi")
+    assert models["primary"].attempts == 1  # skipped while cooling down
+
+
+def test_billing_failure_gets_the_long_account_cooldown():
+    from harness import routing as routing_mod
+
+    assert routing_mod.cooldown_seconds_for(_HTTPError("x", status_code=402)) == routing_mod.ACCOUNT_COOLDOWN_SECONDS
+    assert routing_mod.cooldown_seconds_for(_HTTPError("x", status_code=429)) == routing_mod.DEFAULT_COOLDOWN_SECONDS
+    assert routing_mod.cooldown_seconds_for(RuntimeError("down")) == routing_mod.DEFAULT_COOLDOWN_SECONDS
+
+
+def test_primary_failure_marks_the_chain_degraded_until_the_primary_succeeds():
+    primary = _cfg("primary")
+    backup = _cfg("backup")
+    models = {"primary": FakeModel("primary", fail=True), "backup": FakeModel("backup")}
+    routing = RoutingTable({"worker": [primary, backup]}, default_role="worker")
+    routed = RoutedModel("worker", routing, ConcurrencyGate(), model_factory=lambda cfg: models[cfg.name])
+
+    assert not routing.primary_degraded("worker")
+    routed.invoke("hi")
+    assert routing.primary_degraded("worker")
+    assert routing.primary_degraded("some-runtime-seat")  # resolves via default_role
+
+    routing._cooldowns.clear()
+    models["primary"].fail = False
+    assert routed.invoke("hi") == "response from primary"
+    assert not routing.primary_degraded("worker")
+
+
+def test_degraded_outlasts_the_cooldown():
+    # Once the cooldown lapses the primary is only re-probed by the next call;
+    # until that call fails again the fallback is still doing the work.
+    primary = _cfg("primary")
+    routing = RoutingTable({"worker": [primary, _cfg("backup")]})
+    routing.report_failure(primary, cooldown_seconds=0.05)
+    time.sleep(0.1)
+
+    assert not routing.is_cooling_down(primary)
+    assert routing.primary_degraded("worker")
+
+
+def test_backup_failure_does_not_mark_the_chain_degraded():
+    primary = _cfg("primary")
+    backup = _cfg("backup")
+    routing = RoutingTable({"worker": [primary, backup]})
+    routing.report_failure(backup)
+
+    assert not routing.primary_degraded("worker")
+
+
+def test_verifier_uses_the_workers_chain_including_the_fallback(monkeypatch):
+    # The verifier used to be the primary alone: with DeepSeek at 402 nothing
+    # could be verified or landed while the fallback served every agent.
+    from harness import verifier
+
+    monkeypatch.delenv("VERIFIER_MODEL_BASE_URL", raising=False)
+    monkeypatch.setenv("LOCAL_MODEL_BASE_URL", "http://primary")
+    monkeypatch.setenv("LOCAL_FALLBACK_BASE_URL", "http://fallback")
+    routing = RoutingTable({})
+
+    model = verifier.build_model(routing, ConcurrencyGate())
+
+    assert isinstance(model, RoutedModel)
+    chain = routing.chain_for(verifier.ROLE)
+    assert [c.base_url for c in chain] == ["http://primary", "http://fallback"]
+
+
+def test_a_single_provider_chain_is_never_degraded():
+    primary = _cfg("primary")
+    routing = RoutingTable({"worker": [primary]})
+    routing.report_failure(primary)
+
+    assert not routing.primary_degraded("worker")
+    assert not RoutingTable({}).primary_degraded("worker")

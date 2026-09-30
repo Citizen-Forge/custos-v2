@@ -102,3 +102,71 @@ def test_routing_passes_a_string_prompt_through_unchanged():
     ).invoke("classify this call")
 
     assert seen["arg"] == "classify this call"
+
+
+# -- oversized briefs (2026-09-30: `bd prime` reached 1.69M chars) ------------
+
+from langchain_core.messages import SystemMessage  # noqa: E402
+
+from harness import context  # noqa: E402
+
+
+def _prime(n_memories, body="lesson " * 40, tagged=()):
+    memories = "".join(
+        f"### mem-{i:03d}{'-workspace-o0n' if i in tagged else ''}\n{body}\n\n"
+        for i in range(n_memories)
+    )
+    return (
+        "[bd prime] header\n\n# Beads Workflow Context\n\nintro\n\n"
+        f"## Persistent Memories ({n_memories})\n\n{memories}"
+        "# SESSION CLOSE PROTOCOL\n\nalways run the gate\n"
+    )
+
+
+def test_cap_prime_keeps_workflow_sections_and_drops_memories_to_fit():
+    text = _prime(500)
+    capped = context.cap_prime(text, 10000)
+
+    assert len(capped) <= 10000
+    assert capped.startswith("[bd prime] header")
+    assert capped.rstrip().endswith("always run the gate")
+    assert "of 500 shown" in capped
+    assert "bd memories <keyword>" in capped
+
+
+def test_cap_prime_prefers_the_tickets_own_project():
+    text = _prime(500, tagged={450, 460, 470})
+    capped = context.cap_prime(text, 5000, project_id="workspace-o0n")
+
+    for i in (450, 460, 470):
+        assert f"### mem-{i:03d}-workspace-o0n" in capped
+
+
+def test_cap_prime_leaves_a_small_prime_untouched():
+    text = _prime(3)
+    assert context.cap_prime(text, 10000) == text
+
+
+def test_cap_brief_keeps_the_ticket_text_whole():
+    ticket = f"{context.BRIEF_TICKET_MARKER} Fix the gate\n\nthe full ticket description" + "d" * 2000
+    capped = context.cap_brief(_prime(500) + ticket, 12000)
+
+    assert len(capped) <= 12000
+    assert capped.endswith(ticket)
+
+
+def test_bound_history_caps_an_oversized_brief_in_a_resumed_checkpoint():
+    """17.1.5's checkpoint held a 1.69M-char brief; the old bound kept the
+    lead-in verbatim and the fallback got a 449k-token request."""
+    ticket = f"{context.BRIEF_TICKET_MARKER} Make the gate tractable\n\nticket body"
+    history = [
+        SystemMessage(content="system prompt"),
+        HumanMessage(content=_prime(3000) + ticket),
+        AIMessage(content="working on it"),
+    ]
+
+    bounded = context.bound_history(history, 150000)
+
+    assert sum(context.message_size(m) for m in bounded) <= 150000
+    assert bounded[1].content.endswith(ticket)
+    assert bounded[-1].content == "working on it"
