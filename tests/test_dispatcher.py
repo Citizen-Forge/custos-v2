@@ -244,6 +244,41 @@ def test_start_agent_refuses_second_ticket_for_same_seat():
     assert d.start_agent("seat-a", {"id": "z", "title": "z"}) is False
 
 
+def _fallback_dispatcher(max_agents):
+    from harness.providers import ProviderConfig
+
+    chain = [
+        ProviderConfig(name="primary", base_url="http://fake", model="fake"),
+        ProviderConfig(name="fallback", base_url="http://fake", model="fake"),
+    ]
+    routing = RoutingTable({"worker": chain}, default_role="worker")
+    return dispatcher.Dispatcher("postgresql://unused", routing, max_agents=max_agents), routing, chain
+
+
+def test_capacity_drops_to_the_fallback_limit_while_the_primary_is_degraded():
+    d, routing, (primary, _) = _fallback_dispatcher(max_agents=4)
+    assert d.capacity() == 4
+
+    routing.report_failure(primary)
+    assert d.capacity() == dispatcher.FALLBACK_MAX_RUNNING_AGENTS
+
+    routing.report_success(primary)
+    assert d.capacity() == 4
+
+
+def test_degraded_primary_refuses_new_starts_but_keeps_running_agents():
+    d, routing, (primary, _) = _fallback_dispatcher(max_agents=4)
+    with d._lock:
+        d._running["seat-a"] = {"ticket_id": "x", "title": "x", "started_at": 0}
+        d._running["seat-b"] = {"ticket_id": "y", "title": "y", "started_at": 0}
+
+    routing.report_failure(primary)
+
+    assert d.capacity() <= 0
+    assert d.start_agent("seat-c", {"id": "z", "title": "z"}) is False
+    assert set(d.in_flight()) == {"seat-a", "seat-b"}
+
+
 def test_tick_reports_at_capacity_without_touching_beads():
     d = _dispatcher(max_agents=1)
     with d._lock:

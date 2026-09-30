@@ -55,7 +55,7 @@ def _client() -> httpx.Client:
     return httpx.Client(base_url=API_URL, headers=headers, timeout=30)
 
 
-def _call(method: str, path: str, **kwargs) -> str:
+def _call(method: str, path: str, headers: dict | None = None, **kwargs) -> str:
     """Every tool below goes through this -- one place that turns a
     network failure or an API-level error into a string the calling
     agent can read and act on, rather than a crash. Response bodies are
@@ -63,7 +63,7 @@ def _call(method: str, path: str, **kwargs) -> str:
     directly, and keeps this file from needing a bespoke formatter per
     endpoint."""
     try:
-        response = _client().request(method, path, **kwargs)
+        response = _client().request(method, path, headers=headers, **kwargs)
     except httpx.HTTPError as e:
         return f"error reaching {API_URL}: {e}"
 
@@ -177,6 +177,63 @@ def set_priority(issue_id: str, priority: int) -> str:
     (0=highest). Use this to reorder a backlog after it exists -- e.g. when the user says
     one epic matters more than the rest, so the product-owner sees it first."""
     return _call("PATCH", f"/issues/{issue_id}/priority", json={"priority": priority})
+
+
+# -- external agent seat: take a ticket, work it here, submit it --------------
+#
+# Needs CUSTOS_SEAT_TOKEN (from POST /external/seats, shown once). These tools
+# let THIS session work tickets itself, in its own checkout, with the result
+# judged and merged by the same verifier an internal agent's work goes through.
+
+SEAT_TOKEN = os.environ.get("CUSTOS_SEAT_TOKEN")
+
+
+def _seat_call(method: str, path: str, **kwargs) -> str:
+    if not SEAT_TOKEN:
+        return "error: CUSTOS_SEAT_TOKEN is not set -- register an external seat first"
+    headers = {"X-Custos-Seat-Token": SEAT_TOKEN}
+    return _call(method, path, headers=headers, **kwargs)
+
+
+@mcp.tool()
+def request_ticket(project_id: str | None = None) -> str:
+    """Take the next ticket for this session's external seat (optionally only from one
+    project). If this seat already holds a ticket, that one comes back instead -- finish or
+    release it before taking another. The response carries the ticket, its acceptance
+    criteria and checks, any rework_reason from a failed verification, and the git details:
+    clone_url, base_branch to branch from, and push_branch -- the ONLY branch a push is
+    accepted to. The claim is leased: call heartbeat_ticket at least every 20 minutes while
+    working, or the ticket goes back to the pool."""
+    return _seat_call("POST", "/external/tickets/request", json={"project_id": project_id})
+
+
+@mcp.tool()
+def get_external_ticket(ticket_id: str) -> str:
+    """Re-read a ticket this seat holds: brief, criteria, git details, lease expiry."""
+    return _seat_call("GET", f"/external/tickets/{ticket_id}")
+
+
+@mcp.tool()
+def heartbeat_ticket(ticket_id: str) -> str:
+    """Extend this seat's lease on a ticket it is still working."""
+    return _seat_call("POST", f"/external/tickets/{ticket_id}/heartbeat")
+
+
+@mcp.tool()
+def submit_ticket(ticket_id: str, summary: str) -> str:
+    """Submit a finished ticket, AFTER pushing the work to its push_branch. summary must
+    say what was changed and how it was checked (which tests ran, what they reported) --
+    it is recorded as the completion claim the verifier reads. The ticket then goes through
+    the normal verification: a pass merges it into the integration branch; a fail sends it
+    back to this seat with a rework_reason (request_ticket returns it)."""
+    return _seat_call("POST", f"/external/tickets/{ticket_id}/submit", json={"summary": summary})
+
+
+@mcp.tool()
+def release_ticket(ticket_id: str, reason: str = "") -> str:
+    """Give a ticket back without finishing it (it returns to its previous seat or the
+    pool). Anything pushed to its push_branch is discarded, so say why in reason."""
+    return _seat_call("POST", f"/external/tickets/{ticket_id}/release", json={"reason": reason})
 
 
 if __name__ == "__main__":

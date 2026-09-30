@@ -41,7 +41,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import avatar, beads, model_registry, outcomes, prompts, seats, self_mod, settings, tool_proposals, verifications, wiki
+from . import avatar, beads, external_api, model_registry, outcomes, prompts, seats, self_mod, settings, tool_proposals, verifications, wiki
 from .auth import require_auth
 from .config import PROJECT_TREE_TTL
 
@@ -777,6 +777,7 @@ def reject_self_mod_proposal(proposal_id: int, body: DismissBody = DismissBody()
 
 
 app.include_router(router)
+app.include_router(external_api.router, dependencies=[Depends(require_auth)])
 
 # Mounted last, deliberately: a StaticFiles mount at "/" only catches
 # paths not matched by the routes above it, since Starlette checks routes

@@ -54,7 +54,7 @@ import time
 import psycopg
 from langgraph.checkpoint.postgres import PostgresSaver
 
-from . import beads, reflection, seats, toolchain, verifications, workspaces
+from . import beads, external, reflection, seats, toolchain, verifications, workspaces
 from .product_owner import ROLE as PRODUCT_OWNER_ROLE
 from .product_owner import build_tools as build_product_owner_tools
 from .product_owner import run_triage_session
@@ -62,12 +62,21 @@ from .providers import ProviderConfig
 from .routing import ConcurrencyGate, RoutedModel, RoutingTable
 from .verifier import build_model as build_verifier_model
 from .verifier import verify_ticket
-from .worker import build_seat_runtime, work_one_ticket
+from .worker import DEFAULT_SEAT_ID, build_seat_runtime, work_one_ticket
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("dispatcher")
 
 MAX_RUNNING_AGENTS = int(os.environ.get("MAX_RUNNING_AGENTS", "1"))
+
+# The cap while the worker chain's primary is down and the fallback is doing
+# the work. The fallback is a single-slot local llama.cpp server: agents
+# sharing it take turns, and every turn evicts the previous agent's prompt
+# cache, so each call re-reads its whole context. Running agents are never
+# stopped -- this only withholds new starts.
+FALLBACK_MAX_RUNNING_AGENTS = int(os.environ.get("FALLBACK_MAX_RUNNING_AGENTS", "1"))
+
+EXTERNAL_SWEEP_SECONDS = 60.0
 
 # How many times one ticket may crash before it stops being retried.
 # Without this a ticket that fails deterministically is restarted every
@@ -321,6 +330,9 @@ def next_assigned_ticket(
     prevented by `busy_seats`/start_agent."""
     held = held_projects()
     busy = busy_seats or set()
+    # An external seat's tickets are worked outside this process: an
+    # in_progress one is held by a live session, not orphaned.
+    outside = external.seat_ids()
     # Fetched once and reused: these two lists ARE the pools below.
     in_progress_issues = beads.in_progress()
     ready_issues = beads.ready()
@@ -354,7 +366,7 @@ def next_assigned_ticket(
             ):
                 continue
             seat_id = beads.assigned_seat(issue)
-            if not seat_id or seat_id in busy:
+            if not seat_id or seat_id in busy or seat_id in outside:
                 continue
             if best is None or _order(issue) < _order(best):
                 best, best_seat = issue, seat_id
@@ -424,13 +436,14 @@ def project_seat(project_id: str) -> str | None:
     a real choice about which specialist a piece of work belongs to; both
     are left to the product-owner."""
     seen: set[str] = set()
+    outside = external.seat_ids()
     for issue in beads.list_all():
         if issue.get("issue_type") != WORK_ITEM_TYPE:
             continue
         if toolchain.project_id_for(issue["id"]) != project_id:
             continue
         seat = beads.assigned_seat(issue)
-        if seat:
+        if seat and seat not in outside:
             seen.add(seat)
             if len(seen) > 1:
                 return None
@@ -567,6 +580,10 @@ class Dispatcher:
         self.routing = routing
         self.gate = gate or ConcurrencyGate()
         self.max_agents = max_agents
+        self.fallback_max_agents = min(max_agents, FALLBACK_MAX_RUNNING_AGENTS)
+        self._on_fallback = False
+        self._last_external_sweep = -1e9
+        self._verifying: set[str] = set()
         self._running: dict[str, dict] = {}
         self._failures: dict[str, int] = {}
         self._lock = threading.Lock()
@@ -574,9 +591,23 @@ class Dispatcher:
         # client, and verify-on-close runs once per finished ticket.
         self._verifier_model = None
 
+    def agent_limit(self) -> int:
+        on_fallback = self.routing.primary_degraded(DEFAULT_SEAT_ID)
+        if on_fallback != self._on_fallback:
+            self._on_fallback = on_fallback
+            if on_fallback:
+                log.warning(
+                    "primary model degraded -- limiting to %s agent(s) while the fallback carries the load",
+                    self.fallback_max_agents,
+                )
+            else:
+                log.info("primary model recovered -- back to %s agent(s)", self.max_agents)
+        return self.fallback_max_agents if on_fallback else self.max_agents
+
     def capacity(self) -> int:
+        limit = self.agent_limit()
         with self._lock:
-            return self.max_agents - len(self._running)
+            return limit - len(self._running)
 
     def in_flight(self) -> dict[str, dict]:
         with self._lock:
@@ -722,7 +753,7 @@ class Dispatcher:
 
     def verifier_model(self):
         if self._verifier_model is None:
-            self._verifier_model = build_verifier_model()
+            self._verifier_model = build_verifier_model(self.routing, self.gate)
         return self._verifier_model
 
     def verify_now(self, ticket_id: str) -> dict | None:
@@ -762,8 +793,9 @@ class Dispatcher:
         return result
 
     def start_agent(self, seat_id: str, issue: dict) -> bool:
+        limit = self.agent_limit()
         with self._lock:
-            if len(self._running) >= self.max_agents:
+            if len(self._running) >= limit:
                 return False
             if seat_id in self._running:
                 # One ticket at a time per seat. Two threads for the same
@@ -805,8 +837,9 @@ class Dispatcher:
         (run_self_mod_loop.py) sandboxes, and deploys once reviewed --
         this side never touches Docker, so routing work here grants the
         agent nothing it did not already have."""
+        limit = self.agent_limit()
         with self._lock:
-            if len(self._running) >= self.max_agents or seat_id in self._running:
+            if len(self._running) >= limit or seat_id in self._running:
                 return False
             self._running[seat_id] = {
                 "ticket_id": issue["id"],
@@ -949,6 +982,40 @@ class Dispatcher:
             log.info("product-owner: %s", message[:200])
         return "brokered"
 
+    def external_housekeeping(self) -> None:
+        """Release lapsed external claims, and verify external submissions --
+        the external counterpart of the verify_now an internal agent's close
+        gets. Verification runs the project's suite, so it gets its own
+        thread rather than stalling dispatch."""
+        now = time.monotonic()
+        if now - self._last_external_sweep >= EXTERNAL_SWEEP_SECONDS:
+            self._last_external_sweep = now
+            for ticket_id in external.sweep_expired(self.conn_string):
+                log.warning("released %s: its external lease expired", ticket_id)
+        with psycopg.connect(self.conn_string, autocommit=True) as conn:
+            external.init_table(conn)
+            pending = external.pending_verification(conn)
+        for ticket_id in pending:
+            with self._lock:
+                if ticket_id in self._verifying:
+                    continue
+                self._verifying.add(ticket_id)
+            threading.Thread(
+                target=self._verify_external, args=(ticket_id,), daemon=True
+            ).start()
+
+    def _verify_external(self, ticket_id: str) -> None:
+        try:
+            log.info("verifying external submission %s", ticket_id)
+            self.verify_now(ticket_id)
+            with psycopg.connect(self.conn_string, autocommit=True) as conn:
+                external.mark_verified(conn, ticket_id)
+        except Exception:
+            log.exception("could not verify external submission %s", ticket_id)
+        finally:
+            with self._lock:
+                self._verifying.discard(ticket_id)
+
     def run_forever(self) -> None:
         beads.ensure_initialized()
         log.info(
@@ -957,6 +1024,10 @@ class Dispatcher:
             POLL_SECONDS,
         )
         while True:
+            try:
+                self.external_housekeeping()
+            except Exception:
+                log.exception("external housekeeping failed")
             try:
                 outcome = self.tick()
             except Exception:
