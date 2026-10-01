@@ -68,6 +68,75 @@ def test_stopping_without_a_completion_claim_gets_one_nudge():
     assert summary == "did the thing"
 
 
+class KeepsRefusing:
+    """What workspace-o0n.17.1.5's agent did on the fallback: refuse, then keep
+    going -- refusing again on every turn it was given."""
+
+    def __init__(self):
+        self.turns = 0
+
+    def invoke(self, messages):
+        self.turns += 1
+        return AIMessage(
+            content="",
+            tool_calls=[{"name": "refuse_ticket", "args": {"reason": "nope"}, "id": f"r{self.turns}"}],
+        )
+
+
+def test_a_successful_refusal_ends_the_run():
+    beads.ensure_initialized()
+    issue = beads.create("refusal ends run test", "x")
+    model = KeepsRefusing()
+
+    graph = build_graph_from_model(model, InMemorySaver(), completion_gate=True)
+    config = {"configurable": {"thread_id": issue["id"]}}
+    graph.invoke(
+        {"messages": [HumanMessage(content="go")], "ticket_id": issue["id"], "turn_count": 0},
+        config,
+    )
+
+    assert model.turns == 1, "no turn after the refusal took effect"
+    assert graph.get_state(config).next == ()
+    assert beads.is_flagged_for_human(beads.show(issue["id"]))
+
+
+class CompletesTooEarlyThenFinishes:
+    """complete_ticket refuses while a subtask is open; the run must go on so the
+    agent can close the subtask and complete properly."""
+
+    def __init__(self, subtask_id):
+        self.subtask_id = subtask_id
+        self.turns = 0
+
+    def invoke(self, messages):
+        self.turns += 1
+        script = [
+            [{"name": "complete_ticket", "args": {"summary": "too early"}, "id": "c1"}],
+            [{"name": "complete_subtask", "args": {"subtask_id": self.subtask_id, "summary": "done"}, "id": "s1"}],
+            [{"name": "complete_ticket", "args": {"summary": "now finished"}, "id": "c2"}],
+        ]
+        if self.turns <= len(script):
+            return AIMessage(content="", tool_calls=script[self.turns - 1])
+        return AIMessage(content="should never be asked")
+
+
+def test_a_refused_completion_does_not_end_the_run():
+    beads.ensure_initialized()
+    parent = beads.create("early completion test", "x")
+    child = beads.create("early completion child", "x", parent=parent["id"])
+    model = CompletesTooEarlyThenFinishes(child["id"])
+
+    graph = build_graph_from_model(model, InMemorySaver(), completion_gate=True)
+    graph.invoke(
+        {"messages": [HumanMessage(content="go")], "ticket_id": parent["id"], "turn_count": 0},
+        {"configurable": {"thread_id": parent["id"]}},
+    )
+
+    assert model.turns == 3, "kept going past the refused completion, stopped after the real one"
+    meta = beads.show(parent["id"]).get("metadata") or {}
+    assert meta.get("completion_summary") == "now finished"
+
+
 def test_repair_answers_only_the_calls_nothing_answered():
     """Idempotent, and it never disturbs a history that is already valid."""
     valid = [

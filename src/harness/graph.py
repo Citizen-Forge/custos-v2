@@ -61,6 +61,34 @@ HANDOFF_NUDGE = (
 # why not, which is what worker.work_one_ticket then flags for a human.
 TERMINAL_TOOL_NAMES = {"complete_ticket", "refuse_ticket", "decline_ticket"}
 
+# What each terminal tool returns when it actually took effect. complete_ticket
+# can refuse ("cannot complete: ...open subtasks") and any tool can error, and
+# neither of those may end the run.
+_TERMINAL_SUCCESS = {
+    "complete_ticket": "completion recorded",
+    "refuse_ticket": "flagged for human review",
+    "decline_ticket": "declined and returned to the pool",
+}
+
+
+def _terminal_took_effect(messages: list) -> bool:
+    """True when the tool batch just run included a terminal tool that
+    succeeded. The run ends there: the ticket is settled, and handing the
+    model another turn let workspace-o0n.17.1.5 call refuse_ticket again and
+    again for hours after its first refusal had already flagged it
+    (2026-10-01) -- holding the only agent slot the whole time."""
+    for message in reversed(messages):
+        if not isinstance(message, ToolMessage):
+            break
+        prefix = _TERMINAL_SUCCESS.get(getattr(message, "name", None))
+        if (
+            prefix
+            and getattr(message, "status", "success") != "error"
+            and str(message.content).startswith(prefix)
+        ):
+            return True
+    return False
+
 # One extra turn, offered when the model stops without a terminal call.
 # Off the back of the strongest remaining failure mode on the board
 # (2026-09-13: ~13 of 16 parked Silent Run tickets read "agent stopped
@@ -341,7 +369,11 @@ def build_graph_from_model(model, checkpointer, tools=None, classify=None, inter
     builder.add_edge(START, "agent")
     builder.add_conditional_edges("agent", after_agent, {"permission_gate": "permission_gate", "agent": "agent", END: END})
     builder.add_conditional_edges("permission_gate", route_after_gate, {"tools": "tools", "agent": "agent"})
-    builder.add_edge("tools", "agent")
+    builder.add_conditional_edges(
+        "tools",
+        lambda state: END if _terminal_took_effect(state["messages"]) else "agent",
+        {"agent": "agent", END: END},
+    )
 
     return builder.compile(checkpointer=checkpointer, interrupt_after=interrupt_after)
 
