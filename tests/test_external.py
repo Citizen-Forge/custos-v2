@@ -215,6 +215,27 @@ def test_http_flow_needs_the_seat_token(projects_root, ticket):
     assert "nothing pushed" in refused.json()["detail"]
 
 
+def test_dispatch_holds_while_an_external_submission_awaits_its_verdict(
+        projects_root, conn, seat, ticket, tmp_path, monkeypatch):
+    """A submit closes the ticket before it lands, so its dependents are already
+    ready -- starting one then cuts its tree from a tip without the work it
+    depends on (workspace-o0n.17.2, 2026-10-02)."""
+    name, _ = seat
+    project_id, story_id = ticket
+    beads.set_acceptance_criteria(story_id, "hello.txt exists")
+    brief = external.request_ticket(name, project_id)
+    assert _clone_commit_push(brief, tmp_path, brief["git"]["push_branch"]).returncode == 0
+    external.submit_ticket(conn, name, story_id, "added hello.txt")
+
+    d = dispatcher.Dispatcher(os.environ["DATABASE_URL"], dispatcher.RoutingTable({}), max_agents=1)
+    monkeypatch.setattr(d, "_verify_external", lambda tid: None)
+    assert d.external_housekeeping() is True
+
+    for pending in external.pending_verification(conn):  # other tests' too
+        external.mark_verified(conn, pending)
+    assert d.external_housekeeping() is False
+
+
 def test_an_expired_lease_is_swept_back_to_the_pool(projects_root, seat, ticket):
     name, _ = seat
     project_id, story_id = ticket

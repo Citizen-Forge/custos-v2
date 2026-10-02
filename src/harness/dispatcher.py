@@ -1003,11 +1003,12 @@ class Dispatcher:
             log.info("product-owner: %s", message[:200])
         return "brokered"
 
-    def external_housekeeping(self) -> None:
+    def external_housekeeping(self) -> bool:
         """Release lapsed external claims, and verify external submissions --
         the external counterpart of the verify_now an internal agent's close
         gets. Verification runs the project's suite, so it gets its own
-        thread rather than stalling dispatch."""
+        thread. Returns True while any submission still awaits its verdict,
+        during which run_forever starts nothing new."""
         now = time.monotonic()
         if now - self._last_external_sweep >= EXTERNAL_SWEEP_SECONDS:
             self._last_external_sweep = now
@@ -1024,6 +1025,7 @@ class Dispatcher:
             threading.Thread(
                 target=self._verify_external, args=(ticket_id,), daemon=True
             ).start()
+        return bool(pending)
 
     def _verify_external(self, ticket_id: str) -> None:
         try:
@@ -1046,9 +1048,19 @@ class Dispatcher:
         )
         while True:
             try:
-                self.external_housekeeping()
+                verifying = self.external_housekeeping()
             except Exception:
                 log.exception("external housekeeping failed")
+                verifying = False
+            if verifying:
+                # An external submission is closed but not yet landed, so its
+                # dependents are already in `bd ready`. Starting one now would
+                # cut its tree from an integration tip WITHOUT the work it
+                # depends on -- workspace-o0n.17.2 did exactly that while 17.1
+                # was being verified (2026-10-02). An internal close holds its
+                # slot through verify_now, which is why only this path needs it.
+                time.sleep(POLL_SECONDS)
+                continue
             try:
                 outcome = self.tick()
             except Exception:
