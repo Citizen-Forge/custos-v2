@@ -109,3 +109,53 @@ def test_the_api_accepts_and_merges(projects_root):
     assert response.status_code == 200
     assert response.json() == {"merged": True, "reason": ""}
     assert _in_integration(project_id, "via_api.gd")
+
+
+def _db():
+    import psycopg
+
+    from harness import verifications
+
+    conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+    verifications.init_table(conn)
+    return conn
+
+
+def test_accepting_rejected_work_merges_the_judged_commit(projects_root):
+    """The case accept exists for: the verifier failed the work, a person
+    overrides it. Picking the ticket up for rework put its branch back on the
+    integration tip, so the branch is EMPTY -- found live 2026-10-03, when
+    workspace-o0n.1.5 "merged" that empty branch and reported merged=true.
+    The work is the commit the verdict was recorded against."""
+    from harness import verifications
+
+    project_id, ticket_id = _ticket_with_work("accept rejected", filename="rejected.gd")
+    repo = workspaces.path_for(project_id)
+    judged = workspaces._git(["rev-parse", workspaces.ticket_branch(ticket_id)], repo).stdout.strip()
+    conn = _db()
+    verifications.record(conn, ticket_id, "seat-accept", "fail", "wrongly failed", work_commit=judged)
+    workspaces.reset_for_attempt(ticket_id)
+    assert workspaces.commits_ahead(project_id, workspaces.ticket_branch(ticket_id)) == 0
+
+    result = verifier.accept_and_merge(ticket_id, "the verifier was wrong", conn=conn)
+    conn.close()
+
+    assert result == {"merged": True, "reason": ""}
+    assert _in_integration(project_id, "rejected.gd"), "the judged work landed"
+    assert judged[:12] in (beads.show(ticket_id).get("notes") or ""), "and the note says which commit"
+
+
+def test_nothing_to_merge_is_not_reported_as_merged(projects_root):
+    beads.ensure_initialized()
+    project = beads.create("accept empty proj", "d", issue_type="epic", priority=1)
+    story = beads.create("accept empty", "d", parent=project["id"])
+    workspaces.ensure(project["id"])
+    workspaces.for_ticket(story["id"])  # a branch, but no work on it
+    beads.claim(story["id"], actor="seat-accept")
+    conn = _db()
+
+    result = verifier.accept_and_merge(story["id"], "fine", conn=conn)
+    conn.close()
+
+    assert result["merged"] is False
+    assert "nothing to merge" in result["reason"]

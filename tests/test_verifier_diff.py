@@ -195,3 +195,51 @@ def test_verifier_prompt_carries_the_diff(projects_root, monkeypatch):
 
     assert model.prompts, "the model should have been asked"
     assert "tick.ts" in model.prompts[0], "the diff must reach the verifier's prompt"
+
+
+def test_a_bounded_diff_keeps_every_file_and_names_what_it_cut(projects_root):
+    """The cap trims PATCHES, never the file list. Found live 2026-10-03: a
+    plain cut at 20,000 characters dropped the tail of workspace-o0n.1.5's
+    diff, and the verifier failed it twice for "split test files not defined
+    in the diff" -- files the change did add."""
+    path = workspaces.ensure("proj-cap")
+    open(os.path.join(path, "a_big.gd"), "w").write("".join(f"var line_{i} := {i}\n" for i in range(800)))
+    open(os.path.join(path, "m_mid.gd"), "w").write("".join(f"var mid_{i} := {i}\n" for i in range(300)))
+    open(os.path.join(path, "z_small.gd"), "w").write("var tail_marker := 1\n")
+    sha = workspaces.commit_all("proj-cap", "proj-cap.1.1: three files")
+
+    diff = workspaces.commit_diff("proj-cap", sha, max_chars=4000)
+
+    stat = diff.split("diff --git", 1)[0]
+    for name in ("a_big.gd", "m_mid.gd", "z_small.gd"):
+        assert name in stat, f"{name} is in the file list however small the budget"
+    assert "a_big.gd: patch trimmed" in diff, "the big patch is cut, and says so"
+    assert "var tail_marker := 1" in diff, "a later small file is not crowded out by an early big one"
+    assert len(diff) < 4000 + len(stat) + 600, "and the whole stays near the budget"
+
+
+def test_a_spent_budget_still_lists_later_commits_files(projects_root):
+    path = workspaces.ensure("proj-cap2")
+    open(os.path.join(path, "first.gd"), "w").write("".join(f"var f_{i} := {i}\n" for i in range(600)))
+    workspaces.commit_all("proj-cap2", "proj-cap2.1.1: big first")
+    open(os.path.join(path, "second.gd"), "w").write("var s := 1\n")
+    workspaces.commit_all("proj-cap2", "proj-cap2.1.1: small second")
+
+    diff = workspaces.diff_for_ticket("proj-cap2", "proj-cap2.1.1", None, max_chars=2000)
+
+    assert "first.gd" in diff and "second.gd" in diff, "every commit's files are listed"
+    assert "ARE part of this change" in diff or "var s := 1" in diff, \
+        "a later patch is either shown or named as left out"
+
+
+def test_the_prompt_tells_the_model_what_a_trimmed_diff_and_an_old_verdict_are():
+    """workspace-o0n.1.5 was failed twice by a fallback model repeating its own
+    first verdict -- about files the trimmed diff did not show -- past a suite
+    of 10,644 passing tests."""
+    assert "file list at the top of each commit" in verifier.PROMPT
+    assert "IS part of this change even when its patch is not shown" in verifier.PROMPT
+    assert "EARLIER verifier verdicts" in verifier.PROMPT
+    green = verifier._describe_tests({"exit": 0, "ran": 12, "passed": 12, "failed": 0, "tail": ""})
+    assert green.startswith("THE SUITE PASSED: all 12 tests ran and passed")
+    red = verifier._describe_tests({"exit": 1, "ran": 12, "passed": 11, "failed": 1, "tail": ""})
+    assert "THE SUITE PASSED" not in red

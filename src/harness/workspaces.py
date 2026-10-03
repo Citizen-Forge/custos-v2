@@ -755,8 +755,26 @@ def _merge_lock(project_id: str):
     return _lock()
 
 
-def merge_to_integration(ticket_id: str) -> tuple[bool, str]:
-    """Merge the ticket's branch into the project's integration branch.
+def commits_ahead(project_id: str, ref: str) -> int:
+    """How many commits `ref` holds that the integration branch does not; 0
+    when either cannot be resolved. "Merging" a ref with none is a no-op that
+    would still report success."""
+    repo = path_for(project_id)
+    base = integration_ref(project_id)
+    if base is None or not os.path.isdir(repo):
+        return 0
+    out = _git(["rev-list", "--count", f"{base}..{ref}"], repo)
+    if out.returncode != 0:
+        return 0
+    try:
+        return int(out.stdout.strip())
+    except ValueError:
+        return 0
+
+
+def merge_to_integration(ticket_id: str, ref: str | None = None) -> tuple[bool, str]:
+    """Merge the ticket's branch -- or `ref`, a commit holding its work -- into
+    the project's integration branch.
 
     Until this runs the ticket's work exists only on its own branch, so
     nothing else in the project can see it -- and the verifier, which runs
@@ -770,8 +788,8 @@ def merge_to_integration(ticket_id: str) -> tuple[bool, str]:
     base = integration_ref(project_id)
     if base is None:
         return True, ""
-    branch = ticket_branch(ticket_id)
-    if not _branch_exists(repo, branch):
+    branch = ref or ticket_branch(ticket_id)
+    if ref is None and not _branch_exists(repo, branch):
         return True, ""  # the ticket produced no branch: nothing to merge
 
     with _merge_lock(project_id):
@@ -813,22 +831,68 @@ def commit_diff(project_id: str, sha: str, max_chars: int = 20000) -> str:
     range is diffed end-to-end rather than shown commit-by-commit, so the
     verifier sees one coherent change set either way.
 
-    Truncated: a verifier judging against acceptance criteria needs to see
-    the shape of the work, not every line of a large generated file."""
-    args = (
-        ["git", "diff", "--stat", "--patch", sha]
-        if ".." in sha
-        else ["git", "show", "--stat", "--patch", sha]
+    Bounded by `max_chars`, but the FILE LIST IS NEVER CUT: the --stat comes
+    first and is always complete, and only patches are trimmed. Each file's
+    patch is included whole while it fits; one that does not is cut to what
+    is left (keeping room for every later file's header), and anything cut
+    or left out is NAMED, with a note that it is still part of the change.
+    Found live 2026-10-03: a plain cut at 20,000 characters dropped the tail
+    of workspace-o0n.1.5's diff, and the verifier failed the ticket twice for
+    "split test files not defined in the diff" -- files the change did add."""
+    repo = path_for(project_id)
+    is_range = ".." in sha
+    stat_args = (
+        ["git", "diff", "--stat=200", "--stat-graph-width=20", sha]
+        if is_range
+        else ["git", "show", "--stat=200", "--stat-graph-width=20", "--format=commit %H%n%n    %s%n", sha]
     )
-    out = subprocess.run(
-        args, cwd=path_for(project_id), capture_output=True, text=True, timeout=120,
+    patch_args = (
+        ["git", "diff", "--patch", sha] if is_range else ["git", "show", "--patch", "--format=", sha]
     )
-    if out.returncode != 0:
+    stat = subprocess.run(stat_args, cwd=repo, capture_output=True, text=True, timeout=120)
+    patch = subprocess.run(patch_args, cwd=repo, capture_output=True, text=True, timeout=120)
+    if stat.returncode != 0 or patch.returncode != 0:
         return ""
-    text = out.stdout
-    if len(text) > max_chars:
-        text = text[:max_chars] + f"\n... [diff truncated at {max_chars} characters]"
-    return text
+    return stat.stdout + _bounded_patches(patch.stdout, max_chars - len(stat.stdout), max_chars)
+
+
+# Room kept per not-yet-included file when trimming patches, so a large early
+# file cannot crowd every later file out of the diff entirely.
+_PATCH_HEADER_RESERVE = 400
+
+
+def _bounded_patches(patch: str, budget: int, max_chars: int) -> str:
+    """`patch` split per file and fitted into `budget` characters, in order:
+    whole where it fits, trimmed (with a marker) where it does not, and every
+    file that got nothing named at the end."""
+    chunks: list[str] = []
+    for line in patch.splitlines(keepends=True):
+        if line.startswith("diff --git ") or not chunks:
+            chunks.append(line)
+        else:
+            chunks[-1] += line
+    out: list[str] = []
+    omitted: list[str] = []
+    for i, chunk in enumerate(chunks):
+        name = chunk.split("\n", 1)[0].rsplit(" b/", 1)[-1].strip()
+        room = budget - _PATCH_HEADER_RESERVE * (len(chunks) - i - 1)
+        if len(chunk) <= room:
+            out.append(chunk)
+            budget -= len(chunk)
+        elif room >= _PATCH_HEADER_RESERVE:
+            cut = chunk[:room].rsplit("\n", 1)[0] + "\n"
+            out.append(cut + f"... [{name}: patch trimmed, {len(chunk) - len(cut)} more characters "
+                             f"not shown -- the file IS part of this change]\n")
+            budget -= len(cut)
+        else:
+            omitted.append(f"{name} ({len(chunk)} characters)")
+    if omitted:
+        out.append(
+            f"... [patch not shown for {len(omitted)} file(s), to stay within {max_chars} "
+            f"characters -- they ARE part of this change, see the file list above: "
+            + ", ".join(omitted) + "]\n"
+        )
+    return "".join(out)
 
 
 def commits_for_ticket(project_id: str, ticket_id: str) -> list[str]:
@@ -882,9 +946,9 @@ def diff_for_ticket(project_id: str, ticket_id: str, work_commit: str | None = N
         parts: list[str] = []
         remaining = max_chars
         for sha in shas:
-            if remaining <= 0:
-                break
-            chunk = commit_diff(project_id, sha, remaining)
+            # Every commit is listed even once the budget is spent: commit_diff
+            # always returns its file list, and only its patches go short.
+            chunk = commit_diff(project_id, sha, max(remaining, 0))
             if chunk:
                 parts.append(chunk)
                 remaining -= len(chunk)

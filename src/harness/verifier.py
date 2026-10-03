@@ -106,8 +106,19 @@ Acceptance criteria: {acceptance_criteria}
 How the assigned agent says it was completed (close reason): {close_reason}
 Accumulated notes from the work: {notes}
 
+The notes can include EARLIER verifier verdicts on previous attempts (lines like "verifier fail \
+#1: ..."). Those are claims about older work, not evidence about this attempt -- and they can be \
+wrong. Judge this attempt afresh: do not repeat an earlier finding unless the diff, the current \
+files or the measured test result below show that it still holds.
+
 The actual code change this ticket produced, as a unified diff:
 {diff}
+
+The file list at the top of each commit (the --stat) is COMPLETE. A very large change has some \
+patches trimmed or not shown, and that is said in the diff where it happens. A file in the file \
+list IS part of this change even when its patch is not shown: never fail a ticket because a file \
+or function is "missing from the diff" when the file list names it or a trimmed-patch note \
+covers it -- check the measured test result instead.
 
 Read the diff as a diff. A line starting with `-` was REMOVED by this ticket and is NOT in \
 the code any more; a line starting with `+` was ADDED and IS the current state. Never report \
@@ -277,7 +288,7 @@ def land(ticket_id: str, conn=None) -> bool:
     return False
 
 
-def accept_and_merge(ticket_id: str, response: str) -> dict:
+def accept_and_merge(ticket_id: str, response: str, conn=None) -> dict:
     """A person accepts a ticket's work: record it, close it, and merge its
     branch into the integration branch.
 
@@ -304,23 +315,66 @@ def accept_and_merge(ticket_id: str, response: str) -> dict:
 
     repo = workspaces.path_for(project_id)
     branch = workspaces.ticket_branch(ticket_id)
-    if not (os.path.isdir(repo) and workspaces._branch_exists(repo, branch)):
-        reason = f"there is no branch {branch} to merge, so nothing landed"
+    has_branch = os.path.isdir(repo) and workspaces._branch_exists(repo, branch)
+    ref, source = _work_to_accept(ticket_id, project_id, branch if has_branch else None, conn)
+    if ref is None:
+        if not has_branch:
+            reason = f"there is no branch {branch} and no judged commit to merge, so nothing landed"
+        else:
+            reason = (
+                f"nothing to merge: {branch} holds no work beyond the integration branch "
+                f"(a rework resets it there) and no judged commit with work is recorded"
+            )
         beads.append_note(ticket_id, f"accepted; {reason}")
         return {"merged": False, "reason": reason}
 
-    ok, reason = workspaces.merge_to_integration(ticket_id)
+    ok, reason = workspaces.merge_to_integration(ticket_id, ref)
     if not ok:
         log.error("accepted %s but could not merge it: %s", ticket_id, reason)
         beads.flag_for_human(
             ticket_id,
             f"accepted, but the merge into the integration branch failed: {reason}. "
-            f"The work is on branch {branch}; resolve the merge, then accept again.",
+            f"The work is at {source}; resolve the merge, then accept again.",
         )
         return {"merged": False, "reason": reason}
-    beads.append_note(ticket_id, "accepted and merged into the integration branch")
-    log.info("accepted %s and merged it", ticket_id)
+    beads.append_note(ticket_id, f"accepted and merged {source} into the integration branch")
+    log.info("accepted %s and merged %s", ticket_id, source)
     return {"merged": True, "reason": ""}
+
+
+def _work_to_accept(ticket_id: str, project_id: str, branch: str | None, conn) -> tuple:
+    """(ref, description) of the work a person is accepting, or (None, "").
+
+    The ticket's branch, when it holds work beyond the integration branch.
+    Otherwise the commit that was JUDGED: picking a ticket up for rework puts
+    its branch back on the integration tip (workspaces.reset_for_attempt), so
+    accepting work the verifier REJECTED -- the very case accept exists for --
+    finds the branch empty. Found live 2026-10-03: workspace-o0n.1.5 was
+    accepted, "merged" an empty branch and reported merged=true, while its
+    work sat on a commit only the verification record still named."""
+    if branch and workspaces.commits_ahead(project_id, branch) > 0:
+        return branch, f"branch {branch}"
+    for recorded in _judged_commits(ticket_id, conn):
+        head = recorded.split("..")[-1]
+        if head and workspaces.commits_ahead(project_id, head) > 0:
+            return head, f"the judged commit {head[:12]}"
+    return None, ""
+
+
+def _judged_commits(ticket_id: str, conn) -> list[str]:
+    """The ticket's work commit as currently recorded, then as last judged."""
+    out: list[str] = []
+    current = (beads.show(ticket_id).get("metadata") or {}).get("work_commit")
+    if current:
+        out.append(current)
+    try:
+        with _conn(conn) as active:
+            record = verifications.get_for_issue(active, ticket_id)
+        if record and record.get("work_commit"):
+            out.append(record["work_commit"])
+    except Exception:
+        log.exception("could not read the last verdict for %s", ticket_id)
+    return out
 
 
 def _describe_tests(tests: dict | None) -> str:
@@ -332,8 +386,18 @@ def _describe_tests(tests: dict | None) -> str:
             "a command that verified nothing (e.g. a runner whose file glob matched no files). "
             f"Treat it as no test coverage at all.\n{tests['tail']}"
         )
+    headline = ""
+    if tests["exit"] == 0 and tests["ran"] > 0 and tests["failed"] == 0:
+        # Said in words, not only as numbers: a fallback model failed
+        # workspace-o0n.1.5 twice on claims about code that 10,644 passing
+        # tests had just exercised, reading straight past exit=0 failed=0.
+        headline = (
+            f"THE SUITE PASSED: all {tests['ran']} tests ran and passed (exit 0). A claim that "
+            "the code under test is broken has to be squared with this.\n"
+        )
     return (
-        f"exit={tests['exit']}  tests_run={tests['ran']}  passed={tests['passed']}  "
+        headline
+        + f"exit={tests['exit']}  tests_run={tests['ran']}  passed={tests['passed']}  "
         f"failed={tests['failed']}\n{tests['tail']}"
     )
 
