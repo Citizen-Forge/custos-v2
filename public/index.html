@@ -453,6 +453,18 @@ async function respondToTicket(id) {
   refreshAll();
 }
 
+async function acceptTicket(id) {
+  const response = window.prompt("Accept this work and merge its branch. Note to record:");
+  if (!response) return;
+  const result = await fetchJSON(`/tickets/${id}/accept`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ response }),
+  });
+  if (!result.merged) window.alert(`Accepted, but not merged: ${result.reason}`);
+  refreshAll();
+}
+
 async function dismissTicket(id) {
   const reason = window.prompt("Reason for dismissing (optional, closes the ticket):") || null;
   await fetchJSON(`/tickets/${id}/dismiss`, {
@@ -724,6 +736,7 @@ function kanbanCard(story) {
   // seen but not resolved from the dashboard.
   const actions = human ? `<div class="kanban-card-actions">
       <button onclick="respondToTicket('${story.id}')">Respond</button>
+      <button onclick="acceptTicket('${story.id}')">Accept &amp; merge</button>
       <button onclick="dismissTicket('${story.id}')">Dismiss</button>
     </div>` : "";
   const notes = human && story.notes

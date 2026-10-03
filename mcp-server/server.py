@@ -105,6 +105,16 @@ def respond_to_ticket(issue_id: str, response: str) -> str:
 
 
 @mcp.tool()
+def accept_ticket(issue_id: str, response: str) -> str:
+    """Accept a ticket's work AND merge its branch into the project's integration
+    branch, recording `response` as the decision. Use this, not respond_to_ticket,
+    when the user says the work is good: a respond alone closes the ticket but never
+    lands its work. Works on a ticket that was already closed by a respond. Returns
+    whether the merge happened and, if not, why (the ticket is then flagged again)."""
+    return _call("POST", f"/tickets/{issue_id}/accept", json={"response": response})
+
+
+@mcp.tool()
 def dismiss_ticket(issue_id: str, reason: str | None = None) -> str:
     """Dismiss a ticket flagged for human review without answering it, closing it with an
     optional reason."""

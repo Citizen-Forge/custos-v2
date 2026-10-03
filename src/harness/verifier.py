@@ -277,6 +277,52 @@ def land(ticket_id: str, conn=None) -> bool:
     return False
 
 
+def accept_and_merge(ticket_id: str, response: str) -> dict:
+    """A person accepts a ticket's work: record it, close it, and merge its
+    branch into the integration branch.
+
+    A plain respond closes a ticket and records the decision, but nothing ever
+    lands it -- landing only follows a verifier pass, and the verifier defers
+    to a human decision. workspace-o0n.16.1 was accepted that way and its work
+    sat on its ticket branch, unmerged, until a later ticket carried it in.
+
+    A ticket that is already closed (accepted before this existed) is merged
+    without being reopened. A merge that cannot happen is NOT requeued for an
+    agent the way a verifier-passed conflict is -- a person decided this
+    ticket, so the conflict goes back to a person: the ticket is flagged with
+    the reason and the work stays on its branch.
+
+    Returns {"merged": bool, "reason": str}."""
+    project_id = workspaces.project_id_for(ticket_id)
+    issue = beads.show(ticket_id)
+    if issue.get("status") == "closed":
+        beads.append_note(ticket_id, f"human response: {response}")
+        beads.remove_human_flag(ticket_id)
+        beads.set_metadata(ticket_id, beads.DECISION_KEY, "answered")
+    else:
+        beads.respond_to_human(ticket_id, response)
+
+    repo = workspaces.path_for(project_id)
+    branch = workspaces.ticket_branch(ticket_id)
+    if not (os.path.isdir(repo) and workspaces._branch_exists(repo, branch)):
+        reason = f"there is no branch {branch} to merge, so nothing landed"
+        beads.append_note(ticket_id, f"accepted; {reason}")
+        return {"merged": False, "reason": reason}
+
+    ok, reason = workspaces.merge_to_integration(ticket_id)
+    if not ok:
+        log.error("accepted %s but could not merge it: %s", ticket_id, reason)
+        beads.flag_for_human(
+            ticket_id,
+            f"accepted, but the merge into the integration branch failed: {reason}. "
+            f"The work is on branch {branch}; resolve the merge, then accept again.",
+        )
+        return {"merged": False, "reason": reason}
+    beads.append_note(ticket_id, "accepted and merged into the integration branch")
+    log.info("accepted %s and merged it", ticket_id)
+    return {"merged": True, "reason": ""}
+
+
 def _describe_tests(tests: dict | None) -> str:
     if tests is None:
         return "(no runnable test script in this project)"

@@ -41,7 +41,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import avatar, beads, external_api, model_registry, outcomes, prompts, seats, self_mod, settings, tool_proposals, verifications, wiki
+from . import avatar, beads, external_api, model_registry, outcomes, prompts, seats, self_mod, settings, tool_proposals, verifications, verifier, wiki
 from .auth import require_auth
 from .config import PROJECT_TREE_TTL
 
@@ -513,6 +513,20 @@ def respond_to_ticket(issue_id: str, body: RespondBody):
         return beads.respond_to_human(issue_id, body.response)
     except beads.BeadsError as e:
         raise HTTPException(404, str(e)) from e
+
+
+@router.post("/tickets/{issue_id}/accept")
+def accept_ticket(issue_id: str, body: RespondBody):
+    """Accept a ticket's work and merge its branch into the integration
+    branch -- respond, then land. Works on a ticket already closed by an
+    earlier respond, which is the case that left work unmerged. See
+    verifier.accept_and_merge."""
+    try:
+        result = verifier.accept_and_merge(issue_id, body.response)
+    except beads.BeadsError as e:
+        raise HTTPException(404, str(e)) from e
+    _invalidate_project_tree()
+    return result
 
 
 @router.post("/tickets/{issue_id}/dismiss")
