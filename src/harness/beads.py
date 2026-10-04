@@ -125,7 +125,13 @@ def set_acceptance_criteria(issue_id: str, criteria: str, actor: str = DEFAULT_A
 
 
 def acceptance_criteria(issue: dict) -> str | None:
-    return (issue.get("metadata") or {}).get("acceptance_criteria")
+    """The metadata key the harness writes, else Beads' own field.
+
+    `bd create --acceptance` fills Beads' native `acceptance_criteria`, not the
+    metadata key. Found live 2026-10-04: workspace-o0n.17.10 was created that
+    way and landed "with no acceptance criteria, so merged without a verdict"
+    though its criteria were on the ticket."""
+    return (issue.get("metadata") or {}).get("acceptance_criteria") or issue.get("acceptance_criteria") or None
 
 
 # Machine-checkable acceptance criteria: a JSON list of checks the verifier

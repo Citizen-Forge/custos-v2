@@ -640,3 +640,10 @@ def test_an_ungated_move_is_reverted(projects_root):
 def test_no_recorded_tip_means_no_action(projects_root):
     workspaces.ensure("proj-tip-none")
     assert workspaces.revert_unexpected_integration_move("proj-tip-none") is None
+
+
+def test_parse_test_counts_without_a_tests_line_counts_pass_plus_fail():
+    """Subspatial's run_one.gd prints only `# pass` / `# fail`; read as zero
+    tests it mechanically failed workspace-o0n.19.1 (24 passed)."""
+    assert workspaces._parse_test_counts("# pass 24\n# fail 0\n") == (24, 24, 0)
+    assert workspaces._parse_test_counts("# pass 3\n# fail 2\n") == (5, 3, 2)

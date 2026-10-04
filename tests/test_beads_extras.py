@@ -202,3 +202,14 @@ def test_read_helpers_ask_for_unlimited_results(monkeypatch):
     for args in calls:
         assert "--limit" in args, args
         assert args[args.index("--limit") + 1] == "0", args
+
+
+def test_acceptance_criteria_falls_back_to_the_native_beads_field():
+    """`bd create --acceptance` fills Beads' own field, not the metadata key;
+    workspace-o0n.17.10 landed unverified because only the key was read."""
+    from harness import beads
+
+    assert beads.acceptance_criteria({"acceptance_criteria": "native"}) == "native"
+    assert beads.acceptance_criteria({"metadata": {"acceptance_criteria": "meta"}, "acceptance_criteria": "native"}) == "meta"
+    assert beads.acceptance_criteria({"acceptance_criteria": ""}) is None
+    assert beads.acceptance_criteria({}) is None

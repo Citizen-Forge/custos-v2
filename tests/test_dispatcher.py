@@ -732,3 +732,38 @@ def test_the_gate_fails_open_when_the_front_cannot_be_determined(monkeypatch):
     assert picked is not None and picked["id"] == "proj-x.2"
 
 
+
+
+# -- the product owner's providers ---------------------------------------
+#
+# Found live 2026-10-04: with SCHEDULER_MODEL_* unset the product owner had
+# one provider (the LOCAL primary, DeepSeek, then out of credit), so every
+# dispatch session died with AllProvidersCoolingDown while the workers fell
+# back to the local model fine.
+
+
+def test_product_owner_rides_the_workers_chain_with_its_fallback(monkeypatch):
+    from harness import dispatcher
+
+    monkeypatch.delenv("SCHEDULER_MODEL_BASE_URL", raising=False)
+    monkeypatch.setenv("LOCAL_MODEL_BASE_URL", "https://hosted.example/v1")
+    monkeypatch.setenv("LOCAL_MODEL_NAME", "hosted-model")
+    monkeypatch.setenv("LOCAL_FALLBACK_BASE_URL", "http://local.example:8080/v1")
+    monkeypatch.setenv("LOCAL_FALLBACK_MODEL_NAME", "local-model")
+
+    chain = dispatcher._product_owner_chain()
+
+    assert [c.base_url for c in chain] == ["https://hosted.example/v1", "http://local.example:8080/v1"]
+    assert chain[-1].model == "local-model"
+
+
+def test_a_scheduler_model_of_its_own_still_wins(monkeypatch):
+    from harness import dispatcher
+
+    monkeypatch.setenv("SCHEDULER_MODEL_BASE_URL", "http://scheduler.example/v1")
+    monkeypatch.setenv("SCHEDULER_MODEL_NAME", "sched")
+    monkeypatch.setenv("LOCAL_FALLBACK_BASE_URL", "http://local.example:8080/v1")
+
+    chain = dispatcher._product_owner_chain()
+
+    assert [c.base_url for c in chain] == ["http://scheduler.example/v1"]

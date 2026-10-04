@@ -1074,8 +1074,27 @@ def _routing_table() -> RoutingTable:
     from .worker import _routing_table_from_env
 
     table = _routing_table_from_env()
-    table._chains.setdefault(PRODUCT_OWNER_ROLE, [_provider(4000)])
+    table._chains.setdefault(PRODUCT_OWNER_ROLE, _product_owner_chain())
     return table
+
+
+def _product_owner_chain() -> list[ProviderConfig]:
+    """The product owner's providers: its own SCHEDULER_MODEL_* when one is
+    set, otherwise the workers' LOCAL chain, fallback included.
+
+    Found live 2026-10-04: with SCHEDULER_MODEL_* unset the product owner had
+    ONE provider -- the LOCAL primary, DeepSeek -- so while DeepSeek answered
+    402 every dispatch session died with AllProvidersCoolingDown and no ticket
+    was ever given a seat, though the workers fell back to the local model
+    fine. Riding the workers' chain uses the primary when it is healthy and
+    the local fallback when it is not."""
+    if os.environ.get("SCHEDULER_MODEL_BASE_URL"):
+        return [_provider(4000)]
+    from .worker import _chain_from_env
+
+    return _chain_from_env(
+        "LOCAL", "http://host.docker.internal:11434/v1", "qwen2.5:7b-instruct", max_tokens=4000
+    )
 
 
 if __name__ == "__main__":

@@ -1009,7 +1009,12 @@ def _parse_test_counts(text: str) -> tuple[int, int, int]:
                 except ValueError:
                     return 0
         return 0
-    return _count("tests"), _count("pass"), _count("fail")
+    passed, failed = _count("pass"), _count("fail")
+    # A runner that prints only `# pass N` / `# fail N` (Subspatial's
+    # tests/run_one.gd does) ran pass + fail tests. Found live 2026-10-04:
+    # read as "ran zero tests", that mechanically failed workspace-o0n.19.1
+    # while its suite passed 24/0.
+    return max(_count("tests"), passed + failed), passed, failed
 
 
 def _run_declared_command(path: str, command: str, timeout: int) -> dict:
