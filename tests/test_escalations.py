@@ -137,3 +137,17 @@ def test_a_closed_failing_escalation_still_respects_the_budget():
     beads.set_metadata(story["id"], "escalation_attempts", str(escalations.MAX_ESCALATION_ATTEMPTS))
 
     assert story["id"] not in {i["id"] for i in escalations.pending(_conn())}
+
+
+def test_an_owner_decision_never_enters_the_product_owner_queue():
+    """Found live 2026-10-04: workspace-o0n.18.11, a balance question only the
+    owner could answer, was 'resolved' and closed by the product-owner role
+    running on the fallback model, before the owner ever saw it."""
+    project = beads.create("esc proj owner", "d", issue_type="epic", priority=1)
+    story = beads.create("owner story", "d", parent=project["id"], acceptance_criteria="decide")
+    escalations.flag_for_owner(story["id"], "only the owner can make this call")
+    current = beads.show(story["id"])
+    assert beads.is_flagged_for_human(current), "it is still on the board for a person"
+    assert (current.get("metadata") or {}).get(escalations.OWNER_KEY) == "required"
+    assert story["id"] not in {i["id"] for i in escalations.pending(_conn())}, \
+        "and the product-owner never sees it"

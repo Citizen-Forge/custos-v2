@@ -42,6 +42,16 @@ MAX_ESCALATION_ATTEMPTS = int(os.environ.get("MAX_ESCALATION_ATTEMPTS", "2"))
 # settled escalation back in the queue.
 RESOLVED_KEY = "escalation_resolved"
 
+# A ticket whose decision belongs to the OWNER, not the product-owner role:
+# set with flag_for_owner(), it stays human-labelled (so it shows on the board
+# and no worker picks it up) but never enters this queue. Found live
+# 2026-10-04: workspace-o0n.18.11, flagged with a balance question only the
+# owner could answer (retune a deliberately pinned heat constant or not), was
+# "resolved" by the product-owner -- running on the local fallback model --
+# with "the ticket's own named deliverable is ALREADY in the project", and
+# closed, the owner never having seen it.
+OWNER_KEY = "owner_decision"
+
 
 def attempts(issue: dict) -> int:
     try:
@@ -86,6 +96,8 @@ def pending(conn=None) -> list[dict]:
     for issue in beads.parked_for_human(include_closed=True):
         if (issue.get("metadata") or {}).get(RESOLVED_KEY):
             continue  # already answered; see resolve()
+        if (issue.get("metadata") or {}).get(OWNER_KEY):
+            continue  # the owner's to answer, not the product-owner's; see OWNER_KEY
         if attempts(issue) >= MAX_ESCALATION_ATTEMPTS:
             continue
         if issue.get("status") == "closed":
@@ -102,6 +114,13 @@ def pending(conn=None) -> list[dict]:
                 continue
         out.append(issue)
     return out
+
+
+def flag_for_owner(issue_id: str, reason: str, actor: str = beads.DEFAULT_ACTOR) -> None:
+    """Park a ticket for the OWNER: human-labelled with `reason`, and kept out
+    of the product-owner's escalation queue (see OWNER_KEY)."""
+    beads.flag_for_human(issue_id, reason, actor=actor)
+    beads.set_metadata(issue_id, OWNER_KEY, "required")
 
 
 def resolve(conn, issue_id: str, resolution: str, actor: str) -> None:
