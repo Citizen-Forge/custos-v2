@@ -986,6 +986,13 @@ def run_tests_for_ticket(ticket_id: str, timeout: int = 600) -> dict | None:
     )
 
 
+def run_command_for_ticket(ticket_id: str, command: str, timeout: int = 600) -> dict:
+    """Run one test command (a ticket's own VERIFIER COMMAND) in the ticket's
+    tree, with the same parsing and lock as the project's suite. The caller
+    decides whether the command may be run (verifier._criterion_run_for)."""
+    return _run_declared_command(tree_for_ticket(ticket_id), command, timeout)
+
+
 def _parse_test_counts(text: str) -> tuple[int, int, int]:
     """(ran, passed, failed) from a suite's `# tests N` markers.
 

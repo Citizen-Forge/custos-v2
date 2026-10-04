@@ -238,7 +238,10 @@ def test_the_prompt_tells_the_model_what_a_trimmed_diff_and_an_old_verdict_are()
     of 10,644 passing tests."""
     assert "file list at the top of each commit" in verifier.PROMPT
     assert "IS part of this change even when its patch is not shown" in verifier.PROMPT
-    assert "EARLIER verifier verdicts" in verifier.PROMPT
+    # Since 2026-10-04 old verdicts are withheld from the notes altogether
+    # (test_verifier.py: test_earlier_verdicts_are_withheld_from_the_model),
+    # and the prompt says so.
+    assert "Earlier verifier verdicts on previous attempts are deliberately left out" in verifier.PROMPT
     green = verifier._describe_tests({"exit": 0, "ran": 12, "passed": 12, "failed": 0, "tail": ""})
     assert green.startswith("THE SUITE PASSED: all 12 tests ran and passed")
     red = verifier._describe_tests({"exit": 1, "ran": 12, "passed": 11, "failed": 1, "tail": ""})

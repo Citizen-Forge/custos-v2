@@ -19,11 +19,13 @@ refused."
 import json
 import logging
 import os
+import re
+import shlex
 from contextlib import contextmanager
 
 import psycopg
 
-from . import acceptance, beads, verifications, workspaces
+from . import acceptance, beads, toolchain, verifications, workspaces
 
 log = logging.getLogger(__name__)
 
@@ -106,10 +108,10 @@ Acceptance criteria: {acceptance_criteria}
 How the assigned agent says it was completed (close reason): {close_reason}
 Accumulated notes from the work: {notes}
 
-The notes can include EARLIER verifier verdicts on previous attempts (lines like "verifier fail \
-#1: ..."). Those are claims about older work, not evidence about this attempt -- and they can be \
-wrong. Judge this attempt afresh: do not repeat an earlier finding unless the diff, the current \
-files or the measured test result below show that it still holds.
+Earlier verifier verdicts on previous attempts are deliberately left out of these notes: judge \
+this attempt from its own evidence. Notes describing what was WRONG BEFORE the change (in the \
+past tense) are history, not the current state -- the diff and the measured results say what \
+holds now.
 
 The actual code change this ticket produced, as a unified diff:
 {diff}
@@ -141,6 +143,14 @@ That test result is MEASURED, not claimed -- the suite was executed to produce i
 speaks to a criterion (do the tests run, do they pass), believe it over anything you infer \
 from reading the diff. Do not assert that tests fail, or that the project does not build, when \
 the measured result above says otherwise.
+
+Result of running THIS TICKET'S OWN verifier command (the "VERIFIER COMMAND" its acceptance \
+criteria name) just now, against the ticket's own tree:
+{criterion_result}
+
+That is also MEASURED. It is the suite the criteria were written against: where it passed, the \
+criteria about its tests running and passing are met, and its assertions are the evidence for \
+the behaviour the criteria describe.
 
 Mechanical acceptance checks declared on the ticket, evaluated in code just now:
 {mechanical_checks}
@@ -402,6 +412,100 @@ def _describe_tests(tests: dict | None) -> str:
     )
 
 
+# -- the ticket's own verifier command ----------------------------------
+#
+# Stories carry their own "VERIFIER COMMAND: <cmd>" -- the suite the criteria
+# were written against. The verifier used to run only the project's whole
+# suite and hand the model its headline, so a model could not see the one
+# result the criteria name. Found live 2026-10-04: workspace-o0n.18.14 was
+# failed twice by the fallback model for "the test suite result does not
+# verify the specific acceptance criteria" while its named suite passed 47/0.
+
+_VERIFIER_COMMAND = re.compile(r"VERIFIER COMMAND:\s*(.+)")
+# An earlier verdict, as requeue_for_rework writes it into the notes.
+_EARLIER_VERDICT = re.compile(r"^\s*verifier (fail|pass) #\d+:")
+
+
+def verifier_command_in(criteria: str | None) -> str | None:
+    """The command named on a criteria's `VERIFIER COMMAND:` line, or None."""
+    m = _VERIFIER_COMMAND.search(criteria or "")
+    if not m:
+        return None
+    return m.group(1).strip().strip("`").strip() or None
+
+
+def _criterion_run_for(issue: dict, criteria: str | None) -> dict | None:
+    """Run the criteria's verifier command in the ticket's own tree.
+
+    ONLY the project's own test executable is run: the command must start
+    with the same program as the project's declared test command, so a line
+    of ticket text cannot run anything else on the harness. None when there
+    is no command to run; a refused command is reported, not run."""
+    command = verifier_command_in(criteria)
+    if not command:
+        return None
+    declared = toolchain.test_command_for(workspaces.project_id_for(issue["id"]))
+    try:
+        program = shlex.split(command)[0]
+        allowed = shlex.split(declared)[0] if declared else None
+    except (ValueError, IndexError):
+        return {"command": command, "refused": "the command cannot be parsed"}
+    if program != allowed:
+        return {
+            "command": command,
+            "refused": f"it does not run the project's test program ({allowed or 'none declared'})",
+        }
+    try:
+        result = workspaces.run_command_for_ticket(issue["id"], command)
+    except Exception:
+        log.exception("could not run the verifier command for %s", issue.get("id"))
+        return None
+    result["command"] = command
+    return result
+
+
+def _criterion_failure(run: dict | None) -> str | None:
+    """The reason the verifier command's run is a mechanical fail, or None."""
+    if not run or run.get("refused"):
+        return None
+    if run["exit"] != 0 or run["failed"] > 0:
+        return (
+            f"The ticket's own verifier command failed when run just now ({run['command']}): "
+            f"exit={run['exit']} tests_run={run['ran']} failed={run['failed']}. {run['tail'][-600:]}"
+        )
+    if run["ran"] == 0:
+        return (
+            f"The ticket's own verifier command ran zero tests ({run['command']}), so it "
+            f"verified nothing. {run['tail'][-600:]}"
+        )
+    return None
+
+
+def _describe_criterion_run(run: dict | None) -> str:
+    if run is None:
+        return "(the acceptance criteria name no verifier command)"
+    if run.get("refused"):
+        return f"NOT RUN: {run['command']} -- {run['refused']}."
+    headline = ""
+    if run["exit"] == 0 and run["ran"] > 0 and run["failed"] == 0:
+        headline = f"THE TICKET'S SUITE PASSED: {run['ran']} tests ran and passed (exit 0).\n"
+    return (
+        headline + f"command: {run['command']}\nexit={run['exit']}  tests_run={run['ran']}  "
+        f"passed={run['passed']}  failed={run['failed']}\n{run['tail']}"
+    )
+
+
+def _notes_for_model(notes: str | None) -> str:
+    """The ticket's notes without earlier verifier verdicts.
+
+    A weaker model repeats a verdict it is shown, however the prompt asks it
+    to judge afresh: workspace-o0n.18.14's second fail quoted its first word
+    for word ("...as noted in the verifier's accumulated notes"). The notes
+    stay on the ticket for people and for the reworking agent."""
+    kept = [line for line in (notes or "").splitlines() if not _EARLIER_VERDICT.match(line)]
+    return "\n".join(kept).strip() or "(none)"
+
+
 def _reset_thread(conn, issue_id: str) -> None:
     """Drop the ticket's LangGraph thread so a requeued attempt genuinely
     starts over.
@@ -516,6 +620,8 @@ def verify_ticket(conn, issue_id: str, model) -> dict | None:
     tests = _tests_for(issue)
     check_results = acceptance.evaluate(issue, tests) if checks else []
     failed_checks = acceptance.failed(check_results)
+    criterion_run = _criterion_run_for(issue, criteria)
+    criterion_failure = _criterion_failure(criterion_run)
 
     if failed_checks:
         # Deterministic: no model call can override a failed check.
@@ -524,6 +630,11 @@ def verify_ticket(conn, issue_id: str, model) -> dict | None:
             "Machine-checked acceptance criteria failed: "
             + "; ".join(r["detail"] for r in failed_checks)
         )
+    elif criterion_failure:
+        # The ticket's own verifier command, run just now, failed: no model
+        # can read past that.
+        verdict = "fail"
+        reasoning = criterion_failure
     elif check_results and not criteria:
         # Every criterion the ticket stated is machine-checkable and passed.
         verdict = "pass"
@@ -538,12 +649,13 @@ def verify_ticket(conn, issue_id: str, model) -> dict | None:
                 description=issue.get("description", ""),
                 acceptance_criteria=criteria or "(none -- judged by the mechanical checks)",
                 close_reason=issue.get("close_reason") or "(none recorded)",
-                notes=issue.get("notes") or "(none)",
+                notes=_notes_for_model(issue.get("notes")),
                 diff=_diff_for(issue) or "(no code change recorded for this ticket)",
                 current_files=(
                     _current_files_for(issue) or "(no configuration or readme files found)"
                 ),
                 test_result=_describe_tests(tests),
+                criterion_result=_describe_criterion_run(criterion_run),
                 mechanical_checks=acceptance.describe(check_results),
             )
         )

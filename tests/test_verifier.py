@@ -266,3 +266,128 @@ def test_legacy_verdict_is_rejudged_when_requeued():
     )
 
     assert result["verdict"] == "pass"
+
+
+# -- the ticket's own verifier command, and earlier verdicts ------------
+#
+# Found live 2026-10-04 on workspace-o0n.18.14: the fallback model failed it
+# twice -- the second time quoting the first word for word -- for "the test
+# suite result does not verify the specific acceptance criteria", while the
+# suite its criteria named passed 47/0. The verifier now runs that command
+# itself, and the model no longer sees earlier verdicts.
+
+CRITERIA = (
+    "1. VERIFIER COMMAND: godot --headless --path . --script tests/run_one.gd -- --suite=res://tests/x_test.gd\n"
+    "2. ASSERTIONS: the thing works.\n3. TEST-COUNT: '# fail 0'."
+)
+
+
+class CapturingModel:
+    def __init__(self, verdict="pass"):
+        self.prompt = None
+        self.verdict = verdict
+
+    def invoke(self, prompt):
+        self.prompt = prompt
+        return type("Response", (), {"content": json.dumps({"verdict": self.verdict, "reasoning": "n/a"})})()
+
+
+def _closed_ticket(title, criteria=CRITERIA, notes=()):
+    beads.ensure_initialized()
+    issue = beads.create(title, "x", acceptance_criteria=criteria)
+    beads.claim(issue["id"])
+    for n in notes:
+        beads.append_note(issue["id"], n)
+    beads.close(issue["id"], reason="done")
+    return issue["id"]
+
+
+def _godot_project(monkeypatch, run_result=None, calls=None):
+    monkeypatch.setattr(
+        verifier.toolchain, "test_command_for",
+        lambda project_id: "godot --headless --path . --script tests/run_tests.gd",
+    )
+    monkeypatch.setattr(verifier, "_tests_for", lambda issue: None)
+
+    def run(ticket_id, command, timeout=600):
+        if calls is not None:
+            calls.append(command)
+        return dict(run_result)
+
+    monkeypatch.setattr(verifier.workspaces, "run_command_for_ticket", run)
+
+
+def test_verifier_command_is_read_from_the_criteria():
+    assert verifier.verifier_command_in(CRITERIA) == (
+        "godot --headless --path . --script tests/run_one.gd -- --suite=res://tests/x_test.gd"
+    )
+    assert verifier.verifier_command_in("1. VERIFIER COMMAND: `npm test`") == "npm test"
+    assert verifier.verifier_command_in("no command here") is None
+    assert verifier.verifier_command_in(None) is None
+
+
+def test_the_tickets_own_suite_result_reaches_the_model(monkeypatch):
+    conn = _conn()
+    calls = []
+    _godot_project(monkeypatch, {"ran": 47, "passed": 47, "failed": 0, "exit": 0, "tail": "# pass 47\n# fail 0"}, calls)
+    ticket = _closed_ticket("own suite passes")
+    model = CapturingModel()
+
+    result = verify_ticket(conn, ticket, model)
+
+    assert calls == [verifier.verifier_command_in(CRITERIA)]
+    assert "THE TICKET'S SUITE PASSED: 47 tests ran and passed" in model.prompt
+    assert result["verdict"] == "pass"
+
+
+def test_a_failing_own_suite_is_a_mechanical_fail(monkeypatch):
+    conn = _conn()
+    _godot_project(monkeypatch, {"ran": 47, "passed": 45, "failed": 2, "exit": 1, "tail": "# fail 2"})
+    ticket = _closed_ticket("own suite fails")
+
+    result = verify_ticket(conn, ticket, FakeModel("should never be called"))
+
+    assert result["verdict"] == "fail"
+    assert "verifier command failed" in result["reasoning"]
+
+
+def test_an_own_suite_that_ran_nothing_is_a_mechanical_fail(monkeypatch):
+    conn = _conn()
+    _godot_project(monkeypatch, {"ran": 0, "passed": 0, "failed": 0, "exit": 0, "tail": ""})
+    ticket = _closed_ticket("own suite empty")
+
+    result = verify_ticket(conn, ticket, FakeModel("should never be called"))
+
+    assert result["verdict"] == "fail"
+    assert "ran zero tests" in result["reasoning"]
+
+
+def test_a_command_for_another_program_is_not_run(monkeypatch):
+    conn = _conn()
+    calls = []
+    _godot_project(monkeypatch, {"ran": 1, "passed": 1, "failed": 0, "exit": 0, "tail": ""}, calls)
+    ticket = _closed_ticket("smuggled command", criteria="1. VERIFIER COMMAND: rm -rf /\n2. ASSERTIONS: x")
+    model = CapturingModel()
+
+    verify_ticket(conn, ticket, model)
+
+    assert calls == [], "only the project's own test program may be run"
+    assert "NOT RUN: rm -rf /" in model.prompt
+
+
+def test_earlier_verdicts_are_withheld_from_the_model(monkeypatch):
+    conn = _conn()
+    _godot_project(monkeypatch, {"ran": 3, "passed": 3, "failed": 0, "exit": 0, "tail": ""})
+    ticket = _closed_ticket("rejudged afresh", notes=[
+        "the agent's own account of the work",
+        "verifier fail #1: the file still contains a parsing error",
+        "verifier fail #2: the file still contains a parsing error",
+    ])
+    model = CapturingModel()
+
+    verify_ticket(conn, ticket, model)
+
+    assert "the agent's own account of the work" in model.prompt
+    assert "still contains a parsing error" not in model.prompt
+    notes = beads.show(ticket).get("notes") or ""
+    assert "verifier fail #1" in notes, "the notes themselves are untouched"
