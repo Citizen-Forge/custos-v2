@@ -495,6 +495,37 @@ def _describe_criterion_run(run: dict | None) -> str:
     )
 
 
+def verdict_json(content) -> dict:
+    """The verdict object in a model's reply: the whole reply when it is bare
+    JSON, else the first JSON object in it -- inside a ```json fence or after
+    a line of prose.
+
+    Found live 2026-10-05: workspace-o0n.19.1 was failed "verifier response
+    unparseable" on a reply the local model had wrapped in a fence -- a parse
+    failure, not a judgement, on the ticket's last rework attempt. Raises
+    json.JSONDecodeError when there is no JSON object at all, which the caller
+    fails closed on as before."""
+    text = str(content or "").strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
+    if fenced:
+        text = fenced.group(1).strip()
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    while start != -1:
+        try:
+            obj, _ = decoder.raw_decode(text, start)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+        start = text.find("{", start + 1)
+    raise json.JSONDecodeError("no JSON object in the reply", text, 0)
+
+
 def _notes_for_model(notes: str | None) -> str:
     """The ticket's notes without earlier verifier verdicts.
 
@@ -662,7 +693,7 @@ def verify_ticket(conn, issue_id: str, model) -> dict | None:
         content = getattr(response, "content", response)
 
         try:
-            data = json.loads(content)
+            data = verdict_json(content)
             verdict = data["verdict"]
             reasoning = data.get("reasoning", "")
             if verdict not in ("pass", "fail"):

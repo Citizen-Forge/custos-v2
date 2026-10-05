@@ -391,3 +391,30 @@ def test_earlier_verdicts_are_withheld_from_the_model(monkeypatch):
     assert "still contains a parsing error" not in model.prompt
     notes = beads.show(ticket).get("notes") or ""
     assert "verifier fail #1" in notes, "the notes themselves are untouched"
+
+
+def test_a_fenced_or_prefixed_verdict_is_read():
+    """workspace-o0n.19.1 was failed 'unparseable' on a fenced reply from the
+    local model -- a parse failure, not a judgement."""
+    assert verifier.verdict_json('{"verdict": "pass", "reasoning": "x"}')["verdict"] == "pass"
+    assert verifier.verdict_json('```json\n{"verdict": "fail", "reasoning": "y"}\n```')["verdict"] == "fail"
+    assert verifier.verdict_json('Here is my verdict:\n{"verdict": "pass", "reasoning": "z"}')["verdict"] == "pass"
+
+
+def test_a_reply_with_no_json_still_fails_closed():
+    import json as _json
+    try:
+        verifier.verdict_json("I think it passes.")
+    except _json.JSONDecodeError:
+        return
+    raise AssertionError("prose with no JSON object must not parse")
+
+
+def test_a_fenced_pass_from_the_model_is_a_pass(monkeypatch):
+    conn = _conn()
+    _godot_project(monkeypatch, {"ran": 5, "passed": 5, "failed": 0, "exit": 0, "tail": ""})
+    ticket = _closed_ticket("fenced verdict")
+
+    result = verify_ticket(conn, ticket, FakeModel('```json\n{"verdict": "pass", "reasoning": "ok"}\n```'))
+
+    assert result["verdict"] == "pass"
