@@ -372,6 +372,51 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/metrics")
+def prometheus_metrics():
+    """Projects, tickets, agents and verdicts for Prometheus (harness/metrics.py).
+
+    Unauthenticated like /health: it carries ticket titles and states, never a
+    secret. Every source is best-effort -- a scrape that fails to read one part
+    still serves the rest, and custos_up stays 1 while this answers."""
+    from . import metrics, progress
+    from .dispatcher import held_projects, running_agents
+
+    try:
+        tree, _age = _project_tree()
+    except Exception:  # noqa: BLE001
+        tree = []
+    try:
+        agents = running_agents()
+        with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
+            activity = progress.last_activity(conn, [a["ticket_id"] for a in agents]) if agents else {}
+        for a in agents:
+            idle = progress.idle_seconds(activity.get(a["ticket_id"]))
+            a["idle_seconds"] = round(idle) if idle is not None else None
+    except Exception:  # noqa: BLE001
+        agents = []
+    try:
+        held = held_projects()
+    except Exception:  # noqa: BLE001
+        held = {}
+    verdicts: dict[str, int] = {}
+    recent: list[dict] = []
+    try:
+        with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
+            for verdict, n in conn.execute("SELECT verdict, count(*) FROM verifications GROUP BY verdict"):
+                verdicts[verdict] = n
+            for issue_id, verdict, seat_id, reasoning, at in conn.execute(
+                "SELECT issue_id, verdict, seat_id, reasoning, extract(epoch from verified_at) "
+                "FROM verifications ORDER BY verified_at DESC LIMIT 15"
+            ):
+                recent.append({"issue_id": issue_id, "verdict": verdict, "seat_id": seat_id,
+                               "reasoning": reasoning, "at": float(at)})
+    except Exception:  # noqa: BLE001
+        pass
+    body = metrics.render(tree, agents, held, verdicts, recent, None)
+    return Response(content=body, media_type="text/plain; version=0.0.4")
+
+
 @router.get("/tickets")
 def list_tickets(status: str = "ready"):
     if status == "ready":
