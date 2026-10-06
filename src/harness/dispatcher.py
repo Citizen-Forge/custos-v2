@@ -269,11 +269,14 @@ def _fronts_from(issues: list) -> dict[str, str]:
       pass bd's own answer to "can this be started": `bd ready` (open, no
       open blocker) plus the in_progress orphans. A blocked ticket is in
       neither, and its blocker takes its place.
-    - Parked for a human IS the front, and holds the project, which is the
-      point of the rule. `bd ready` returns human-labelled issues, so an
-      open one is naturally in the running; a closed one never is, and
-      verifier-exhausted tickets are closed, so they cannot stall anything
-      for good.
+    - Parked for a human is NOT the front. It used to be, on the theory that
+      a parked ticket should hold its project; in practice it starved the
+      product-owner, which brokers only the front: workspace-o0n.20.3 parked
+      after five failed runs on 2026-10-06 and the project sat idle with 14
+      ready tickets. Ordering that matters is a dependency, and `bd ready`
+      already keeps a parked ticket's dependents out of the pool; the
+      assigned path (next_assigned_ticket) has skipped parked tickets since
+      test_a_parked_ticket_does_not_stop_its_project.
 
     Fails open: a project with no issue in the pool has no front here, and
     _skip allows its candidates. A stall the operator cannot see is worse
@@ -285,6 +288,8 @@ def _fronts_from(issues: list) -> dict[str, str]:
             continue
         if not dispatchable(issue):
             continue  # projects and epics are issues too, and are never worked
+        if beads.is_flagged_for_human(issue):
+            continue  # parked: not actionable, so not the front (see above)
         if issue["id"] in parents_with_children:
             # Cannot be closed while its children are open, so it is not the
             # actionable front -- descend: its earliest open child is.

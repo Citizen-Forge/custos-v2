@@ -720,6 +720,21 @@ def test_unassigned_work_behind_the_front_is_not_brokered(monkeypatch):
     assert dispatcher.next_unassigned_ticket() is None
 
 
+def test_a_parked_front_does_not_stop_brokering(monkeypatch):
+    """A ticket parked for a human is not the front, so the product-owner
+    brokers the next one. Found live 2026-10-06: workspace-o0n.20.3 parked
+    in_progress and the project sat idle with 14 ready, unassigned tickets."""
+    issues = [
+        _issue("proj-x.1", priority=0, seat="seat-a", status="in_progress", labels=["human"]),
+        _issue("proj-x.2", seat=None),
+    ]
+    _project(monkeypatch, issues)
+
+    picked = dispatcher.next_unassigned_ticket()
+
+    assert picked is not None and picked["id"] == "proj-x.2"
+
+
 def test_the_gate_fails_open_when_the_front_cannot_be_determined(monkeypatch):
     """A stall the operator cannot see is worse than a ticket starting out
     of order -- same posture as project_hold and the toolchain preflight."""
